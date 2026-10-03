@@ -62,7 +62,7 @@ lullu passes `summary: { base, chat, voice }` in five files. The library keeps `
 
 ## Mastra version
 
-Mastra 1.51 accepts any Standard Schema with JSON Schema attached, so `createMastraTool` gives Mastra a schema that checks the procedure's input and passes the raw value on, and a pass-through output schema. The procedure parses everything exactly once; handing Mastra the procedure's own Zod schemas would apply every transform twice. Mastra 1.0.x requires Zod schemas, so the optional peer is `^1.51.0`. gey-mono bumps Mastra during its migration.
+Mastra 1.51 accepts any Standard Schema with JSON Schema attached, so `createMastraTool` gives Mastra a schema that checks the procedure's input and passes the raw value on, and a pass-through output schema. The procedure parses the raw input: transforms run during validation and again in the procedure, but never on their own output, which handing Mastra the procedure's own Zod schemas would do. Mastra 1.0.x requires Zod schemas, so the optional peer is `^1.51.0`. gey-mono bumps Mastra during its migration.
 
 ## Schema input and output
 

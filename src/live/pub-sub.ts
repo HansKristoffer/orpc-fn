@@ -163,7 +163,10 @@ export type CreatePublisher = <TEventSchema extends ZodType>(
 
 export type PubSubRuntimeOptions = {
 	transport: PubSubTransport
-	/** Called once per event dropped from a slow subscriber's queue. */
+	/**
+	 * Called once per event dropped from a slow subscriber's queue. Events wait
+	 * there before the subscriber's filter runs, so drops count unfiltered events.
+	 */
 	onDrop?: (count: number, info: { name: string; channel: string }) => void
 	/** Per-subscriber queue bound before drop-oldest (default: 1000). */
 	maxQueueSize?: number
@@ -251,6 +254,73 @@ export function createBoundedEventQueue<T>(opts: {
 	}
 }
 
+/**
+ * One subscriber's ordered, bounded delivery. Events wait in a bounded
+ * drop-oldest queue (see {@link createBoundedEventQueue}) BEFORE the
+ * subscriber's filter runs; the filter runs in order as the consumer reads,
+ * so a slow async filter neither reorders events nor lets pending work grow
+ * past `maxSize`. Overflow markers skip the filter.
+ */
+export function createSubscriberDelivery<T>(options: {
+	maxSize: number
+	accept?: ((data: T) => MaybePromise<boolean>) | undefined
+	overflowMarker?: (() => T | null) | undefined
+	onFilterError: (error: unknown) => void
+	onDrop: () => void
+}) {
+	type Item = { data: T; marker: boolean }
+	const queue = createBoundedEventQueue<Item>({
+		maxSize: options.maxSize,
+		createOverflowMarker: () => {
+			const marker = options.overflowMarker?.() ?? null
+			return marker === null ? null : { data: marker, marker: true }
+		},
+		onDrop: options.onDrop
+	})
+	let closed = false
+	let wake: (() => void) | null = null
+	const notify = () => {
+		wake?.()
+		wake = null
+	}
+
+	async function* events(): AsyncGenerator<T, void, unknown> {
+		while (!closed) {
+			const item = queue.dequeue()
+			if (!item) {
+				await new Promise<void>((resolve) => {
+					wake = resolve
+				})
+				continue
+			}
+			if (!item.marker && options.accept) {
+				try {
+					if (!(await options.accept(item.data))) continue
+				} catch (error) {
+					options.onFilterError(error)
+					continue
+				}
+				if (closed) break
+			}
+			yield item.data
+		}
+	}
+
+	return {
+		push(data: T) {
+			if (closed) return
+			queue.enqueue({ data, marker: false })
+			notify()
+		},
+		events: events(),
+		/** Stop delivering; a parked read ends at once. */
+		close() {
+			closed = true
+			notify()
+		}
+	}
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Runtime (internal: the typed surface is what `createFn` returns)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -270,16 +340,11 @@ function getResubscribeDelayMs(attempt: number): number {
 	return base + Math.floor(Math.random() * RESUBSCRIBE_MAX_JITTER_MS)
 }
 
-/** Wakes a parked iterator when its subscription closes. */
-const CLOSED = Symbol('closed')
-
 type Input = Record<string, unknown>
 
 type LocalSubscriber = {
-	input: Input
 	isActive: () => boolean
-	deliver: (data: unknown) => void
-	onFilterError: (error: unknown) => void
+	push: (data: unknown) => void
 }
 
 type Hub = {
@@ -414,11 +479,8 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 	 * applying each subscriber's own filter. The hub also owns the broker
 	 * subscription and its resubscribe backoff.
 	 */
-	function createChannelHubs(config: {
-		eventSchema: ZodType
-		filterFn: FilterFn<Input, unknown> | undefined
-	}) {
-		const { eventSchema, filterFn } = config
+	function createChannelHubs(config: { eventSchema: ZodType }) {
+		const { eventSchema } = config
 		const hubs = new Map<string, Hub>()
 
 		const createHub = (channel: string): Hub => {
@@ -432,6 +494,8 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 				markReady = resolve
 			})
 			// Parse in arrival order even when the schema is async.
+			// ponytail: unbounded while an async schema lags behind the broker;
+			// bound it if a channel can outpace its schema.
 			let parsing = Promise.resolve()
 
 			const deliver = async (raw: string) => {
@@ -445,20 +509,9 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 					})
 					return
 				}
+				// Parsed once; each subscriber filters in its own delivery.
 				for (const sub of [...subscribers]) {
-					if (!sub.isActive()) continue
-					if (!filterFn) {
-						sub.deliver(parsed)
-						continue
-					}
-					// `then` also catches a filter that throws synchronously, so one
-					// subscriber's filter cannot starve the others.
-					Promise.resolve()
-						.then(() => filterFn({ input: sub.input, data: parsed }))
-						.then((include) => {
-							if (include && sub.isActive()) sub.deliver(parsed)
-						})
-						.catch((error) => sub.onFilterError(error))
+					if (sub.isActive()) sub.push(parsed)
 				}
 			}
 
@@ -572,7 +625,7 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 
 		const getChannelName = (params: Input, context?: unknown) =>
 			resolveChannel(channel, params, context)
-		const addLocalSubscriber = createChannelHubs({ eventSchema, filterFn })
+		const addLocalSubscriber = createChannelHubs({ eventSchema })
 
 		const open: Channel['open'] = async ({ input, context, signal }) => {
 			const transport = requireTransport()
@@ -602,86 +655,75 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 
 			subscriberLogger.info(`Subscribing to ${channelName}`)
 
-			let closed = false
-			let finished = false
-			let resolveNext: ((value: unknown) => void) | null = null
 			let messageCount = 0
 			let droppedCount = 0
-			const queue = createBoundedEventQueue<unknown>({
+			const delivery = createSubscriberDelivery<unknown>({
 				maxSize: options.pubsub?.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE,
-				createOverflowMarker: () => overflowMarker?.(input) ?? null,
+				accept: filterFn && ((data) => filterFn({ input, data })),
+				overflowMarker: overflowMarker && (() => overflowMarker(input)),
+				onFilterError: (error) =>
+					subscriberLogger.error('Error processing message', {
+						error: errorMessageOf(error)
+					}),
 				onDrop: () => {
 					droppedCount++
 					options.pubsub?.onDrop?.(1, { name, channel: channelName })
 				}
 			})
-			const enqueue = (data: unknown) => {
+			// Live events wait here while the backlog replays, so replay comes first.
+			// ponytail: unbounded for the length of one backlog read.
+			let replaying: unknown[] | null = useBacklog ? [] : null
+			const push = (data: unknown) => {
 				messageCount++
-				if (resolveNext) {
-					resolveNext(data)
-					resolveNext = null
-				} else {
-					queue.enqueue(data)
-				}
+				if (replaying) replaying.push(data)
+				else delivery.push(data)
 			}
-			const wake = () => {
+
+			// The one way a subscription ends, whatever ends it: abort, drain, the
+			// stream finishing, or `close()`. Releases everything at once, even
+			// while the stream is parked or not yet read.
+			let closed = false
+			const close = (...error: [] | [unknown]) => {
+				if (closed) return
 				closed = true
-				resolveNext?.(CLOSED)
-				resolveNext = null
-			}
-			const next = () =>
-				new Promise<unknown>((resolve) => {
-					if (queue.length > 0) resolve(queue.dequeue())
-					else if (closed) resolve(CLOSED)
-					else resolveNext = resolve
-				})
-
-			const local = addLocalSubscriber(channelName, {
-				input,
-				isActive: () => !closed,
-				deliver: enqueue,
-				onFilterError: (error) =>
-					subscriberLogger.error('Error processing message', {
-						error: errorMessageOf(error)
-					})
-			})
-			activeSubscriberCleanups.add(wake)
-			signal?.addEventListener('abort', wake)
-			if (signal?.aborted) wake()
-
-			const finish = (error?: unknown) => {
-				if (finished) return
-				finished = true
-				wake()
-				activeSubscriberCleanups.delete(wake)
-				signal?.removeEventListener('abort', wake)
+				delivery.close()
+				activeSubscriberCleanups.delete(stop)
+				signal?.removeEventListener('abort', stop)
 				local.remove()
 				const durationMs = performance.now() - startTime
 				span?.setAttribute('pubsub.duration_ms', durationMs)
 				span?.setAttribute('pubsub.message_count', messageCount)
 				span?.setAttribute('pubsub.dropped_count', droppedCount)
-				if (error === undefined) tracing.end(span)
-				else tracing.end(span, error)
+				tracing.end(span, ...error)
 				subscriberLogger.info(`Unsubscribed from ${channelName}`, {
 					messageCount,
 					droppedCount,
 					durationMs: Math.round(durationMs)
 				})
 			}
+			const stop = () => close()
+			const local = addLocalSubscriber(channelName, {
+				isActive: () => !closed,
+				push
+			})
+			activeSubscriberCleanups.add(stop)
+			signal?.addEventListener('abort', stop)
+			if (signal?.aborted) close()
 
-			// Subscribed (or first attempt failed and retrying) before returning,
-			// so nothing published after `open` resolves is missed.
+			// Subscribed before returning, so nothing published after `open`
+			// resolves is missed.
+			// ponytail: a failed first attempt also settles `ready` (the hub keeps
+			// retrying); events published before a retry succeeds are lost.
 			await local.ready
-			if (useBacklog && !closed) {
+			if (replaying && !closed) {
 				try {
 					const items = await transport.readBacklog(channelName)
 					span?.setAttribute('pubsub.backlog_count', items.length)
 					for (const raw of items) {
 						if (closed) break
 						try {
-							const data = await eventSchema.parseAsync(decodePayload(raw))
-							if ((!filterFn || (await filterFn({ input, data }))) && !closed)
-								enqueue(data)
+							messageCount++
+							delivery.push(await eventSchema.parseAsync(decodePayload(raw)))
 						} catch {
 							// Ignore malformed backlog entries
 						}
@@ -693,20 +735,20 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 					})
 				}
 			}
+			// ponytail: an event both in the backlog and arriving live is delivered
+			// twice; events carry no id to dedupe on.
+			for (const data of replaying ?? []) delivery.push(data)
+			replaying = null
 
 			async function* events() {
 				try {
-					while (!closed) {
-						const message = await next()
-						if (message === CLOSED) break
-						yield message
-					}
+					yield* delivery.events
 				} finally {
-					finish()
+					close()
 				}
 			}
 
-			return { events: events(), close: () => finish() }
+			return { events: events(), close: () => close() }
 		}
 
 		const { publish, publishMany } = createChannelPublisher({

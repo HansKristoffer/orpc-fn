@@ -29,7 +29,6 @@ import {
 	type SpanOf
 } from './otel.js'
 import { createRouter } from './router.js'
-import { isAsyncIteratorObject, onStreamEnd } from './stream.js'
 import {
 	type AnyFnContext,
 	type BuilderLike,
@@ -319,15 +318,65 @@ export function createFn<
 			meta,
 			input,
 			output,
-			handler: (params) =>
-				tracing.inSpan(name, 'SERVER', async (span) => {
-					const { context, signal } = params
-					const startTime = performance.now()
-					const logger = createLogger('fn', span)
-					const elapsedMs = () =>
-						Math.round((performance.now() - startTime) * 100) / 100
-					// Runs before `inSpan` ends the span, so these attributes land on it.
-					const complete = (...error: [] | [unknown]) => {
+			handler: (params) => {
+				const { context, signal } = params
+				const startTime = performance.now()
+				const elapsedMs = () =>
+					Math.round((performance.now() - startTime) * 100) / 100
+				let logger: FnLogger = defaultLogger
+				return tracing.inSpan(
+					name,
+					'SERVER',
+					async (span) => {
+						logger = createLogger('fn', span)
+						span?.setAttribute('fn.operation', name)
+						span?.setAttribute('fn.procedure', key)
+						const attributes = runtime.spanAttributes?.({
+							context,
+							name,
+							procedure: key,
+							meta
+						})
+						for (const [attribute, value] of Object.entries(attributes ?? {})) {
+							if (value !== undefined) span?.setAttribute(attribute, value)
+						}
+						try {
+							for (const [guard, value] of guardChecks) {
+								await guards[guard]?.(value, {
+									context,
+									input: params.input,
+									name,
+									procedure: key,
+									meta,
+									signal
+								})
+							}
+							const extras = await runtime.extras?.({
+								context,
+								span,
+								signal,
+								name,
+								procedure: key
+							})
+							return await handler({
+								...(extras as object | undefined),
+								input: params.input,
+								context,
+								call: createBoundCall(context, signal, tracing),
+								signal,
+								span,
+								logger
+							})
+						} finally {
+							// Server-Timing reports the time until the result (or stream) exists.
+							const timing = context.timing
+							if (typeof timing === 'object' && timing !== null) {
+								;(timing as Record<string, unknown>).handler_ms = elapsedMs()
+							}
+						}
+					},
+					// After the result, or after a returned stream ends; before the span ends.
+					(span, ...error) => {
 						const durationMs = elapsedMs()
 						span?.setAttribute('fn.duration_ms', durationMs)
 						logCompleted(logger, {
@@ -342,65 +391,8 @@ export function createFn<
 							meta
 						})
 					}
-					// Server-Timing reports the time until the result (or stream) exists.
-					const recordHandlerTiming = () => {
-						const timing = context.timing
-						if (typeof timing === 'object' && timing !== null) {
-							;(timing as Record<string, unknown>).handler_ms = elapsedMs()
-						}
-					}
-					try {
-						span?.setAttribute('fn.operation', name)
-						span?.setAttribute('fn.procedure', key)
-						const attributes = runtime.spanAttributes?.({
-							context,
-							name,
-							procedure: key,
-							meta
-						})
-						for (const [attribute, value] of Object.entries(attributes ?? {})) {
-							if (value !== undefined) span?.setAttribute(attribute, value)
-						}
-
-						for (const [guard, value] of guardChecks) {
-							await guards[guard]?.(value, {
-								context,
-								input: params.input,
-								name,
-								procedure: key,
-								meta,
-								signal
-							})
-						}
-
-						const extras = await runtime.extras?.({
-							context,
-							span,
-							signal,
-							name,
-							procedure: key
-						})
-						const result = await handler({
-							...(extras as object | undefined),
-							input: params.input,
-							context,
-							call: createBoundCall(context, signal, tracing),
-							signal,
-							span,
-							logger
-						})
-						recordHandlerTiming()
-						// A stream is complete when it ends, not when it is returned.
-						if (isAsyncIteratorObject(result))
-							return onStreamEnd(result, complete)
-						complete()
-						return result
-					} catch (error) {
-						recordHandlerTiming()
-						complete(error)
-						throw error
-					}
-				})
+				)
+			}
 		})
 	}
 

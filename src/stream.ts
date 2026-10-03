@@ -11,15 +11,20 @@ export function isAsyncIteratorObject(
 	)
 }
 
+/** Runs one step of a stream inside some context (e.g. its tracing span). */
+export type StreamScope = <T>(step: () => T) => T
+
 /**
  * Wraps a stream so `finish` runs once when it ends: after the last item,
  * when it throws (with the error), or when the consumer stops early with
  * `return()` - also before the first `next()`, which a plain async generator
- * wrapper would miss.
+ * wrapper would miss. With `scope`, every `next`/`return`/`throw` runs inside
+ * it: a generator's body runs on those calls, long after it was created.
  */
 export function onStreamEnd<T>(
 	stream: AsyncIterator<T> & AsyncIterable<T>,
-	finish: (...error: [] | [unknown]) => void
+	finish: (...error: [] | [unknown]) => void,
+	scope: StreamScope = (step) => step()
 ): AsyncIterator<T> & AsyncIterable<T> {
 	let finished = false
 	const done = (...error: [] | [unknown]) => {
@@ -38,11 +43,11 @@ export function onStreamEnd<T>(
 		}
 	}
 	const wrapped: AsyncIterator<T> & AsyncIterable<T> = {
-		next: (...args) => settle(() => stream.next(...args)),
+		next: (...args) => settle(() => scope(() => stream.next(...args))),
 		return: (value) =>
-			settle(() => stream.return?.(value)).finally(() => done()),
+			settle(() => scope(() => stream.return?.(value))).finally(() => done()),
 		throw: (error) =>
-			settle(() => stream.throw?.(error) ?? Promise.reject(error)),
+			settle(() => scope(() => stream.throw?.(error) ?? Promise.reject(error))),
 		[Symbol.asyncIterator]: () => wrapped
 	}
 	return wrapped

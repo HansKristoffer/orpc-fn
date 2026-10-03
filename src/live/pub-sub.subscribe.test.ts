@@ -196,6 +196,60 @@ describe('createPubSub subscribe lifecycle', () => {
 		await pending
 	})
 
+	test('abort releases the broker while the stream is parked after a yield', async () => {
+		const { abort, iterator } = await openSubscription('a')
+		const first = iterator.next()
+		await settle()
+		emit('test:orders', { orderId: 'a', status: 'one' })
+		await first
+		// The consumer has not asked for the next item: nothing resumes the
+		// generator, yet the subscription must be gone.
+		abort.abort()
+
+		expect(activePubSubSubscriberCount()).toBe(0)
+		expect(unsubscribeCalls).toEqual(['test:orders'])
+		await iterator.return(undefined)
+	})
+
+	test('live events arriving during backlog replay follow it; drain mid-replay releases once', async () => {
+		let releaseBacklog = () => {}
+		const original = transport.readBacklog
+		transport.readBacklog = async () => {
+			await new Promise<void>((resolve) => {
+				releaseBacklog = resolve
+			})
+			return [JSON.stringify({ orderId: 'a', status: 'old' })]
+		}
+		try {
+			const { abort, iterator } = await openSubscription('a')
+			const first = iterator.next()
+			await settle()
+			emit('test:orders', { orderId: 'a', status: 'new' })
+			releaseBacklog()
+
+			expect((await first).value).toEqual({ orderId: 'a', status: 'old' })
+			expect((await iterator.next()).value).toEqual({
+				orderId: 'a',
+				status: 'new'
+			})
+			abort.abort()
+			await iterator.return(undefined)
+
+			const second = await openSubscription('a')
+			const pending = second.iterator.next()
+			await settle()
+			// Still reading the backlog: drain releases now, and only once.
+			expect(drainPubSubSubscribers()).toBe(1)
+			expect(drainPubSubSubscribers()).toBe(0)
+			expect(unsubscribeCalls).toEqual(['test:orders', 'test:orders'])
+			releaseBacklog()
+			expect((await pending).done).toBe(true)
+			expect(unsubscribeCalls).toEqual(['test:orders', 'test:orders'])
+		} finally {
+			transport.readBacklog = original
+		}
+	})
+
 	test('a lost subscription schedules one backed-off resubscribe', async () => {
 		const scheduled: Array<{ run: () => void; delayMs: number }> = []
 		const { abort, iterator } = await openSubscription('a')

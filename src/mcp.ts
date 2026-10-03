@@ -24,7 +24,7 @@ export type McpTool = {
 		description?: string
 		/**
 		 * Validates and coerces (date strings to `Date`) but returns the raw
-		 * input: pass it to `call(procedure, args)`, which parses it once.
+		 * input: pass it to `call(procedure, args)`, which parses it.
 		 */
 		inputSchema?: ToolSchema
 		annotations: { readOnlyHint: boolean }

@@ -122,7 +122,7 @@ The `subscribe` route first runs `authFn` and subscribes to the channel, then st
 - `overflowMarker` is enqueued when a slow subscriber's queue overflows, once per overflow episode, so the client can resync.
 - `safePublish` logs publish errors instead of throwing them.
 
-**`createPubSub`** returns a typed `subscribe` route plus `publish`, `publishMany` (one atomic round-trip across channels) and `getChannelName`. Publishers pass the event schema's input type; subscribers, filters and channel resolvers get its output type. The raw event travels in oRPC's JSON format, so `Date`, `Map`, `Set` and `BigInt` survive, and each receiver parses it once. Options: `filterFn`, `authFn`, `mirrorChannel`, `overflowMarker`, `procedure`. Each pub/sub definition subscribes to each channel once and parses each payload once for all local subscribers. A lost subscription is retried with exponential backoff and jitter. **`createPublisher`** is the publish-only half.
+**`createPubSub`** returns a typed `subscribe` route plus `publish`, `publishMany` (one atomic round-trip across channels) and `getChannelName`. Publishers pass the event schema's input type; subscribers, filters and channel resolvers get its output type. The raw event travels in oRPC's JSON format, so `Date`, `Map`, `Set` and `BigInt` survive, and each receiver parses it once. Options: `filterFn`, `authFn`, `mirrorChannel`, `overflowMarker`, `procedure`. Each pub/sub definition subscribes to each channel once and parses each payload once for all local subscribers. Each subscriber then runs its filter in arrival order as it reads; its bounded queue holds events before filtering, so `onDrop` counts unfiltered events. Abort and drain release a subscription at once, even one that is not being read. A lost subscription is retried with exponential backoff and jitter. **`createPublisher`** is the publish-only half.
 
 **Graceful shutdown:** call `drainPubSubSubscribers()` on SIGTERM. Open streams end cleanly and clients reconnect to the new deployment. Draining is per `createFn` instance.
 
@@ -151,7 +151,7 @@ const tool = createMastraTool(getOrder, { requireApproval: true })
 
 Options: `id`, `description`, `requireApproval`, `allowMissingInputSchema`, `onExecuteFinish`, `contextKey` (default `'orpcContext'`). Execution goes through oRPC `call`, so middleware and guards apply.
 
-The tool takes the procedure's raw input and returns its parsed output, and `InferToolInput`/`InferToolOutput`/`InferUITools` see exactly those types. Mastra validates the input (coercing date strings) but passes the raw value on, so the procedure parses it once. Agent tools need an object input: any other input is a type error and throws.
+The tool takes the procedure's raw input and returns its parsed output, and `InferToolInput`/`InferToolOutput`/`InferUITools` see exactly those types. Mastra validates the input (coercing date strings) but passes the raw value on, and the procedure parses that raw value: a transform may run twice, but never on its own output. Agent tools need an object input: any other input is a type error and throws.
 
 ## `orpc-fn/mcp`
 
@@ -165,7 +165,7 @@ for (const { name, procedure, config } of listTools(router, { filter: hasTag('ex
 }
 ```
 
-Tool names are the sanitized `fn` names (`user.me` becomes `user-me`). Input schemas carry the same JSON Schema as your OpenAPI docs (dates become `string`/`date-time`), and validation turns them back into `Date`s. Validation returns the raw arguments, so `call(procedure, args, { context })` parses them exactly once. `readOnlyHint` defaults to GET routes; pass `readOnly` to change it. `hasTag(tag)` also works as an oRPC `OpenAPIHandler` filter.
+Tool names are the sanitized `fn` names (`user.me` becomes `user-me`). Input schemas carry the same JSON Schema as your OpenAPI docs (dates become `string`/`date-time`), and validation turns them back into `Date`s. Validation returns the raw arguments, and `call(procedure, args, { context })` parses those: a transform may run twice, but never on its own output. `readOnlyHint` defaults to GET routes; pass `readOnly` to change it. `hasTag(tag)` also works as an oRPC `OpenAPIHandler` filter.
 
 ## `orpc-fn/hono`
 

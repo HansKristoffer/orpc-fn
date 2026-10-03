@@ -1,4 +1,8 @@
-import { isAsyncIteratorObject, onStreamEnd } from './stream.js'
+import {
+	isAsyncIteratorObject,
+	onStreamEnd,
+	type StreamScope
+} from './stream.js'
 
 /** Attribute values accepted by OpenTelemetry spans. */
 export type AttributeValue = string | number | boolean
@@ -38,22 +42,36 @@ export interface OtelApiLike<TSpan extends SpanLike = SpanLike> {
 		SERVER: number
 		PRODUCER: number
 	}
+	/** Restores a span's context for each step of a stream it returned. */
+	context: {
+		active(): unknown
+		with<T>(context: never, fn: () => T): T
+	}
 }
 
 /** The span type of an OpenTelemetry API, or `SpanLike` when absent. */
 export type SpanOf<TOtel> =
 	TOtel extends OtelApiLike<infer TSpan> ? TSpan : SpanLike
 
+/** Called once when a span's work is done, before the span ends. */
+export type OnSettled = (
+	span: SpanLike | undefined,
+	...error: [] | [unknown]
+) => void
+
 export type Tracing = {
 	/**
 	 * Run `fn` inside an active span: OK when it resolves, ERROR when it throws,
-	 * ended either way. When `fn` resolves to a stream, the span stays open
-	 * until the stream ends. Without OpenTelemetry `span` is undefined.
+	 * ended either way. When `fn` resolves to a stream, the span stays open -
+	 * and active for each step of the stream - until the stream ends.
+	 * `onSettled` runs once at that point, before the span ends. Without
+	 * OpenTelemetry `span` is undefined and `onSettled` still runs.
 	 */
 	inSpan<T>(
 		name: string,
 		kind: 'INTERNAL' | 'SERVER' | 'PRODUCER',
-		fn: (span: SpanLike | undefined) => Promise<T>
+		fn: (span: SpanLike | undefined) => Promise<T>,
+		onSettled?: OnSettled
 	): Promise<T>
 	/** Start a span that the caller ends with `end` (long-lived streams). */
 	startSpan(
@@ -81,25 +99,42 @@ export function createTracing(otel: OtelApiLike | undefined): Tracing {
 		span.end()
 	}
 	return {
-		inSpan(name, kind, fn) {
-			if (!tracer || !otel) return fn(undefined)
+		inSpan(name, kind, fn, onSettled) {
+			const settle = (span: SpanLike | undefined, ...error: [] | [unknown]) => {
+				try {
+					onSettled?.(span, ...error)
+				} finally {
+					end(span, ...error)
+				}
+			}
+			const run = async (
+				span: SpanLike | undefined,
+				scope?: StreamScope
+			): Promise<Awaited<ReturnType<typeof fn>>> => {
+				let result: Awaited<ReturnType<typeof fn>>
+				try {
+					result = await fn(span)
+				} catch (error) {
+					settle(span, error)
+					throw error
+				}
+				if (isAsyncIteratorObject(result)) {
+					return onStreamEnd(
+						result,
+						(...error) => settle(span, ...error),
+						scope
+					) as typeof result
+				}
+				settle(span)
+				return result
+			}
+			if (!tracer || !otel) return run(undefined)
 			return tracer.startActiveSpan(
 				name,
 				{ kind: otel.SpanKind[kind] },
-				async (span) => {
-					try {
-						const result = await fn(span)
-						if (isAsyncIteratorObject(result)) {
-							return onStreamEnd(result, (...error) =>
-								end(span, ...error)
-							) as typeof result
-						}
-						end(span)
-						return result
-					} catch (error) {
-						end(span, error)
-						throw error
-					}
+				(span) => {
+					const active = otel.context.active()
+					return run(span, (step) => otel.context.with(active as never, step))
 				}
 			)
 		},

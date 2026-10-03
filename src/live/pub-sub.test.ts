@@ -5,7 +5,7 @@ import type {
 } from '@orpc/server'
 import { z } from 'zod'
 import { createPubSub, createRouter, readMeta } from '../../tests/fixture.js'
-import { createBoundedEventQueue } from './pub-sub.js'
+import { createBoundedEventQueue, createSubscriberDelivery } from './pub-sub.js'
 
 type IsAny<T> = 0 extends 1 & T ? true : false
 type Assert<T extends true> = T
@@ -665,5 +665,59 @@ describe('bounded message queue (createBoundedEventQueue)', () => {
 		const drained = drainAll(queue)
 		expect(drained[drained.length - 1]?.n).toBe(MAX_QUEUE_SIZE)
 		expect(drained.some((e) => e.kind === 'pubsubDrop')).toBe(false)
+	})
+})
+
+describe('createSubscriberDelivery', () => {
+	const take = async (events: AsyncGenerator<number>, count: number) => {
+		const out: number[] = []
+		for (let i = 0; i < count; i++)
+			out.push((await events.next()).value as number)
+		return out
+	}
+
+	test('a slow async filter keeps arrival order', async () => {
+		const delivery = createSubscriberDelivery<number>({
+			maxSize: 10,
+			// Earlier events take longer to filter.
+			accept: (n) => Bun.sleep(5 - n).then(() => n !== 2),
+			onFilterError: () => {},
+			onDrop: () => {}
+		})
+		for (const n of [0, 1, 2, 3, 4]) delivery.push(n)
+		expect(await take(delivery.events, 4)).toEqual([0, 1, 3, 4])
+	})
+
+	test('pending work is bounded and the marker skips the filter', async () => {
+		let drops = 0
+		const filtered: number[] = []
+		const delivery = createSubscriberDelivery<number>({
+			maxSize: 2,
+			accept: (n) => {
+				filtered.push(n)
+				return n >= 0
+			},
+			overflowMarker: () => -1,
+			onFilterError: () => {},
+			onDrop: () => drops++
+		})
+		for (const n of [0, 1, 2, 3]) delivery.push(n)
+		expect(await take(delivery.events, 2)).toEqual([-1, 3])
+		// Dropped events never reach the filter; the marker never does.
+		expect(filtered).toEqual([3])
+		expect(drops).toBe(2)
+	})
+
+	test('close ends a parked read and is idempotent', async () => {
+		const delivery = createSubscriberDelivery<number>({
+			maxSize: 2,
+			onFilterError: () => {},
+			onDrop: () => {}
+		})
+		const pending = delivery.events.next()
+		delivery.close()
+		delivery.close()
+		delivery.push(1)
+		expect((await pending).done).toBe(true)
 	})
 })

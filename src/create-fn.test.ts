@@ -488,3 +488,63 @@ describe('streaming routes', () => {
 		expect(ended).toEqual(['test.ticks'])
 	})
 })
+
+describe('stream steps run inside their span', async () => {
+	const { AsyncLocalStorage } = await import('node:async_hooks')
+	type FakeSpan = { name: string; parent: string | undefined }
+	const storage = new AsyncLocalStorage<FakeSpan>()
+	const spans: FakeSpan[] = []
+	const tracingOtel = {
+		...otel,
+		context: {
+			active: () => storage.getStore(),
+			with: <T>(context: FakeSpan, fn: () => T) => storage.run(context, fn)
+		},
+		trace: {
+			getTracer: () => ({
+				startActiveSpan: (
+					name: string,
+					_options: unknown,
+					run: (span: unknown) => unknown
+				) => {
+					const span = { name, parent: storage.getStore()?.name }
+					spans.push(span)
+					return storage.run(span, () =>
+						run({
+							setAttribute() {},
+							setStatus() {},
+							recordException() {},
+							end() {}
+						})
+					)
+				},
+				startSpan: () => ({})
+			})
+		}
+	} as unknown as typeof otel
+
+	test('a nested call inside a stream is a child of the stream span', async () => {
+		const { fn } = createFn({
+			procedures: { public: os },
+			default: 'public',
+			logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+			otel: tracingOtel
+		})
+		const inner = fn({ name: 'inner', handler: () => 1 })
+		const outer = fn({
+			name: 'outer',
+			handler: async function* ({ call }) {
+				yield 0
+				await Bun.sleep(1)
+				yield await call(inner, undefined)
+			}
+		})
+		const stream = await call(outer, undefined)
+		const values: unknown[] = []
+		for await (const value of stream) values.push(value)
+		expect(values).toEqual([0, 1])
+		expect(
+			spans.map(({ name, parent }) => `${parent ?? '-'} > ${name}`)
+		).toEqual(['- > outer', 'outer > call: inner', 'call: inner > inner'])
+	})
+})

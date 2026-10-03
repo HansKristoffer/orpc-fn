@@ -40,9 +40,9 @@ function toJsonSchema(
 }
 
 /**
- * Tool input that validates like the procedure but returns the RAW input, so
- * the procedure's own input schema parses it exactly once (transforms would
- * otherwise run twice). Zod's JSON Schema export rejects types like
+ * Tool input that validates like the procedure but returns the RAW input for
+ * the procedure's own input schema to parse. Transforms run in both passes
+ * but never on their own output, which handing over the parsed value would do. Zod's JSON Schema export rejects types like
  * `z.date()`; oRPC's converter gives the same JSON Schema as the OpenAPI docs
  * (dates become string/date-time), and clients send those dates as strings,
  * so values are coerced back before validating.

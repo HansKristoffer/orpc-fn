@@ -56,7 +56,7 @@ type ObjectInputCheck<TProc> =
  * (`requestContext.set('orpcContext', context)`), so auth and guards apply.
  *
  * Mastra checks the input against the procedure's schema (with dates coerced
- * from strings) but passes the raw input on, so the procedure parses it once;
+ * from strings) but passes the raw input on for the procedure to parse;
  * the output is the procedure's parsed result, passed through unchanged.
  */
 export function createMastraTool<TProc extends AnyProcedure>(
