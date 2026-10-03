@@ -68,7 +68,8 @@ jobs:
         peers: [minimum, latest]
     env:
       PEER_PROFILE: ${{ matrix.peers }}
-      TYPESCRIPT_VERSION: ${{ matrix.peers == 'minimum' && '5.7.3' || '5.9.3' }}
+      # The floor (README: TypeScript 5.7+); otherwise the repo's own TypeScript.
+      TYPESCRIPT_VERSION: ${{ matrix.peers == 'minimum' && '5.7.3' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

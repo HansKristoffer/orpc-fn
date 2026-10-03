@@ -3,6 +3,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const root = new URL('../', import.meta.url).pathname
+// Consumers type-check with the repo's own TypeScript unless told otherwise.
+const rootTypeScript: string = (
+	await Bun.file(join(root, 'node_modules/typescript/package.json')).json()
+).version
 const fixture = await mkdtemp(join(tmpdir(), 'orpc-fn-consumer-'))
 async function run(
 	args: string[],
@@ -96,7 +100,7 @@ try {
 	await install([
 		...versions(optional),
 		'@types/node@22',
-		`typescript@${process.env.TYPESCRIPT_VERSION ?? '5.9.3'}`
+		`typescript@${process.env.TYPESCRIPT_VERSION || rootTypeScript}`
 	])
 	await run([...node, 'smoke.mjs'], fixture, { WITH_OPTIONAL_PEERS: '1' })
 	await cp(join(root, 'tests/consumers/types.ts'), join(fixture, 'types.ts'))

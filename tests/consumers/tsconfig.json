@@ -1,10 +1,9 @@
 {
 	"extends": "../../tsconfig.json",
 	"compilerOptions": {
-		"baseUrl": "../..",
 		"paths": {
-			"orpc-fn": ["src/index.ts"],
-			"orpc-fn/*": ["src/*.ts", "src/*/index.ts"]
+			"orpc-fn": ["../../src/index.ts"],
+			"orpc-fn/*": ["../../src/*.ts", "../../src/*/index.ts"]
 		}
 	},
 	"include": ["types.ts"]
