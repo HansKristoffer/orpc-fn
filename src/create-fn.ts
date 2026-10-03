@@ -38,7 +38,7 @@ import {
 	type CurrentContextOf,
 	type BuilderLike,
 	type FiniteExtras,
-	type FiniteScopedExtras,
+	type ScopedExtrasGuard,
 	type Fn,
 	type FnCompletedEvent,
 	type FnDefinition,
@@ -115,7 +115,7 @@ export type CreateFnOptions<
 			signal: AbortSignal | undefined
 			name: string
 			procedure: K
-		}) => MaybePromise<TScoped[K]>
+		}) => MaybePromise<TScoped[K] & ScopedExtrasGuard<NoInfer<TScoped[K]>>>
 	}
 	/**
 	 * Checks run before the handler; each key becomes a typed `fn()` option.
@@ -240,8 +240,7 @@ export function createFn<
 		TLogger,
 		TScoped
 	> &
-		FiniteExtras<NoInfer<TExtras>> &
-		FiniteScopedExtras<NoInfer<TScoped>>
+		FiniteExtras<NoInfer<TExtras>>
 ): FnFactory<
 	Definition<
 		TProcedures,

@@ -70,7 +70,7 @@ createFn({
   spanAttributes,  // ({ context, name, procedure, meta }) => extra span attributes
   onCompleted,     // (event) => extra attributes for the fn.completed log
   isExpectedError, // default: 4xx ORPCError or AbortError
-  pubsub           // { transport, namespace?, ownsTransport?, maxQueueSize?, maxIngressSize?, maxReplaySize?, initializationTimeoutMs?, onDrop?, onMetric? } for fnLive / createPubSub
+  pubsub           // { transport (or () => transport, created on first use), namespace?, ownsTransport?, maxQueueSize?, maxIngressSize?, maxReplaySize?, initializationTimeoutMs?, onDrop?, onMetric? } for fnLive / createPubSub
 })
 ```
 
@@ -88,7 +88,7 @@ Procedure builders must not set an input or output schema (`os.input(...)`); put
 
 Completion hooks discriminate by `procedure` and `handlerStarted`. Before handler context exists (auth/input failure), they receive the initial context. Logging, tracing, metrics and completion-hook failures preserve procedure results. Custom log fields cannot overwrite canonical completion fields. Stream completion runs once when the stream ends.
 
-Also exported: `defineMeta`, `createStreamManifest`, `createStreamManifestAsync`, `isExpectedClientError`, `createBoundedEventQueue`, `createRouter`, `createBoundCall`, and the types `HandlerParams`, `RouteConfig`, `BoundCall`, `FnMeta`, `FnContext`, `FnCompletedEvent`, `ProcedureInput`, `ProcedureOutput`, `ProcedureContext`, `InitialContextOf`, `CurrentContextOf` and `GuardOptions`.
+Also exported: `defineMeta`, `createStreamManifest`, `createStreamManifestAsync`, `renderStreamManifest`, `isExpectedClientError`, `createBoundedEventQueue`, `createRouter`, `createBoundCall`, and the types `HandlerParams`, `RouteConfig`, `BoundCall`, `FnMeta`, `FnContext`, `FnCompletedEvent`, `ProcedureInput`, `ProcedureOutput`, `ProcedureContext`, `InitialContextOf`, `CurrentContextOf` and `GuardOptions`.
 
 ## `orpc-fn/live`: pub/sub and live queries
 
@@ -96,10 +96,14 @@ Also exported: `defineMeta`, `createStreamManifest`, `createStreamManifestAsync`
 import { createFn } from 'orpc-fn'
 import { bunRedisTransport } from 'orpc-fn/live/redis-bun' // or ioredis / memory
 
-const transport = bunRedisTransport(new RedisClient(process.env.REDIS_URL))
 export const { fnLive, createPubSub, drainPubSubSubscribers } = createFn({
   /* … */,
-  pubsub: { transport, onDrop: (count) => dropCounter.add(count) }
+  pubsub: {
+    // A function defers the connection until the first publish or subscribe.
+    transport: () => bunRedisTransport(new RedisClient(process.env.REDIS_URL)),
+    ownsTransport: true,
+    onDrop: (count) => dropCounter.add(count)
+  }
 })
 
 export const listOrders = fnLive({
@@ -128,7 +132,7 @@ The `subscribe` route runs builder middleware and the same fn guards/extras/meta
 
 **`createPubSub`** returns a typed `subscribe` route plus `publish`, `publishMany` (one atomic round-trip across channels) and typed `getSubscriptionChannelName({ input, context })` / `getPublishChannelName(event)` methods. The shared partial-input `getChannelName` method is deprecated. Publishers pass the event schema's input type; subscribers, filters and channel resolvers get its output type. The raw event travels in oRPC's JSON format, so `Date`, `Map`, `Set` and `BigInt` survive, and each receiver parses it once. Options include `filterFn`, `authFn`, `mirrorChannel`, `overflowMarker`, `procedure`, configured guards and `meta`. Channels may be static or use `channel: { subscribe: ({ input, context }) => key, publish: (parsedEvent) => key }`. Carry publishing tenant keys in the event. A factory `namespace` prefixes channels, mirrors and backlog keys. Each pub/sub definition subscribes to each channel once and parses each payload once for all local subscribers. Each subscriber then runs its filter in arrival order as it reads; its bounded queue holds events before filtering, so `onDrop` counts unfiltered events. Abort and drain release a subscription at once, even one that is not being read. A lost subscription is retried with exponential backoff and jitter. **`createPublisher`** is the publish-only half.
 
-**Graceful shutdown:** `await shutdown()` stops new subscriptions/publication, cancels initialization/retries, ends existing streams and awaits cleanup. It closes a supplied transport only with `ownsTransport: true`. A custom transport whose pending `subscribe` cannot be cancelled may resolve later; that late subscription is immediately released. `drainPubSubSubscribers()` remains a synchronous, nonterminal operation. Both are per factory.
+**Graceful shutdown:** `await shutdown()` stops new subscriptions/publication, cancels initialization/retries, ends existing streams and awaits cleanup. It closes a supplied transport only with `ownsTransport: true`, and a lazy `transport: () => …` only if it was ever created; it is never created during or after shutdown. A custom transport whose pending `subscribe` cannot be cancelled may resolve later; that late subscription is immediately released. `drainPubSubSubscribers()` remains a synchronous, nonterminal operation. Both are per factory.
 
 Recent event IDs deduplicate replay/live overlap; legacy payloads remain readable. Replay is bounded and TTL-limited, so it is not durable resume. A snapshot may already include a queued delta: reducers must use revisions or idempotence. See [the revision example](examples/adoption/revisions.ts). Parsing ingress, replay staging and subscriber queues are bounded; positive queue/TTL/time options are validated.
 
@@ -163,7 +167,7 @@ The tool takes the procedure's raw input and returns its parsed output, and `Inf
 
 Optional peers: `@orpc/zod`, `@orpc/json-schema`.
 
-Inspection definitions from `listTools` use Standard Schema and are not `McpServer.registerTool` configs. Executable registration is a separate optional entry point, with SDK `@modelcontextprotocol/sdk` ^1.32.0:
+Inspection definitions from `listTools` use Standard Schema and are not `McpServer.registerTool` configs. Executable registration is a separate optional entry point per SDK major: `orpc-fn/mcp/sdk` for `@modelcontextprotocol/sdk` ^1.32.0 and `orpc-fn/mcp/server` for `@modelcontextprotocol/server` ^2.0.0:
 
 ```ts
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -176,6 +180,16 @@ registerMcpTools(server, router, {
   context: ({ signal }) => authenticateToolRequest(signal)
 })
 // Connect your SDK transport; see examples/adoption/mcp.ts.
+```
+
+For MCP SDK v2 (`@modelcontextprotocol/server` ^2.0.0), import the same `registerMcpTools` from `orpc-fn/mcp/server` instead; options and behaviour are identical:
+
+```ts
+import { McpServer } from '@modelcontextprotocol/server'
+import { registerMcpTools } from 'orpc-fn/mcp/server'
+
+const mcp = new McpServer({ name: 'api', version: '1.0.0' }, { capabilities: { tools: {} } })
+registerMcpTools(mcp.server, router, { filter: hasTag('external'), context })
 ```
 
 The adapter installs the SDK list/call handlers on a low-level `Server` (also accessible as `McpServer.server`). Use one registration per server; these handlers own its tool list. It forwards cancellation, validates/coerces arguments, applies procedure authorization, and formats results as JSON/text MCP content. Override `formatResult` for images, structured content or other presentation. Tool selection is required. Object unions are supported; streams are rejected. Resolve lazy routers first with oRPC's `unlazyRouter`.
@@ -230,7 +244,14 @@ export const orpc = createTanstackQueryUtils(client) // Vue Query or React Query
 if (hasOrpcErrorCode(error, 'NOT_FOUND')) { /* … */ }
 ```
 
-`createRpcLink` takes every `RPCLink` option. It also batches parallel calls into one request, matching `mountOrpc`'s server-side batching (`batch: { maxSize, exclude, groups }`, or `false` to turn it off). A batch is one request with one client context, so by default only calls without a client context are batched; pass `groups` to batch calls that share one. A streaming response cannot be batched, and the request doesn't say whether the response will stream, so pass `streamPaths` generated from the actual router with `createStreamManifest` (or `createStreamManifestAsync` for lazy routers). Serialize it to a frontend module; importing that data needs no server runtime. Mark custom iterator routes with `stream: true` or use oRPC's `eventIterator` output schema. Generated live/pubsub routes are marked automatically. `batch.exclude` remains an escape hatch, and the legacy `subscribe` naming heuristic remains as a fallback.
+`createRpcLink` takes every `RPCLink` option. It also batches parallel calls into one request, matching `mountOrpc`'s server-side batching (`batch: { maxSize, exclude, groups }`, or `false` to turn it off). A batch is one request with one client context, so by default only calls without a client context are batched; pass `groups` to batch calls that share one. A streaming response cannot be batched, and the request doesn't say whether the response will stream, so pass `streamPaths` generated from the actual router with `createStreamManifest` (or `createStreamManifestAsync` for lazy routers). Serialize it to a frontend module; importing that data needs no server runtime. The `orpc-fn` CLI does that, resolving lazy routers, sorting paths and writing only on change:
+
+```sh
+orpc-fn stream-manifest src/router.ts#appRouter --out ../web/src/stream-paths.ts          # export const streamPaths = [...]
+orpc-fn stream-manifest src/router.ts#appRouter --out ../web/src/stream-paths.ts --check  # CI: exit 1 when stale
+```
+
+`--out x.json` writes JSON instead, and `--name` renames the export. The CLI imports the router, so that module's side effects (database clients, SDKs) still run; it exits when done rather than waiting on their open handles. Run TypeScript routers with `bun`, `tsx` or Node ≥ 22.18. Mark custom iterator routes with `stream: true` or use oRPC's `eventIterator` output schema. Generated live/pubsub routes are marked automatically. `batch.exclude` remains an escape hatch, and the legacy `subscribe` naming heuristic remains as a fallback.
 
 ## `orpc-fn/expo`
 

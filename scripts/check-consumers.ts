@@ -72,7 +72,8 @@ try {
 		'hono',
 		'@mastra/core',
 		'@opentelemetry/api',
-		'@modelcontextprotocol/sdk'
+		'@modelcontextprotocol/sdk',
+		'@modelcontextprotocol/server'
 	]
 	const versions = (names: string[]) =>
 		names.map((name) => {
@@ -82,7 +83,8 @@ try {
 					hono: '4.0.0',
 					'@mastra/core': '1.51.0',
 					'@opentelemetry/api': '1.9.0',
-					'@modelcontextprotocol/sdk': '1.32.0'
+					'@modelcontextprotocol/sdk': '1.32.0',
+					'@modelcontextprotocol/server': '2.0.0'
 				}
 				return `${name}@${minimum[name] ?? '1.14.0'}`
 			}

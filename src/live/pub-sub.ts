@@ -204,7 +204,11 @@ export type CreatePublisher = <TEventSchema extends ZodType>(
 export type PubSubRuntimeOptions = {
 	/** Queue depths, drops, successful reconnects and parse failures. */
 	onMetric?: (event: PubSubMetric) => void
-	transport: PubSubTransport
+	/**
+	 * The broker, or a function creating it on first use so importing routes
+	 * opens no connection: `transport: () => bunRedisTransport(getRedis())`.
+	 */
+	transport: PubSubTransport | (() => PubSubTransport)
 	/**
 	 * Called per event dropped from ingress, replay or delivery queues.
 	 * Delivery drops count events before subscriber filtering.
@@ -525,13 +529,19 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 	// the client's backoff reconnects to the new deployment.
 	const activeSubscriberCleanups = new Set<() => void>()
 
+	let transport: PubSubTransport | undefined
 	const requireTransport = () => {
 		if (!options.pubsub) {
 			throw new Error(
 				'orpc-fn: live routes need a transport, pass createFn({ pubsub: { transport } })'
 			)
 		}
-		return options.pubsub.transport
+		if (transport) return transport
+		// A lazy transport is never created during or after shutdown.
+		assertOpen()
+		const configured = options.pubsub.transport
+		transport = typeof configured === 'function' ? configured() : configured
+		return transport
 	}
 
 	/**
@@ -1241,8 +1251,7 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			shutdownPromise = (async () => {
 				await Promise.allSettled([...pendingOpens])
 				await Promise.all([...releases])
-				if (options.pubsub?.ownsTransport)
-					await options.pubsub.transport.close?.()
+				if (options.pubsub?.ownsTransport) await transport?.close?.()
 			})()
 			return shutdownPromise
 		},

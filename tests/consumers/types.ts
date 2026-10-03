@@ -259,6 +259,34 @@ export type LiveStream = Assert<
 	Equal<LiveItem, { org: string; by: string } | { touched: string }>
 >
 list.publish({ org: 'a' })
+// Reducer schemas may transform, e.g. brand IDs: input string, output branded.
+const ArtifactId = z.string().brand<'ArtifactId'>()
+type ArtifactId = z.output<typeof ArtifactId>
+const branded = fnLive({
+	name: 'branded',
+	input: z.object({}),
+	output: z.object({ id: ArtifactId }),
+	handler: () => ({ id: ArtifactId.parse('a') }),
+	live: {
+		eventSchema: z.object({ id: z.string() }),
+		channel: 'artifacts',
+		stateSchema: z.object({ id: ArtifactId }),
+		emitSchema: z.object({ latest: ArtifactId }),
+		transformerFn: ({ previous, event }) => {
+			const id = ArtifactId.parse(event.id)
+			return fnLivePatch({ ...previous, id }, { latest: id })
+		}
+	}
+})
+type BrandedItem =
+	InferRouterOutputs<{
+		s: typeof branded.subscribe
+	}>['s'] extends AsyncIterable<infer U>
+		? U
+		: never
+export type BrandedStream = Assert<
+	Equal<BrandedItem, { id: ArtifactId } | { latest: ArtifactId }>
+>
 const patch: FnLivePatch<number, string> = fnLivePatch(1, 'x')
 void [patch, streamLiveSnapshots]
 
@@ -442,6 +470,8 @@ import { eventIterator } from '@orpc/server'
 import { defineMeta, createStreamManifest } from 'orpc-fn'
 import { registerMcpTools } from 'orpc-fn/mcp/sdk'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { registerMcpTools as registerMcpToolsV2 } from 'orpc-fn/mcp/server'
+import { McpServer as McpServerV2 } from '@modelcontextprotocol/server'
 const native = fn({
 	name: 'nativeIterator',
 	output: eventIterator(z.number()),
@@ -513,6 +543,61 @@ scoped.fn({
 		return params.t('hello')
 	}
 })
+// Regression: zero-argument and context-reading scoped extras mixed, no explicit generics.
+type ShopAdmin = { surface: 'admin'; shop: string }
+type ShopFront = { surface: 'storefront'; shop: string }
+const shopPublic = os.$context<{ shopify?: ShopAdmin | ShopFront }>()
+const shopAdmin = shopPublic.use(({ next }) =>
+	next({ context: { shopify: { surface: 'admin', shop: 'a' } as ShopAdmin } })
+)
+const shopFront = shopPublic.use(({ next }) =>
+	next({
+		context: { shopify: { surface: 'storefront', shop: 'f' } as ShopFront }
+	})
+)
+const shop = createFn({
+	procedures: { public: shopPublic, admin: shopAdmin, storefront: shopFront },
+	extras: () => ({ db: 1 }),
+	extrasByProcedure: {
+		public: () => ({ shopify: undefined }),
+		admin: ({ context }) => ({ shopify: context.shopify }),
+		storefront: ({ context }) => ({ shopify: context.shopify })
+	},
+	onCompleted: (event) => {
+		if (event.handlerStarted && event.procedure !== 'public')
+			return { shop: event.context.shopify.shop }
+	}
+})
+shop.fn({
+	name: 'adminShop',
+	procedure: 'admin',
+	handler: ({ shopify, db }) => {
+		const surface: 'admin' = shopify.surface
+		return `${surface}${db}`
+	}
+})
+shop.fn({
+	name: 'publicShop',
+	procedure: 'public',
+	handler: ({ shopify }) => {
+		const none: undefined = shopify
+		return none
+	}
+})
+createFn({
+	procedures: { public: shopPublic, admin: shopAdmin },
+	extrasByProcedure: {
+		public: () => ({ ok: 1 }),
+		// @ts-expect-error mixed scoped extras still cannot shadow handler parameters
+		admin: ({ context }) => ({ input: context.shopify })
+	}
+})
+createFn({
+	procedures: { public: os },
+	default: 'public',
+	// @ts-expect-error scoped extras need finite keys
+	extrasByProcedure: { public: () => ({}) as Record<string, number> }
+})
 createFn({
 	procedures: { public: os },
 	default: 'public',
@@ -549,6 +634,24 @@ registerMcpTools(
 		context: () => ({})
 	}
 )
+const mcpServerV2 = new McpServerV2(
+	{ name: 'consumer', version: '1' },
+	{ capabilities: { tools: {} } }
+)
+registerMcpToolsV2(
+	mcpServerV2.server,
+	{ foreign },
+	{ filter: () => true, context: () => ({}) }
+)
+registerMcpToolsV2(
+	mcpServerV2.server,
+	{ tenantOnly },
+	{
+		filter: () => true,
+		// @ts-expect-error the router requires tenant in its initial context
+		context: () => ({})
+	}
+)
 const unknownError: unknown = new Error()
 if (hasOrpcErrorCode(unknownError, 'NOT_FOUND')) {
 	const code: 'NOT_FOUND' = unknownError.code
@@ -561,6 +664,9 @@ if (hasOrpcErrorCode(unknownError, 'NOT_FOUND')) {
 // biome-ignore format: keep the overload error on the expected line
 // @ts-expect-error transformer state needs a parsed-state schema
 fnLive({ name: 'missingStateSchema', input: z.object({}), handler: () => 1, live: { channel: 'x', eventSchema: z.object({}), transformerFn: () => 2 } })
+// biome-ignore format: keep the overload error on the expected line
+// @ts-expect-error the state schema's output must match the route output
+fnLive({ name: 'wrongStateSchema', input: z.object({}), output: z.object({ n: z.number() }), handler: () => ({ n: 1 }), live: { channel: 'x', eventSchema: z.object({}), stateSchema: z.object({ n: z.string() }), transformerFn: ({ previous }) => previous } })
 // biome-ignore format: keep the overload error on the expected line
 // @ts-expect-error patch output needs a separate wire schema
 fnLive({ name: 'missingPatchSchema', input: z.object({}), handler: () => 1, live: { channel: 'x', eventSchema: z.object({}), stateSchema: z.number(), transformerFn: () => fnLivePatch(2, { delta: 1 }) } })
