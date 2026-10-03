@@ -284,6 +284,55 @@ test('terminal shutdown is awaitable, idempotent and respects transport ownershi
 	expect(closed).toBe(1)
 })
 
+test('lazy transports start on first use, once, and close only if started', async () => {
+	let created = 0
+	let closed = 0
+	const lazy = () => {
+		created++
+		return { ...memoryTransport(), close: () => void closed++ }
+	}
+	const unused = createFn({
+		procedures: { public: os },
+		default: 'public',
+		pubsub: { transport: lazy, ownsTransport: true }
+	})
+	const late = unused.createPubSub({
+		name: 'lazy',
+		channel: 'lazy',
+		...schemas
+	})
+	await unused.shutdown()
+	await expect(late.publish({ n: 1 })).rejects.toThrow()
+	expect([created, closed]).toEqual([0, 0])
+
+	const factory = createFn({
+		procedures: { public: os },
+		default: 'public',
+		logger: () => quiet,
+		pubsub: { transport: lazy, ownsTransport: true }
+	})
+	const feed = factory.createPubSub({
+		name: 'lazy',
+		channel: 'lazy',
+		...schemas
+	})
+	expect(created).toBe(0)
+	const streams = await Promise.all([
+		call(feed.subscribe, {}),
+		call(feed.subscribe, {})
+	])
+	const next = streams.map((stream) => stream.next())
+	await settle()
+	await feed.publish({ n: 1 })
+	expect((await Promise.all(next)).map((r) => r.value)).toEqual([
+		{ n: 1 },
+		{ n: 1 }
+	])
+	expect(created).toBe(1)
+	await factory.shutdown()
+	expect(closed).toBe(1)
+})
+
 test('slow parsing ingress is bounded; telemetry failures do not poison live recovery', async () => {
 	const gate = deferred<void>()
 	let parsing = 0

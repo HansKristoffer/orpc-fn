@@ -70,7 +70,7 @@ createFn({
   spanAttributes,  // ({ context, name, procedure, meta }) => extra span attributes
   onCompleted,     // (event) => extra attributes for the fn.completed log
   isExpectedError, // default: 4xx ORPCError or AbortError
-  pubsub           // { transport, namespace?, ownsTransport?, maxQueueSize?, maxIngressSize?, maxReplaySize?, initializationTimeoutMs?, onDrop?, onMetric? } for fnLive / createPubSub
+  pubsub           // { transport (or () => transport, created on first use), namespace?, ownsTransport?, maxQueueSize?, maxIngressSize?, maxReplaySize?, initializationTimeoutMs?, onDrop?, onMetric? } for fnLive / createPubSub
 })
 ```
 
@@ -96,10 +96,14 @@ Also exported: `defineMeta`, `createStreamManifest`, `createStreamManifestAsync`
 import { createFn } from 'orpc-fn'
 import { bunRedisTransport } from 'orpc-fn/live/redis-bun' // or ioredis / memory
 
-const transport = bunRedisTransport(new RedisClient(process.env.REDIS_URL))
 export const { fnLive, createPubSub, drainPubSubSubscribers } = createFn({
   /* … */,
-  pubsub: { transport, onDrop: (count) => dropCounter.add(count) }
+  pubsub: {
+    // A function defers the connection until the first publish or subscribe.
+    transport: () => bunRedisTransport(new RedisClient(process.env.REDIS_URL)),
+    ownsTransport: true,
+    onDrop: (count) => dropCounter.add(count)
+  }
 })
 
 export const listOrders = fnLive({
@@ -128,7 +132,7 @@ The `subscribe` route runs builder middleware and the same fn guards/extras/meta
 
 **`createPubSub`** returns a typed `subscribe` route plus `publish`, `publishMany` (one atomic round-trip across channels) and typed `getSubscriptionChannelName({ input, context })` / `getPublishChannelName(event)` methods. The shared partial-input `getChannelName` method is deprecated. Publishers pass the event schema's input type; subscribers, filters and channel resolvers get its output type. The raw event travels in oRPC's JSON format, so `Date`, `Map`, `Set` and `BigInt` survive, and each receiver parses it once. Options include `filterFn`, `authFn`, `mirrorChannel`, `overflowMarker`, `procedure`, configured guards and `meta`. Channels may be static or use `channel: { subscribe: ({ input, context }) => key, publish: (parsedEvent) => key }`. Carry publishing tenant keys in the event. A factory `namespace` prefixes channels, mirrors and backlog keys. Each pub/sub definition subscribes to each channel once and parses each payload once for all local subscribers. Each subscriber then runs its filter in arrival order as it reads; its bounded queue holds events before filtering, so `onDrop` counts unfiltered events. Abort and drain release a subscription at once, even one that is not being read. A lost subscription is retried with exponential backoff and jitter. **`createPublisher`** is the publish-only half.
 
-**Graceful shutdown:** `await shutdown()` stops new subscriptions/publication, cancels initialization/retries, ends existing streams and awaits cleanup. It closes a supplied transport only with `ownsTransport: true`. A custom transport whose pending `subscribe` cannot be cancelled may resolve later; that late subscription is immediately released. `drainPubSubSubscribers()` remains a synchronous, nonterminal operation. Both are per factory.
+**Graceful shutdown:** `await shutdown()` stops new subscriptions/publication, cancels initialization/retries, ends existing streams and awaits cleanup. It closes a supplied transport only with `ownsTransport: true`, and a lazy `transport: () => …` only if it was ever created; it is never created during or after shutdown. A custom transport whose pending `subscribe` cannot be cancelled may resolve later; that late subscription is immediately released. `drainPubSubSubscribers()` remains a synchronous, nonterminal operation. Both are per factory.
 
 Recent event IDs deduplicate replay/live overlap; legacy payloads remain readable. Replay is bounded and TTL-limited, so it is not durable resume. A snapshot may already include a queued delta: reducers must use revisions or idempotence. See [the revision example](examples/adoption/revisions.ts). Parsing ingress, replay staging and subscriber queues are bounded; positive queue/TTL/time options are validated.
 
