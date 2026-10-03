@@ -218,9 +218,16 @@ export function throwInitialSnapshotError(
 			err: errorMessageOf(err)
 		})
 	}
+	throw toSnapshotError(err, liveName)
+}
 
-	if (err instanceof ORPCError) throw err
-	throw new ORPCError('INTERNAL_SERVER_ERROR', {
+/** An `ORPCError` passes through; anything else becomes INTERNAL_SERVER_ERROR. */
+function toSnapshotError(
+	err: unknown,
+	liveName: string
+): ORPCError<string, unknown> {
+	if (err instanceof ORPCError) return err
+	return new ORPCError('INTERNAL_SERVER_ERROR', {
 		message: `Failed to load initial snapshot for ${liveName}`,
 		cause: err
 	})
@@ -342,9 +349,8 @@ export function createFnLive(runtime: {
 	createChannel: (options: ChannelOptions) => Channel
 	createLogger: (scope: string, span: SpanLike | undefined) => FnLogger
 	isGuard: (option: string) => boolean
-	isExpectedError: (error: unknown) => boolean
 }) {
-	const { fn, createChannel, isGuard, isExpectedError } = runtime
+	const { fn, createChannel, isGuard } = runtime
 	const liveLogger = runtime.createLogger('fn-live', undefined)
 
 	return (
@@ -425,12 +431,8 @@ export function createFnLive(runtime: {
 					try {
 						initial = await runSnapshot(params)
 					} catch (err) {
-						throwInitialSnapshotError(
-							err,
-							liveName,
-							params.logger,
-							isExpectedError
-						)
+						// `fn.completed` logs it, at the level `isExpectedError` picks.
+						throw toSnapshotError(err, liveName)
 					}
 
 					const rerun = (nextInput?: Record<string, unknown>) =>

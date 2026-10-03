@@ -48,7 +48,9 @@ This targets Cloudflare Durable Objects (hibernation, signed tokens, a Durable O
 
 ## `isPublic`/`isSupport` versus `procedure:`
 
-`fn({ procedure: 'public' })` picks a builder by key. An `isPublic`/`isSupport` alias would mean hard-coding builder names into the library or adding another inferred type parameter to all four overloads. **Decision:** no alias. `scripts/codemods/is-public.ts` rewrites route files mechanically.
+`fn({ procedure: 'public' })` picks a builder by key. Apps choose builders in their own way (lullu and gey-mono with `isPublic`/`isSupport` flags, the Shopify template with `auth: 'admin'`), and supporting each spelling would mean hard-coding builder names, or adding another inferred type parameter to all four overloads. **Decision:** one option name, `procedure`, for every app. `scripts/codemods/procedure-option.ts` rewrites route files: `--flag=isPublic:public` for boolean flags, `--rename=auth` for an option whose value already is the key.
+
+`default` is optional. An app that wants every route to state its access (the template requires `auth` on every route) leaves it out, and then `procedure` is required on every `fn`, `fnLive` and `createPubSub`, in the types and at startup.
 
 ## Tags typing
 

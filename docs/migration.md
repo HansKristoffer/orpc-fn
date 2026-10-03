@@ -106,7 +106,12 @@ guards: {
 
 ## 4. Route files
 
-1. Run the codemod: `bun ../orpc-fn/scripts/codemods/is-public.ts apps/backend/src`. It rewrites `isPublic: true` to `procedure: 'public'` and `isSupport: true` to `procedure: 'support'`, and drops `isPublic: false`. In `createPubSub` options, `isPublic: true` becomes `procedure: 'public'` too.
+1. Run the codemod, then review its diff (it is a text rewrite):
+   - lullu: `bun ../orpc-fn/scripts/codemods/procedure-option.ts apps/backend/src --flag=isPublic:public --flag=isSupport:support`
+   - gey-mono: the same with `--flag=isPublic:public`
+   - an app with `auth: 'admin'`-style options: `--rename=auth`
+
+   Flags become `procedure: '<key>'` (`false` is dropped) and renamed options keep their value. This also covers `createPubSub` options.
 2. lullu only: five tools pass `summary: { base, chat, voice }`. Change them to `summary: base` and `channelSummary: { chat, voice }`, then read `readMeta(procedure).meta.channelSummary`.
 3. Everything else stays: `name`, route options, `neededFeatureFlags`, `permission`, `readOnly`, `supportTool` and the other meta keys, the handler params, and `call`.
 

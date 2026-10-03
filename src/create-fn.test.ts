@@ -359,3 +359,132 @@ describe('OpenTelemetry', () => {
 		expect(attributes['call: inner|rpc.method']).toBe('inner')
 	})
 })
+
+describe('createFn without a default procedure', () => {
+	const { fn, createPubSub, fnLive } = createFn({
+		procedures: {
+			public: os.$context<PublicContext>(),
+			protected: os
+				.$context<PublicContext>()
+				.use(({ context, next }) =>
+					next({ context: { user: context.user ?? user() } })
+				)
+		},
+		logger: () => ({ debug() {}, info() {}, warn() {}, error() {} })
+	})
+
+	test('every route must name its procedure', () => {
+		// @ts-expect-error `procedure` is required without a default
+		expect(() => fn({ name: 'test.noProcedure', handler: () => 1 })).toThrow(
+			'"test.noProcedure" needs a procedure; createFn has no default'
+		)
+		expect(() =>
+			// @ts-expect-error also for pub/sub
+			createPubSub({
+				name: 'test.noProcedurePubSub',
+				channel: 'x',
+				inputSchema: z.object({}),
+				eventSchema: z.object({})
+			})
+		).toThrow('needs a procedure')
+		expect(() =>
+			// @ts-expect-error also for live queries
+			fnLive({
+				name: 'test.noProcedureLive',
+				input: z.object({}),
+				handler: () => 1,
+				live: { channel: 'x', eventSchema: z.object({}) }
+			})
+		).toThrow('needs a procedure')
+	})
+
+	test('the named procedure types the context', async () => {
+		const me = fn({
+			name: 'test.me',
+			procedure: 'protected',
+			handler: ({ context }) => context.user.id
+		})
+		expect(await call(me, undefined, { context: {} })).toBe('user-1')
+	})
+})
+
+describe('streaming routes', () => {
+	const events: Array<{ name: string; success: boolean; durationMs: number }> =
+		[]
+	const ended: string[] = []
+	const makeSpan = (name: string) => ({
+		setAttribute: () => {},
+		setStatus: () => {},
+		recordException: () => {},
+		end: () => ended.push(name)
+	})
+	const { fn } = createFn({
+		procedures: { public: os.$context<PublicContext>() },
+		default: 'public',
+		logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+		otel: {
+			...otel,
+			trace: {
+				getTracer: () => ({
+					startActiveSpan: (
+						name: string,
+						_options: unknown,
+						run: (span: ReturnType<typeof makeSpan>) => unknown
+					) => run(makeSpan(name)),
+					startSpan: (name: string) => makeSpan(name)
+				})
+			}
+		} as unknown as typeof otel,
+		onCompleted: ({ name, success, durationMs }) => {
+			events.push({ name, success, durationMs })
+		}
+	})
+	const ticks = fn({
+		name: 'test.ticks',
+		handler: async function* () {
+			yield 1
+			await Bun.sleep(30)
+			yield 2
+		}
+	})
+	const broken = fn({
+		name: 'test.broken',
+		handler: async function* () {
+			yield 1
+			throw new Error('mid-stream')
+		}
+	})
+
+	beforeEach(() => {
+		events.length = 0
+		ended.length = 0
+	})
+
+	test('the span and fn.completed cover the whole stream', async () => {
+		const stream = await call(ticks, undefined, { context: {} })
+		expect(events).toEqual([])
+		expect(ended).toEqual([])
+		const values: unknown[] = []
+		for await (const value of stream) values.push(value)
+		expect(values).toEqual([1, 2])
+		expect(events).toMatchObject([{ name: 'test.ticks', success: true }])
+		expect(events[0]?.durationMs).toBeGreaterThanOrEqual(25)
+		expect(ended).toEqual(['test.ticks'])
+	})
+
+	test('an error mid-stream is logged as a failure', async () => {
+		const stream = await call(broken, undefined, { context: {} })
+		expect((await stream.next()).value).toBe(1)
+		await expect(stream.next()).rejects.toThrow('mid-stream')
+		expect(events).toMatchObject([{ name: 'test.broken', success: false }])
+		expect(ended).toEqual(['test.broken'])
+	})
+
+	test('a consumer stopping early completes the stream', async () => {
+		const stream = await call(ticks, undefined, { context: {} })
+		expect((await stream.next()).value).toBe(1)
+		await stream.return(undefined)
+		expect(events).toMatchObject([{ name: 'test.ticks', success: true }])
+		expect(ended).toEqual(['test.ticks'])
+	})
+})

@@ -70,18 +70,22 @@ return (#ARGV - 2) / 2
 export type SubscriberConnection = {
 	subscribe(channel: string): Promise<unknown>
 	unsubscribe(channel: string): Promise<unknown>
+	/**
+	 * Restore one channel after the driver reconnected on its own and lost its
+	 * subscriptions. Omit when the client re-subscribes itself (ioredis).
+	 */
+	resubscribe?(channel: string): Promise<unknown>
+	/** Stop delivering and release the connection (if the driver created it). */
 	close(): void
 }
 
+/** Callbacks for one connection; they do nothing once it is replaced. */
 export type SubscriberHandlers = {
 	onMessage(channel: string, message: string): void
-	/** The connection is gone for good; every subscription must be redone. */
+	/** The driver reconnected; its subscriptions must be restored. */
+	onReconnect(): void
+	/** The connection is gone for good; a fresh one replaces it. */
 	onLost(error: Error): void
-	/**
-	 * Channels whose SUBSCRIBE has completed, for re-subscribing after a
-	 * reconnect. In-flight ones are excluded: their own SUBSCRIBE still lands.
-	 */
-	channels(): string[]
 }
 
 type Entry = {
@@ -97,8 +101,13 @@ type ChannelState = {
 
 /**
  * Shared core of the Redis transports: one SUBSCRIBE per channel no matter
- * how many listeners, one dedicated subscriber connection created on first
- * use, and a fresh connection after the old one is lost for good.
+ * how many listeners, and one dedicated subscriber connection at a time.
+ *
+ * Each connection is a generation. Losing it (or failing to restore its
+ * channels after a reconnect) retires it: the core closes it, ignores
+ * anything it still emits, and tells every listener, whose resubscribe then
+ * opens the next generation. Nothing from an old connection can reach the
+ * channels of a new one.
  */
 export function createRedisTransport(driver: {
 	send: RedisSend
@@ -110,36 +119,54 @@ export function createRedisTransport(driver: {
 	const channels = new Map<string, ChannelState>()
 	// An UNSUBSCRIBE still in flight would cancel a SUBSCRIBE sent after it.
 	const unsubscribing = new Map<string, Promise<unknown>>()
-	let subscriber: Promise<SubscriberConnection> | null = null
+	let current: {
+		connection: Promise<SubscriberConnection>
+		retire: () => void
+	} | null = null
 
-	const handlers: SubscriberHandlers = {
-		onMessage(channel, message) {
-			for (const entry of [...(channels.get(channel)?.entries ?? [])]) {
-				try {
-					entry.listener(message)
-				} catch {
-					// One listener must not starve the others.
-				}
-			}
-		},
-		onLost(error) {
-			subscriber = null
+	const connect = () => {
+		let retired = false
+		const retire = (error?: Error) => {
+			if (retired) return
+			retired = true
+			if (current?.connection === connection) current = null
+			void connection.then((open) => open.close()).catch(() => {})
+			if (!error) return
 			const lost = [...channels.values()].flatMap((state) => [...state.entries])
 			channels.clear()
 			for (const entry of lost) entry.onLost?.(error)
-		},
-		channels: () =>
-			[...channels]
-				.filter(([, state]) => state.settled)
-				.map(([channel]) => channel)
-	}
-
-	const getSubscriber = () => {
-		subscriber ??= driver.connectSubscriber(handlers).catch((error) => {
-			subscriber = null
-			throw error
+		}
+		const handlers: SubscriberHandlers = {
+			onMessage(channel, message) {
+				if (retired) return
+				for (const entry of [...(channels.get(channel)?.entries ?? [])]) {
+					try {
+						entry.listener(message)
+					} catch {
+						// One listener must not starve the others.
+					}
+				}
+			},
+			onReconnect() {
+				if (retired) return
+				// In-flight SUBSCRIBEs are excluded: they still land on their own.
+				const settled = [...channels]
+					.filter(([, state]) => state.settled)
+					.map(([channel]) => channel)
+				void connection
+					.then((open) =>
+						Promise.all(settled.map((channel) => open.resubscribe?.(channel)))
+					)
+					.catch((error) => retire(asError(error)))
+			},
+			onLost: (error) => retire(error)
+		}
+		const connection = driver.connectSubscriber(handlers)
+		connection.catch(() => {
+			if (current?.connection === connection) current = null
 		})
-		return subscriber
+		current = { connection, retire: () => retire() }
+		return connection
 	}
 
 	return {
@@ -176,7 +203,7 @@ export function createRedisTransport(driver: {
 			return Array.isArray(items) ? items.map(String) : []
 		},
 		async subscribe(channel, listener, onLost) {
-			const connection = await getSubscriber()
+			const connection = await (current?.connection ?? connect())
 			const entry: Entry = { listener, onLost }
 			await unsubscribing.get(channel)
 			let state = channels.get(channel)
@@ -204,10 +231,10 @@ export function createRedisTransport(driver: {
 				state.entries.delete(entry)
 				throw error
 			}
-			const current = state
+			const subscribed = state
 			return async () => {
-				if (!current.entries.delete(entry)) return
-				if (current.entries.size > 0 || channels.get(channel) !== current)
+				if (!subscribed.entries.delete(entry)) return
+				if (subscribed.entries.size > 0 || channels.get(channel) !== subscribed)
 					return
 				channels.delete(channel)
 				const done = connection.unsubscribe(channel).finally(() => {
@@ -218,10 +245,11 @@ export function createRedisTransport(driver: {
 			}
 		},
 		close() {
-			const closing = subscriber
-			subscriber = null
+			current?.retire()
 			channels.clear()
-			void closing?.then((connection) => connection.close()).catch(() => {})
 		}
 	}
 }
+
+const asError = (error: unknown) =>
+	error instanceof Error ? error : new Error(errorMessageOf(error))

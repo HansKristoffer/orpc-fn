@@ -38,6 +38,7 @@ export type {
 	ProcedureContext,
 	ProcedureInput,
 	ProcedureKey,
+	ProcedureOption,
 	ProcedureOutput,
 	ReservedOptionKey,
 	RouteConfig

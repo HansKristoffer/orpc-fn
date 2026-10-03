@@ -422,3 +422,15 @@ createFn({
 	// @ts-expect-error extras need known keys
 	extras: () => ({}) as Record<string, number>
 })
+
+// ── No default procedure: every route names one ─────────────────────────────
+const explicit = createFn({
+	procedures: { public: base, protected: authed }
+})
+explicit.fn({
+	name: 'explicitProtected',
+	procedure: 'protected',
+	handler: ({ context }) => context.user.id
+})
+// @ts-expect-error `procedure` is required without a default
+explicit.fn({ name: 'missingProcedure', handler: () => 1 })

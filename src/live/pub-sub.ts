@@ -9,7 +9,8 @@ import type {
 	FnDefinition,
 	FnProcedure,
 	MaybePromise,
-	ProcedureKey
+	ProcedureKey,
+	ProcedureOption
 } from '../types.js'
 import { decodePayload, encodePayload } from './codec.js'
 import type {
@@ -135,10 +136,9 @@ export type CreatePubSub<TDef extends FnDefinition> = <
 	TEventSchema extends ZodType,
 	TKey extends ProcedureKey<TDef> = TDef['default']
 >(
-	options: PubSubOptions<TDef, TInputSchema, TEventSchema, NoInfer<TKey>> & {
+	options: PubSubOptions<TDef, TInputSchema, TEventSchema, NoInfer<TKey>> &
 		/** Which `procedures` builder the subscribe route uses. */
-		procedure?: TKey
-	}
+		ProcedureOption<TDef, TKey>
 ) => PubSub<TDef, TInputSchema, TEventSchema, TKey>
 
 export type PublisherOptions<TEventSchema extends ZodType> = PublisherConfig & {

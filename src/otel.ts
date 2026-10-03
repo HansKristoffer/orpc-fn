@@ -1,3 +1,5 @@
+import { isAsyncIteratorObject, onStreamEnd } from './stream.js'
+
 /** Attribute values accepted by OpenTelemetry spans. */
 export type AttributeValue = string | number | boolean
 
@@ -45,7 +47,8 @@ export type SpanOf<TOtel> =
 export type Tracing = {
 	/**
 	 * Run `fn` inside an active span: OK when it resolves, ERROR when it throws,
-	 * ended either way. Without OpenTelemetry `span` is undefined.
+	 * ended either way. When `fn` resolves to a stream, the span stays open
+	 * until the stream ends. Without OpenTelemetry `span` is undefined.
 	 */
 	inSpan<T>(
 		name: string,
@@ -86,6 +89,11 @@ export function createTracing(otel: OtelApiLike | undefined): Tracing {
 				async (span) => {
 					try {
 						const result = await fn(span)
+						if (isAsyncIteratorObject(result)) {
+							return onStreamEnd(result, (...error) =>
+								end(span, ...error)
+							) as typeof result
+						}
 						end(span)
 						return result
 					} catch (error) {

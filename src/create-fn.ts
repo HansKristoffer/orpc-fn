@@ -29,6 +29,7 @@ import {
 	type SpanOf
 } from './otel.js'
 import { createRouter } from './router.js'
+import { isAsyncIteratorObject, onStreamEnd } from './stream.js'
 import {
 	type AnyFnContext,
 	type BuilderLike,
@@ -58,7 +59,7 @@ type BuilderChain = {
 /** `CreateFnOptions` with the generics erased: what the implementation reads. */
 type RuntimeOptions = {
 	procedures: Record<string, BuilderChain>
-	default: string
+	default?: string
 	extras?: (params: Record<string, unknown>) => unknown
 	guards?: Record<
 		string,
@@ -101,8 +102,11 @@ export type CreateFnOptions<
 > = {
 	/** Named oRPC builders, e.g. `{ public: os.$context<Ctx>(), protected: authed }`. */
 	procedures: TProcedures
-	/** Builder used when a route omits `procedure`. */
-	default: TDefault
+	/**
+	 * Builder used when a route omits `procedure`. Leave it out to make every
+	 * route name its procedure, so none gets one by accident.
+	 */
+	default?: TDefault
 	/** Per-call values merged into every handler's params; may be async. */
 	extras?: (params: {
 		context: UnionContext<TProcedures>
@@ -204,7 +208,7 @@ export type FnFactory<TDef extends FnDefinition> = {
  */
 export function createFn<
 	const TProcedures extends Record<string, BuilderLike>,
-	TDefault extends keyof TProcedures & string,
+	TDefault extends keyof TProcedures & string = never,
 	TExtras extends object = Record<never, never>,
 	TGuards extends object = Record<never, never>,
 	TMeta extends object = Record<never, never>,
@@ -261,8 +265,18 @@ export function createFn<
 		}
 	}
 
+	const resolveKey = (procedure: string | undefined, name: string) => {
+		const key = procedure ?? runtime.default
+		if (key === undefined) {
+			throw new Error(
+				`orpc-fn: "${name}" needs a procedure; createFn has no default`
+			)
+		}
+		return key
+	}
+
 	const buildProcedure: BuildProcedure = (route) => {
-		const key = route.procedure ?? runtime.default
+		const key = resolveKey(route.procedure, route.name)
 		let builder = runtime.procedures[key]
 		if (!builder) throw new Error(`orpc-fn: unknown procedure "${key}"`)
 		const stored: StoredFnMeta = {
@@ -286,7 +300,7 @@ export function createFn<
 	// biome-ignore lint/suspicious/noExplicitAny: the overloads in `Fn` carry the types
 	const fn = (routeOptions: any): AnyProcedure => {
 		const { handler, input, output, name, procedure, ...rest } = routeOptions
-		const key: string = procedure ?? runtime.default
+		const key = resolveKey(procedure, name)
 		const route: Record<string, unknown> = {}
 		const guardChecks: Array<[string, unknown]> = []
 		const meta: Record<string, unknown> = {}
@@ -309,9 +323,32 @@ export function createFn<
 				tracing.inSpan(name, 'SERVER', async (span) => {
 					const { context, signal } = params
 					const startTime = performance.now()
-					let success = false
-					let caughtError: unknown
 					const logger = createLogger('fn', span)
+					const elapsedMs = () =>
+						Math.round((performance.now() - startTime) * 100) / 100
+					// Runs before `inSpan` ends the span, so these attributes land on it.
+					const complete = (...error: [] | [unknown]) => {
+						const durationMs = elapsedMs()
+						span?.setAttribute('fn.duration_ms', durationMs)
+						logCompleted(logger, {
+							name,
+							procedure: key,
+							durationMs,
+							success: error.length === 0,
+							error: error[0],
+							input: params.input,
+							context,
+							span,
+							meta
+						})
+					}
+					// Server-Timing reports the time until the result (or stream) exists.
+					const recordHandlerTiming = () => {
+						const timing = context.timing
+						if (typeof timing === 'object' && timing !== null) {
+							;(timing as Record<string, unknown>).handler_ms = elapsedMs()
+						}
+					}
 					try {
 						span?.setAttribute('fn.operation', name)
 						span?.setAttribute('fn.procedure', key)
@@ -352,31 +389,16 @@ export function createFn<
 							span,
 							logger
 						})
-						success = true
+						recordHandlerTiming()
+						// A stream is complete when it ends, not when it is returned.
+						if (isAsyncIteratorObject(result))
+							return onStreamEnd(result, complete)
+						complete()
 						return result
 					} catch (error) {
-						caughtError = error
+						recordHandlerTiming()
+						complete(error)
 						throw error
-					} finally {
-						// Runs before `inSpan` ends the span, so these attributes land on it.
-						const durationMs = performance.now() - startTime
-						const handlerMs = Math.round(durationMs * 100) / 100
-						const timing = context.timing
-						if (typeof timing === 'object' && timing !== null) {
-							;(timing as Record<string, unknown>).handler_ms = handlerMs
-						}
-						span?.setAttribute('fn.duration_ms', durationMs)
-						logCompleted(logger, {
-							name,
-							procedure: key,
-							durationMs: handlerMs,
-							success,
-							error: caughtError,
-							input: params.input,
-							context,
-							span,
-							meta
-						})
 					}
 				})
 		})
@@ -434,8 +456,7 @@ export function createFn<
 			fn,
 			createChannel: live.createChannel,
 			createLogger,
-			isGuard,
-			isExpectedError
+			isGuard
 		}) as never,
 		createPubSub: live.createPubSub as never,
 		createPublisher: live.createPublisher as never,

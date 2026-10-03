@@ -52,14 +52,14 @@ export const getOrder = fn({
 })
 ```
 
-Every call runs in an OpenTelemetry span named `order.get`, runs the `permission` guard, writes `handler_ms` back to `context.timing`, and logs one `fn.completed` line at `info`, `warn` (4xx) or `error` (defects).
+Every call runs in an OpenTelemetry span named `order.get` (for a streaming handler, until the stream ends), runs the `permission` guard, writes `handler_ms` back to `context.timing`, and logs one `fn.completed` line at `info`, `warn` (4xx) or `error` (defects).
 
 ## `orpc-fn`: `createFn`
 
 ```ts
 createFn({
   procedures,      // named oRPC builders; the handler context is the builder's context
-  default,         // builder used when a route omits `procedure`
+  default,         // builder used when a route omits `procedure`; leave out to require `procedure` on every route
   extras,          // ({ context, span, signal, name, procedure }) => values (or a promise) merged into handler params
   guards,          // { key: (value, { context, input, name, meta, signal }) => void } — each key is a typed fn() option
   meta,            // `{} as { readOnly?: boolean }` — typed fn() options stored on the procedure
@@ -134,7 +134,7 @@ The `subscribe` route first runs `authFn` and subscribes to the channel, then st
 | `orpc-fn/live/ioredis` | ioredis 5 | Dedicated subscriber via `duplicate()`; ioredis re-subscribes itself |
 | `orpc-fn/live/memory` | none | Tests and single-process dev |
 
-The Redis transports publish and maintain backlogs with one Lua script, sent by SHA, with a fallback to `EVAL` when Redis returns `NOSCRIPT`. Call `transport.close()` on shutdown.
+A subscriber connection that is lost, or cannot restore its channels after a reconnect, is closed and replaced; nothing it still emits is delivered. The Redis transports publish and maintain backlogs with one Lua script, sent by SHA, with a fallback to `EVAL` when Redis returns `NOSCRIPT`. Call `transport.close()` on shutdown.
 
 `streamLiveSnapshots`, `fnLivePatch` and `throwInitialSnapshotError` are exported for custom streams.
 

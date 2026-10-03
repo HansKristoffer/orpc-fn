@@ -32,35 +32,43 @@ export function bunRedisTransport(
 			const subscriber = options.subscriber ?? (await client.duplicate())
 			const dispatch: Listener = (message, channel) =>
 				handlers.onMessage(channel, message)
-			let closing = false
-			subscriber.onconnect = () => {
-				// Bun reconnects on its own but drops every subscription; restore
-				// them. Also fires on the first connect, and Bun does not dedupe
-				// listeners, so clear each channel before re-adding its listener.
-				for (const channel of handlers.channels()) {
-					// unsubscribe throws synchronously outside subscriber mode.
-					void Promise.resolve()
+			const ours = new Set<string>()
+			// Bun reconnects on its own but drops every subscription. Also fires on
+			// the first connect, when there is nothing to restore yet.
+			subscriber.onconnect = () => handlers.onReconnect()
+			// Fires only when Bun gives up reconnecting (and on close(), which
+			// detaches it first).
+			subscriber.onclose = (error) =>
+				handlers.onLost(error ?? new Error('Redis subscriber closed'))
+			return {
+				subscribe: (channel) => {
+					ours.add(channel)
+					return subscriber.subscribe(channel, dispatch)
+				},
+				// Bun keeps listeners across a reconnect and does not dedupe them, so
+				// clear the channel before adding its listener again. unsubscribe
+				// throws synchronously outside subscriber mode.
+				resubscribe: async (channel) => {
+					await Promise.resolve()
 						.then(() => subscriber.unsubscribe(channel))
 						.catch(() => {})
-						.then(() => subscriber.subscribe(channel, dispatch))
-						.catch((error) => {
-							handlers.onLost(
-								error instanceof Error ? error : new Error(String(error))
-							)
-						})
-				}
-			}
-			// `onclose` fires only when Bun gives up reconnecting, or on close().
-			subscriber.onclose = (error) => {
-				if (closing) return
-				handlers.onLost(error ?? new Error('Redis subscriber closed'))
-			}
-			return {
-				subscribe: (channel) => subscriber.subscribe(channel, dispatch),
-				unsubscribe: (channel) => subscriber.unsubscribe(channel, dispatch),
+					return subscriber.subscribe(channel, dispatch)
+				},
+				unsubscribe: (channel) => {
+					ours.delete(channel)
+					return subscriber.unsubscribe(channel, dispatch)
+				},
 				close() {
-					closing = true
-					if (owned) subscriber.close()
+					// No-ops, not null: Bun calls `onclose` without checking it.
+					subscriber.onconnect = () => {}
+					subscriber.onclose = () => {}
+					if (owned) return subscriber.close()
+					// A given subscriber stays open: remove only this transport's listeners.
+					for (const channel of ours) {
+						void Promise.resolve()
+							.then(() => subscriber.unsubscribe(channel, dispatch))
+							.catch(() => {})
+					}
 				}
 			}
 		}

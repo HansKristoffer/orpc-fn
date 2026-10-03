@@ -13,12 +13,18 @@ export interface IORedisLike {
 	): unknown
 	on(event: 'end', listener: () => void): unknown
 	on(event: 'error', listener: (error: Error) => void): unknown
+	off(
+		event: 'message',
+		listener: (channel: string, message: string) => void
+	): unknown
+	off(event: 'end', listener: () => void): unknown
+	off(event: 'error', listener: (error: Error) => void): unknown
 }
 
 /**
  * `PubSubTransport` for ioredis. Subscriptions use a dedicated connection
  * (`client.duplicate()` unless `subscriber` is given); ioredis re-subscribes
- * after reconnects itself (`autoResubscribe`). `onError` receives connection
+ * after reconnects itself (`autoResubscribe`), so no `resubscribe` is needed. `onError` receives connection
  * errors that ioredis is already retrying.
  *
  * Call `close()` on shutdown to disconnect the subscriber it created.
@@ -32,23 +38,35 @@ export function ioredisTransport(
 		async connectSubscriber(handlers) {
 			const owned = !options.subscriber
 			const subscriber = options.subscriber ?? client.duplicate()
-			let closing = false
-			subscriber.on('message', (channel, message) =>
+			const onMessage = (channel: string, message: string) =>
 				handlers.onMessage(channel, message)
-			)
 			// Without a listener an ioredis 'error' event would crash the process.
-			subscriber.on('error', (error) => options.onError?.(error))
+			const onError = (error: Error) => options.onError?.(error)
 			// 'end' means ioredis stopped reconnecting.
-			subscriber.on('end', () => {
-				if (!closing)
-					handlers.onLost(new Error('Redis subscriber connection ended'))
-			})
+			const onEnd = () =>
+				handlers.onLost(new Error('Redis subscriber connection ended'))
+			const ours = new Set<string>()
+			subscriber.on('message', onMessage)
+			subscriber.on('error', onError)
+			subscriber.on('end', onEnd)
 			return {
-				subscribe: (channel) => subscriber.subscribe(channel),
-				unsubscribe: (channel) => subscriber.unsubscribe(channel),
+				subscribe: (channel) => {
+					ours.add(channel)
+					return subscriber.subscribe(channel)
+				},
+				unsubscribe: (channel) => {
+					ours.delete(channel)
+					return subscriber.unsubscribe(channel)
+				},
 				close() {
-					closing = true
-					if (owned) subscriber.disconnect()
+					// Detach first: a given subscriber outlives this transport's use.
+					subscriber.off('message', onMessage)
+					subscriber.off('end', onEnd)
+					if (owned) return subscriber.disconnect()
+					subscriber.off('error', onError)
+					if (ours.size > 0) {
+						void subscriber.unsubscribe(...ours).catch(() => {})
+					}
 				}
 			}
 		}

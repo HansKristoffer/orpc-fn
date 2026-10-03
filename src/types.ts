@@ -263,10 +263,19 @@ export type FnRouteOptions<
 	TKey extends ProcedureKey<TDef>
 > = RouteConfig<TDef['tag']> &
 	GuardOptions<TDef['guards']> &
-	TDef['meta'] & {
-		/** Which `createFn({ procedures })` builder to use. Defaults to `default`. */
-		procedure?: TKey
-	}
+	TDef['meta'] &
+	ProcedureOption<TDef, TKey>
+
+/**
+ * Which `createFn({ procedures })` builder a route uses. Optional when
+ * `createFn` has a `default`; required on every route when it has none.
+ */
+export type ProcedureOption<
+	TDef extends FnDefinition,
+	TKey extends ProcedureKey<TDef>
+> = [TDef['default']] extends [never]
+	? { procedure: TKey }
+	: { procedure?: TKey }
 
 export type FnProcedure<
 	TDef extends FnDefinition,
