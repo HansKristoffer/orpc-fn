@@ -12,6 +12,7 @@ import type {
 	MaybePromise,
 	ProcedureKey
 } from '../types.js'
+import { decodePayload, encodePayload } from './codec.js'
 import type {
 	BacklogOptions,
 	PubSubMessage,
@@ -20,7 +21,14 @@ import type {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
+//
+// Publishers pass an event schema's INPUT (`z.input`); subscribers, filters
+// and channel resolvers see its OUTPUT (`z.output`). The raw input travels on
+// the wire and every receiver parses it once.
 // ═══════════════════════════════════════════════════════════════════════════
+
+/** Any Zod object schema, including `.strict()`, `.passthrough()` and `.catchall()`. */
+export type ObjectSchema = ZodObject<ZodRawShape, z.core.$ZodObjectConfig>
 
 /**
  * A static channel name, or one derived from (partial) subscriber input or
@@ -40,14 +48,14 @@ export type FilterFn<TInput, TEventData> = (params: {
 }) => MaybePromise<boolean>
 
 /**
- * Checked when a subscription opens. `true` allows everyone; a function
- * returns false (or throws) to refuse with FORBIDDEN.
+ * Checked when a subscription opens, before anything is sent. `true` allows
+ * everyone; a function returns false (or throws) to refuse with FORBIDDEN.
  */
 export type AuthFn<TInput, TContext> =
 	| ((params: { input: TInput; ctx: TContext }) => MaybePromise<boolean>)
 	| true
 
-type PublisherConfig = {
+export type PublisherConfig = {
 	/** Required name for tracing (e.g. 'chat.messages'). */
 	name: string
 	/**
@@ -69,21 +77,21 @@ type PublisherConfig = {
 
 export type PubSubOptions<
 	TDef extends FnDefinition,
-	TInputShape extends ZodRawShape,
+	TInputSchema extends ObjectSchema,
 	TEventSchema extends ZodType,
 	TKey extends ProcedureKey<TDef>
 > = PublisherConfig & {
 	channel: ChannelDefinition<
-		z.infer<ZodObject<TInputShape>>,
-		z.infer<TEventSchema>,
+		z.output<TInputSchema>,
+		z.output<TEventSchema>,
 		FnContext<TDef, TKey>
 	>
 	/** What the subscriber provides. */
-	inputSchema: ZodObject<TInputShape>
+	inputSchema: TInputSchema
 	/** What gets published. */
 	eventSchema: TEventSchema
-	filterFn?: FilterFn<z.infer<ZodObject<TInputShape>>, z.infer<TEventSchema>>
-	authFn?: AuthFn<z.infer<ZodObject<TInputShape>>, FnContext<TDef, TKey>>
+	filterFn?: FilterFn<z.output<TInputSchema>, z.output<TEventSchema>>
+	authFn?: AuthFn<z.output<TInputSchema>, FnContext<TDef, TKey>>
 	/**
 	 * When a slow subscriber's queue overflows (drop-oldest), enqueue this
 	 * marker INSTEAD of the new event so the subscriber resyncs from its
@@ -92,10 +100,8 @@ export type PubSubOptions<
 	 * null to skip.
 	 */
 	overflowMarker?: (
-		input: z.infer<ZodObject<TInputShape>>
-	) => z.infer<TEventSchema> | null
-	/** Which `procedures` builder the subscribe route uses. */
-	procedure?: TKey
+		input: z.output<TInputSchema>
+	) => z.output<TEventSchema> | null
 	tags?: TDef['tag'][]
 	summary?: string
 	description?: string
@@ -103,50 +109,49 @@ export type PubSubOptions<
 
 export type PubSub<
 	TDef extends FnDefinition,
-	TInputShape extends ZodRawShape,
+	TInputSchema extends ObjectSchema,
 	TEventSchema extends ZodType,
 	TKey extends ProcedureKey<TDef>
 > = {
 	subscribe: FnProcedure<
 		TDef,
 		TKey,
-		ZodObject<TInputShape>,
+		TInputSchema,
 		Schema<
-			AsyncGenerator<z.infer<TEventSchema>, void, unknown>,
-			AsyncGenerator<z.infer<TEventSchema>, void, unknown>
+			AsyncGenerator<z.output<TEventSchema>, void, unknown>,
+			AsyncGenerator<z.output<TEventSchema>, void, unknown>
 		>
 	>
-	publish: (data: z.infer<TEventSchema>) => Promise<void>
+	publish: (data: z.input<TEventSchema>) => Promise<void>
 	/** Publish a batch in one atomic round-trip; items may target different channels. */
-	publishMany: (items: z.infer<TEventSchema>[]) => Promise<void>
+	publishMany: (items: readonly z.input<TEventSchema>[]) => Promise<void>
 	getChannelName: (
-		params:
-			| Partial<z.infer<ZodObject<TInputShape>>>
-			| Partial<z.infer<TEventSchema>>,
+		params: Partial<z.output<TInputSchema>> | Partial<z.output<TEventSchema>>,
 		context?: FnContext<TDef, TKey>
 	) => string
 }
 
 export type CreatePubSub<TDef extends FnDefinition> = <
-	TInputShape extends ZodRawShape,
+	TInputSchema extends ObjectSchema,
 	TEventSchema extends ZodType,
 	TKey extends ProcedureKey<TDef> = TDef['default']
 >(
-	options: PubSubOptions<TDef, TInputShape, TEventSchema, NoInfer<TKey>> & {
+	options: PubSubOptions<TDef, TInputSchema, TEventSchema, NoInfer<TKey>> & {
+		/** Which `procedures` builder the subscribe route uses. */
 		procedure?: TKey
 	}
-) => PubSub<TDef, TInputShape, TEventSchema, TKey>
+) => PubSub<TDef, TInputSchema, TEventSchema, TKey>
 
 export type PublisherOptions<TEventSchema extends ZodType> = PublisherConfig & {
-	/** Static channel name, or a resolver over (partial) event data. */
-	channel: string | ((params: Partial<z.infer<TEventSchema>>) => string)
+	/** Static channel name, or a resolver over (partial) parsed event data. */
+	channel: string | ((params: Partial<z.output<TEventSchema>>) => string)
 	eventSchema: TEventSchema
 }
 
 export type Publisher<TEventSchema extends ZodType> = {
-	publish: (data: z.infer<TEventSchema>) => Promise<void>
-	publishMany: (items: z.infer<TEventSchema>[]) => Promise<void>
-	getChannelName: (params: Partial<z.infer<TEventSchema>>) => string
+	publish: (data: z.input<TEventSchema>) => Promise<void>
+	publishMany: (items: readonly z.input<TEventSchema>[]) => Promise<void>
+	getChannelName: (params: Partial<z.output<TEventSchema>>) => string
 }
 
 /**
@@ -157,18 +162,21 @@ export type CreatePublisher = <TEventSchema extends ZodType>(
 	options: PublisherOptions<TEventSchema>
 ) => Publisher<TEventSchema>
 
+export type PubSubRuntimeOptions = {
+	transport: PubSubTransport
+	/** Called once per event dropped from a slow subscriber's queue. */
+	onDrop?: (count: number, info: { name: string; channel: string }) => void
+	/** Per-subscriber queue bound before drop-oldest (default: 1000). */
+	maxQueueSize?: number
+}
+
+/** @internal */
 export type LiveRuntimeOptions = {
 	procedures: Record<string, BuilderLike>
 	default: string
 	tracing: Tracing
 	createLogger: (scope: string, span: SpanLike | undefined) => FnLogger
-	pubsub?: {
-		transport: PubSubTransport
-		/** Called once per event dropped from a slow subscriber's queue. */
-		onDrop?: (count: number, info: { name: string; channel: string }) => void
-		/** Per-subscriber queue bound before drop-oldest (default: 1000). */
-		maxQueueSize?: number
-	}
+	pubsub?: PubSubRuntimeOptions
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -246,7 +254,7 @@ export function createBoundedEventQueue<T>(opts: {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Runtime
+// Runtime (internal: the typed surface is what `createFn` returns)
 // ═══════════════════════════════════════════════════════════════════════════
 
 const DEFAULT_MAX_QUEUE_SIZE = 1000
@@ -264,16 +272,21 @@ function getResubscribeDelayMs(attempt: number): number {
 	return base + Math.floor(Math.random() * RESUBSCRIBE_MAX_JITTER_MS)
 }
 
-type LocalSubscriber<TInput, TEventData> = {
-	input: TInput
+/** Wakes a parked iterator when its subscription closes. */
+const CLOSED = Symbol('closed')
+
+type Input = Record<string, unknown>
+
+type LocalSubscriber = {
+	input: Input
 	isActive: () => boolean
-	deliver: (data: TEventData) => void
+	deliver: (data: unknown) => void
 	onFilterError: (error: unknown) => void
 }
 
-type Hub<TInput, TEventData> = {
-	subscribers: Set<LocalSubscriber<TInput, TEventData>>
-	/** Resolves once the channel is first subscribed (or the hub closed). */
+type Hub = {
+	subscribers: Set<LocalSubscriber>
+	/** Settles after the first subscribe attempt (or when the hub closes). */
 	ready: Promise<void>
 	close: () => void
 }
@@ -285,15 +298,40 @@ type BuilderChain = {
 	handler(handler: unknown): AnyProcedure
 }
 
-type SubscribeOptions = {
-	input: Record<string, unknown>
-	context: unknown
-	signal?: AbortSignal
+/** An open subscription: registered, authorized and subscribed. */
+export type LiveSubscription = {
+	/** Live events, after the backlog replay. Ends when closed or aborted. */
+	events: AsyncGenerator<unknown, void, unknown>
+	/** Release everything; safe to call more than once, and before `events` runs. */
+	close: () => void
+}
+
+/** @internal Untyped options; `PubSubOptions` is the typed surface. */
+export type ChannelOptions = PublisherConfig & {
+	channel: ChannelDefinition<Input, unknown>
+	eventSchema: ZodType
+	filterFn?: FilterFn<Input, unknown>
+	authFn?: AuthFn<Input, unknown>
+	overflowMarker?: (input: Input) => unknown
+}
+
+/** @internal */
+export type Channel = {
+	/** Authorize and subscribe; resolves once events can be delivered. */
+	open: (options: {
+		input: Input
+		context: unknown
+		signal: AbortSignal | undefined
+	}) => Promise<LiveSubscription>
+	publish: (data: unknown) => Promise<void>
+	publishMany: (items: readonly unknown[]) => Promise<void>
+	getChannelName: (params: Input, context?: unknown) => string
 }
 
 const compact = (value: Record<string, unknown>) =>
 	Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined))
 
+/** @internal */
 export function createLiveRuntime(options: LiveRuntimeOptions) {
 	const { tracing, createLogger } = options
 	const logger = createLogger('pubsub', undefined)
@@ -313,14 +351,14 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 	}
 
 	/**
-	 * Shared publish pipeline: schema-validate, resolve the channel from the
-	 * validated event, then publish (atomically maintaining the backlog when
-	 * enabled) inside a producer span.
+	 * Shared publish pipeline: validate the raw event, resolve the channel from
+	 * the parsed event, then publish the raw event (atomically maintaining the
+	 * backlog when enabled) inside a producer span.
 	 */
-	function createChannelPublisher<TEventSchema extends ZodType>(
+	function createChannelPublisher(
 		config: PublisherConfig & {
-			eventSchema: TEventSchema
-			getChannelName: (data: z.infer<TEventSchema>) => string
+			eventSchema: ZodType
+			getChannelName: (data: Input) => string
 		}
 	) {
 		const { name, eventSchema, getChannelName, mirrorChannel } = config
@@ -328,27 +366,31 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			? { size: config.backlogSize ?? 50, ttlSeconds: config.backlogTtl ?? 30 }
 			: undefined
 
-		const toMessages = (items: readonly unknown[]): PubSubMessage[] =>
-			items.flatMap((item) => {
-				const data = eventSchema.parse(item)
+		const toMessages = async (items: readonly unknown[]) => {
+			const messages: PubSubMessage[] = []
+			for (const item of items) {
+				const data = (await eventSchema.parseAsync(item)) as Input
 				const channel = getChannelName(data)
-				const payload = JSON.stringify(data)
-				return mirrorChannel && mirrorChannel !== channel
-					? [
-							{ channel, payload },
-							{ channel: mirrorChannel, payload }
-						]
-					: [{ channel, payload }]
-			})
+				const payload = encodePayload(item)
+				messages.push({ channel, payload })
+				if (mirrorChannel && mirrorChannel !== channel) {
+					messages.push({ channel: mirrorChannel, payload })
+				}
+			}
+			return messages
+		}
 
-		const send = (operation: 'publish' | 'publishMany', items: unknown[]) =>
+		const send = (
+			operation: 'publish' | 'publishMany',
+			items: readonly unknown[]
+		) =>
 			tracing.inSpan(`${name}:${operation}`, 'PRODUCER', async (span) => {
 				const startTime = performance.now()
 				try {
 					span?.setAttribute('pubsub.operation', operation)
 					span?.setAttribute('pubsub.name', name)
-					const messages = toMessages(items)
 					span?.setAttribute('pubsub.batch_size', items.length)
+					const messages = await toMessages(items)
 					const first = messages[0]
 					if (first) {
 						span?.setAttribute('pubsub.channel', first.channel)
@@ -369,8 +411,8 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			})
 
 		return {
-			publish: (data: z.infer<TEventSchema>) => send('publish', [data]),
-			publishMany: async (items: z.infer<TEventSchema>[]) => {
+			publish: (data: unknown) => send('publish', [data]),
+			publishMany: async (items: readonly unknown[]) => {
 				if (items.length > 0) await send('publishMany', items)
 			}
 		}
@@ -378,21 +420,20 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 
 	/**
 	 * Hubs for one pub/sub definition, keyed by channel. Many subscribers can
-	 * share a channel (an org with many open tabs); one hub parses and
-	 * validates each payload once and fans the parsed event out to every local
-	 * subscriber, applying each subscriber's own filter. The hub also owns the
-	 * broker subscription and its resubscribe backoff.
+	 * share a channel (an org with many open tabs); one hub decodes and parses
+	 * each payload once and fans the event out to every local subscriber,
+	 * applying each subscriber's own filter. The hub also owns the broker
+	 * subscription and its resubscribe backoff.
 	 */
-	function createChannelHubs<TInput, TEventData>(config: {
-		eventSchema: ZodType<TEventData>
-		filterFn: FilterFn<TInput, TEventData>
+	function createChannelHubs(config: {
+		eventSchema: ZodType
+		filterFn: FilterFn<Input, unknown>
 	}) {
-		type Subscriber = LocalSubscriber<TInput, TEventData>
 		const { eventSchema, filterFn } = config
-		const hubs = new Map<string, Hub<TInput, TEventData>>()
+		const hubs = new Map<string, Hub>()
 
-		const createHub = (channel: string): Hub<TInput, TEventData> => {
-			const subscribers = new Set<Subscriber>()
+		const createHub = (channel: string): Hub => {
+			const subscribers = new Set<LocalSubscriber>()
 			let closed = false
 			let unsubscribe: (() => Promise<void>) | null = null
 			let attempt = 0
@@ -401,11 +442,13 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			const ready = new Promise<void>((resolve) => {
 				markReady = resolve
 			})
+			// Parse in arrival order even when the schema is async.
+			let parsing = Promise.resolve()
 
-			const onRawMessage = (raw: string) => {
-				let parsed: TEventData
+			const deliver = async (raw: string) => {
+				let parsed: unknown
 				try {
-					parsed = eventSchema.parse(JSON.parse(raw))
+					parsed = await eventSchema.parseAsync(decodePayload(raw))
 				} catch (error) {
 					// Malformed payloads are dropped once for the whole channel.
 					logger.warn(`Dropped malformed message on ${channel}`, {
@@ -415,7 +458,10 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 				}
 				for (const sub of [...subscribers]) {
 					if (!sub.isActive()) continue
-					Promise.resolve(filterFn({ input: sub.input, data: parsed }))
+					// `then` also catches a filter that throws synchronously, so one
+					// subscriber's filter cannot starve the others.
+					Promise.resolve()
+						.then(() => filterFn({ input: sub.input, data: parsed }))
 						.then((include) => {
 							if (include && sub.isActive()) sub.deliver(parsed)
 						})
@@ -453,7 +499,9 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 				try {
 					const next = await requireTransport().subscribe(
 						channel,
-						onRawMessage,
+						(raw) => {
+							parsing = parsing.then(() => deliver(raw))
+						},
 						(error) => {
 							logger.error(`Subscription to ${channel} lost`, {
 								error: error.message
@@ -465,12 +513,15 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 					unsubscribe = next
 					attempt = 0
 					logger.info(`Subscribed to ${channel}`)
-					markReady()
 				} catch (error) {
 					logger.error(`Failed to subscribe to ${channel}`, {
 						error: errorMessageOf(error)
 					})
 					scheduleResubscribe('subscribe-failed')
+				} finally {
+					// A failed first attempt must not hold subscribers forever; the
+					// backoff keeps retrying in the background.
+					markReady()
 				}
 			}
 
@@ -492,7 +543,7 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 
 		return function addLocalSubscriber(
 			channel: string,
-			subscriber: Subscriber
+			subscriber: LocalSubscriber
 		) {
 			let hub = hubs.get(channel)
 			if (!hub) {
@@ -514,52 +565,181 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 		}
 	}
 
-	function createPubSub(pubsubOptions: {
-		name: string
-		channel: ChannelDefinition<Record<string, unknown>, unknown>
-		inputSchema: ZodType
-		eventSchema: ZodType
-		filterFn?: FilterFn<Record<string, unknown>, unknown>
-		authFn?: AuthFn<Record<string, unknown>, unknown>
-		overflowMarker?: (input: Record<string, unknown>) => unknown
-		procedure?: string
-		tags?: string[]
-		summary?: string
-		description?: string
-		useBacklog?: boolean
-		backlogSize?: number
-		backlogTtl?: number
-		mirrorChannel?: string
-	}) {
+	/** Publish and open subscriptions on one channel definition. */
+	function createChannel(channelOptions: ChannelOptions): Channel {
 		const {
 			name,
 			channel,
-			inputSchema,
 			eventSchema,
 			filterFn = () => true,
 			authFn,
 			overflowMarker,
 			useBacklog = false
-		} = pubsubOptions
+		} = channelOptions
+
+		const getChannelName = (params: Input, context?: unknown): string =>
+			typeof channel === 'string' ? channel : channel(params, context)
+		const addLocalSubscriber = createChannelHubs({ eventSchema, filterFn })
+
+		const open: Channel['open'] = async ({ input, context, signal }) => {
+			const transport = requireTransport()
+			const channelName = getChannelName(input, context)
+			const startTime = performance.now()
+			const span = tracing.startSpan(`${name}:subscribe`, 'SERVER', {
+				'pubsub.channel': channelName,
+				'pubsub.operation': 'subscribe',
+				'pubsub.name': name
+			})
+			const subscriberLogger = createLogger('pubsub', span)
+
+			try {
+				if (
+					authFn !== undefined &&
+					authFn !== true &&
+					!(await authFn({ input, ctx: context }))
+				) {
+					throw new ORPCError('FORBIDDEN', {
+						message: 'You do not have access to this subscription'
+					})
+				}
+			} catch (error) {
+				tracing.fail(span, error)
+				span?.end()
+				throw error
+			}
+
+			subscriberLogger.info(`Subscribing to ${channelName}`)
+
+			let closed = false
+			let finished = false
+			let resolveNext: ((value: unknown) => void) | null = null
+			let messageCount = 0
+			let droppedCount = 0
+			const queue = createBoundedEventQueue<unknown>({
+				maxSize: options.pubsub?.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE,
+				createOverflowMarker: () => overflowMarker?.(input) ?? null,
+				onDrop: () => {
+					droppedCount++
+					options.pubsub?.onDrop?.(1, { name, channel: channelName })
+				}
+			})
+			const enqueue = (data: unknown) => {
+				messageCount++
+				if (resolveNext) {
+					resolveNext(data)
+					resolveNext = null
+				} else {
+					queue.enqueue(data)
+				}
+			}
+			const wake = () => {
+				closed = true
+				resolveNext?.(CLOSED)
+				resolveNext = null
+			}
+			const next = () =>
+				new Promise<unknown>((resolve) => {
+					if (queue.length > 0) resolve(queue.dequeue())
+					else if (closed) resolve(CLOSED)
+					else resolveNext = resolve
+				})
+
+			const local = addLocalSubscriber(channelName, {
+				input,
+				isActive: () => !closed,
+				deliver: enqueue,
+				onFilterError: (error) =>
+					subscriberLogger.error('Error processing message', {
+						error: errorMessageOf(error)
+					})
+			})
+			activeSubscriberCleanups.add(wake)
+			signal?.addEventListener('abort', wake)
+
+			const finish = (error?: unknown) => {
+				if (finished) return
+				finished = true
+				wake()
+				activeSubscriberCleanups.delete(wake)
+				signal?.removeEventListener('abort', wake)
+				local.remove()
+				if (error === undefined) tracing.ok(span)
+				else tracing.fail(span, error)
+				const durationMs = performance.now() - startTime
+				span?.setAttribute('pubsub.duration_ms', durationMs)
+				span?.setAttribute('pubsub.message_count', messageCount)
+				span?.setAttribute('pubsub.dropped_count', droppedCount)
+				span?.end()
+				subscriberLogger.info(`Unsubscribed from ${channelName}`, {
+					messageCount,
+					droppedCount,
+					durationMs: Math.round(durationMs)
+				})
+			}
+
+			// Subscribed (or first attempt failed and retrying) before returning,
+			// so nothing published after `open` resolves is missed.
+			await local.ready
+			if (useBacklog && !closed) {
+				try {
+					const items = await transport.readBacklog(channelName)
+					span?.setAttribute('pubsub.backlog_count', items.length)
+					for (const raw of items) {
+						if (closed) break
+						try {
+							const data = await eventSchema.parseAsync(decodePayload(raw))
+							if ((await filterFn({ input, data })) && !closed) enqueue(data)
+						} catch {
+							// Ignore malformed backlog entries
+						}
+					}
+				} catch (error) {
+					// Live events still flow; only the backlog replay is lost.
+					subscriberLogger.warn(`Failed to replay backlog for ${channelName}`, {
+						error: errorMessageOf(error)
+					})
+				}
+			}
+
+			async function* events() {
+				try {
+					while (!closed && !signal?.aborted) {
+						const message = await next()
+						if (message === CLOSED) break
+						yield message
+					}
+				} finally {
+					finish()
+				}
+			}
+
+			return { events: events(), close: () => finish() }
+		}
+
+		const { publish, publishMany } = createChannelPublisher({
+			...channelOptions,
+			getChannelName: (data) => getChannelName(data)
+		})
+
+		return { open, publish, publishMany, getChannelName }
+	}
+
+	function createPubSub(
+		pubsubOptions: ChannelOptions & {
+			inputSchema: ZodType
+			procedure?: string
+			tags?: string[]
+			summary?: string
+			description?: string
+		}
+	) {
+		const { name, inputSchema } = pubsubOptions
 		const key = pubsubOptions.procedure ?? options.default
 		const builder = options.procedures[key] as unknown as
 			| BuilderChain
 			| undefined
 		if (!builder) throw new Error(`orpc-fn: unknown procedure "${key}"`)
-
-		const getChannelName = (
-			params: Record<string, unknown>,
-			context?: unknown
-		): string =>
-			typeof channel === 'string' ? channel : channel(params, context)
-
-		const addLocalSubscriber = createChannelHubs<
-			Record<string, unknown>,
-			unknown
-		>({
-			eventSchema,
-			filterFn
-		})
+		const channel = createChannel(pubsubOptions)
 
 		const stored: StoredFnMeta = { name, procedure: key, meta: {} }
 		const subscribe = builder
@@ -574,162 +754,42 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			)
 			.meta({ [FN_META_KEY]: stored })
 			.input(inputSchema)
-			.handler(async function* ({ input, signal, context }: SubscribeOptions) {
-				const transport = requireTransport()
-				const channelName = getChannelName(input, context)
-				const startTime = performance.now()
-				const span = tracing.startSpan(`${name}:subscribe`, 'SERVER', {
-					'pubsub.channel': channelName,
-					'pubsub.operation': 'subscribe',
-					'pubsub.name': name
+			.handler(async function* (params: {
+				input: Input
+				context: unknown
+				signal?: AbortSignal
+			}) {
+				const subscription = await channel.open({
+					input: params.input,
+					context: params.context,
+					signal: params.signal
 				})
-				const subscriberLogger = createLogger('pubsub', span)
-
-				if (authFn !== undefined && authFn !== true) {
-					if (!(await authFn({ input, ctx: context }))) {
-						tracing.fail(span, new Error('Subscription authorization failed'))
-						span?.end()
-						throw new ORPCError('FORBIDDEN', {
-							message: 'You do not have access to this subscription'
-						})
-					}
-				}
-
-				subscriberLogger.info(`Subscribing to ${channelName}`)
-
-				let isClosed = false
-				let resolveNext: ((value: unknown) => void) | null = null
-				let messageCount = 0
-				let droppedCount = 0
-				const queue = createBoundedEventQueue<unknown>({
-					maxSize: options.pubsub?.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE,
-					createOverflowMarker: () => overflowMarker?.(input) ?? null,
-					onDrop: () => {
-						droppedCount++
-						options.pubsub?.onDrop?.(1, { name, channel: channelName })
-					}
-				})
-				const enqueue = (data: unknown) => {
-					messageCount++
-					if (resolveNext) {
-						resolveNext(data)
-						resolveNext = null
-					} else {
-						queue.enqueue(data)
-					}
-				}
-				const close = () => {
-					isClosed = true
-					resolveNext?.(CLOSED)
-					resolveNext = null
-				}
-				const next = () =>
-					new Promise<unknown>((resolve) => {
-						if (queue.length > 0) resolve(queue.dequeue())
-						else if (isClosed) resolve(CLOSED)
-						else resolveNext = resolve
-					})
-
-				activeSubscriberCleanups.add(close)
-				signal?.addEventListener('abort', close)
-				const local = addLocalSubscriber(channelName, {
-					input,
-					isActive: () => !isClosed,
-					deliver: enqueue,
-					onFilterError: (error) =>
-						subscriberLogger.error('Error processing message', {
-							error: errorMessageOf(error)
-						})
-				})
-
-				// Replay the backlog once, after the channel is first subscribed.
-				if (useBacklog) {
-					void local.ready.then(async () => {
-						if (isClosed) return
-						try {
-							const items = await transport.readBacklog(channelName)
-							span?.setAttribute('pubsub.backlog_count', items.length)
-							for (const raw of items) {
-								if (isClosed) return
-								try {
-									const data = eventSchema.parse(JSON.parse(raw))
-									if ((await filterFn({ input, data })) && !isClosed)
-										enqueue(data)
-								} catch {
-									// Ignore malformed backlog entries
-								}
-							}
-						} catch (error) {
-							// Live events still flow; only the backlog replay is lost.
-							subscriberLogger.warn(
-								`Failed to replay backlog for ${channelName}`,
-								{
-									error: errorMessageOf(error)
-								}
-							)
-						}
-					})
-				}
-
 				try {
-					while (!isClosed && !signal?.aborted) {
-						const message = await next()
-						if (message === CLOSED) break
-						yield message
-					}
-					tracing.ok(span)
-				} catch (error) {
-					tracing.fail(span, error)
-					throw error
+					yield* subscription.events
 				} finally {
-					activeSubscriberCleanups.delete(close)
-					close()
-					signal?.removeEventListener('abort', close)
-					local.remove()
-					const durationMs = performance.now() - startTime
-					span?.setAttribute('pubsub.duration_ms', durationMs)
-					span?.setAttribute('pubsub.message_count', messageCount)
-					span?.setAttribute('pubsub.dropped_count', droppedCount)
-					span?.end()
-					subscriberLogger.info(`Unsubscribed from ${channelName}`, {
-						messageCount,
-						droppedCount,
-						durationMs: Math.round(durationMs)
-					})
+					subscription.close()
 				}
 			})
 
-		const { publish, publishMany } = createChannelPublisher({
-			...pubsubOptions,
-			eventSchema,
-			getChannelName: (data) => getChannelName(data as Record<string, unknown>)
-		})
-
+		const { publish, publishMany, getChannelName } = channel
 		return { subscribe, publish, publishMany, getChannelName }
 	}
 
-	function createPublisher(publisherOptions: {
-		name: string
-		channel: string | ((params: Record<string, unknown>) => string)
-		eventSchema: ZodType
-		useBacklog?: boolean
-		backlogSize?: number
-		backlogTtl?: number
-		mirrorChannel?: string
-	}) {
+	function createPublisher(publisherOptions: PublisherOptions<ZodType>) {
 		const { channel } = publisherOptions
-		const getChannelName = (params: Record<string, unknown>) =>
+		const getChannelName = (params: Input) =>
 			typeof channel === 'string' ? channel : channel(params)
 		const { publish, publishMany } = createChannelPublisher({
 			...publisherOptions,
-			getChannelName: (data) => getChannelName(data as Record<string, unknown>)
+			getChannelName
 		})
 		return { publish, publishMany, getChannelName }
 	}
 
 	return {
+		createChannel,
 		createPubSub,
-		createPublisher: createPublisher as CreatePublisher,
+		createPublisher,
 		/** Open subscriptions of this instance (drain progress, gauges). */
 		activePubSubSubscriberCount: () => activeSubscriberCleanups.size,
 		/** End every open subscription; returns how many were closed. */
@@ -750,6 +810,3 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 		}
 	}
 }
-
-/** Wakes a parked iterator when its subscription closes. */
-const CLOSED = Symbol('closed')

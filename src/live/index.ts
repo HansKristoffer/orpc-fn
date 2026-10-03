@@ -1,5 +1,5 @@
+// `fnLive`, `createPubSub` and `createPublisher` come typed from `createFn`.
 export {
-	createFnLive,
 	type FnLive,
 	type FnLiveConfig,
 	type FnLivePatch,
@@ -14,13 +14,14 @@ export {
 	type CreatePublisher,
 	type CreatePubSub,
 	createBoundedEventQueue,
-	createLiveRuntime,
 	type FilterFn,
-	type LiveRuntimeOptions,
+	type ObjectSchema,
 	type Publisher,
+	type PublisherConfig,
 	type PublisherOptions,
 	type PubSub,
-	type PubSubOptions
+	type PubSubOptions,
+	type PubSubRuntimeOptions
 } from './pub-sub.js'
 export {
 	type BacklogOptions,

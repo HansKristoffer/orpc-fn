@@ -10,6 +10,7 @@ import {
 import { call, os } from '@orpc/server'
 import { z } from 'zod'
 import { createFn } from '../index.js'
+import { encodePayload } from './codec.js'
 import type {
 	BacklogOptions,
 	PubSubMessage,
@@ -307,7 +308,7 @@ describe('publish (ported from gey-mono mirrorChannel/publishMany)', () => {
 
 	test('publish validates, resolves the channel and mirrors the payload', async () => {
 		await shards.publish({ shardId: '1', data: 'x' })
-		const payload = JSON.stringify({ shardId: '1', data: 'x' })
+		const payload = encodePayload({ shardId: '1', data: 'x' })
 		expect(published).toEqual([
 			{
 				messages: [
@@ -355,7 +356,7 @@ describe('publish (ported from gey-mono mirrorChannel/publishMany)', () => {
 
 	test('publishMany is typed like publish', () => {
 		expectTypeOf<Parameters<typeof shards.publishMany>[0]>().toEqualTypeOf<
-			{ shardId: string; data: string }[]
+			readonly { shardId: string; data: string }[]
 		>()
 	})
 

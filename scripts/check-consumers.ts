@@ -60,9 +60,8 @@ try {
 		JSON.stringify({ private: true, type: 'module' })
 	)
 	const profile = process.env.PEER_PROFILE ?? 'locked'
-	const required = ['@orpc/server', '@orpc/contract', 'zod']
+	const required = ['@orpc/server', '@orpc/contract', '@orpc/client', 'zod']
 	const optional = [
-		'@orpc/client',
 		'@orpc/openapi',
 		'@orpc/zod',
 		'@orpc/json-schema',

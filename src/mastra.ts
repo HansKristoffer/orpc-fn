@@ -1,46 +1,15 @@
-import type { AnySchema, InferSchemaOutput } from '@orpc/contract'
 import type { RequestContext } from '@mastra/core/request-context'
 import { createTool, type Tool } from '@mastra/core/tools'
-import type { AnyProcedure, Procedure } from '@orpc/server'
-import { call } from '@orpc/server'
-import { z as zod, type ZodObject, type ZodRawShape, type ZodType } from 'zod'
+import { type AnyProcedure, call } from '@orpc/server'
+import {
+	passThroughOutputSchema,
+	rawInputSchema,
+	type ToolSchema
+} from './json-schema.js'
 import { readFnMeta, toToolName } from './meta.js'
+import type { ProcedureInput, ProcedureOutput } from './types.js'
 
 export { toToolName }
-
-type InferProcedureOutput<TProc> =
-	TProc extends Procedure<
-		infer _TInitialContext,
-		infer _TCurrentContext,
-		infer _TInputSchema,
-		infer TOutputSchema extends AnySchema,
-		infer _TErrorMap,
-		infer _TMeta
-	>
-		? InferSchemaOutput<TOutputSchema>
-		: unknown
-
-type ExtractInputSchema<T> = T extends { '~orpc': { inputSchema?: infer S } }
-	? NonNullable<S> extends ZodType
-		? NonNullable<S>
-		: undefined
-	: undefined
-
-type ExtractOutputSchema<T> = T extends { '~orpc': { outputSchema?: infer S } }
-	? NonNullable<S> extends ZodType
-		? NonNullable<S>
-		: undefined
-	: undefined
-
-type MastraInputSchema<TProc extends AnyProcedure> =
-	ExtractInputSchema<TProc> extends ZodObject<ZodRawShape>
-		? ExtractInputSchema<TProc>
-		: ZodObject<ZodRawShape>
-
-type MastraOutputSchema<TProc extends AnyProcedure> =
-	ExtractOutputSchema<TProc> extends ZodType
-		? ExtractOutputSchema<TProc>
-		: zod.ZodType<InferProcedureOutput<TProc>>
 
 export type CreateMastraToolOptions = {
 	/** Override the tool id (defaults to the sanitized `fn` name). */
@@ -50,8 +19,8 @@ export type CreateMastraToolOptions = {
 	/** Gate execution behind the AI SDK tool-approval flow. */
 	requireApproval?: boolean
 	/**
-	 * Use an empty object input schema when the procedure declares none
-	 * (instead of throwing). For no-input queries like `teams.list`.
+	 * Accept a procedure without an input schema (the tool then takes an empty
+	 * object). For no-input queries like `teams.list`.
 	 */
 	allowMissingInputSchema?: boolean
 	onExecuteFinish?: (event: {
@@ -63,32 +32,37 @@ export type CreateMastraToolOptions = {
 	contextKey?: string
 }
 
-export type CreateMastraToolReturn<TProc extends AnyProcedure> = Tool<
-	MastraInputSchema<TProc>,
-	MastraOutputSchema<TProc>
+/** What the tool takes: the procedure's raw input, or `{}` without a schema. */
+export type MastraToolInput<TProc> =
+	unknown extends ProcedureInput<TProc>
+		? Record<string, never>
+		: ProcedureInput<TProc>
+
+/** A Mastra tool typed by the procedure's raw input and parsed output. */
+export type MastraTool<TProc extends AnyProcedure> = Tool<
+	MastraToolInput<TProc>,
+	ProcedureOutput<TProc>
 >
 
-function isZodSchema(schema: unknown): schema is ZodType {
-	return (
-		!!schema &&
-		typeof schema === 'object' &&
-		'_zod' in schema &&
-		typeof (schema as { safeParse?: unknown }).safeParse === 'function'
-	)
-}
+/** LLM tool parameters must be an object; other inputs are a type error. */
+type ObjectInputCheck<TProc> =
+	MastraToolInput<TProc> extends Record<string, unknown>
+		? unknown
+		: { 'orpc-fn: an agent tool needs an object input': ProcedureInput<TProc> }
 
 /**
  * Creates a Mastra tool from a procedure made with `fn()`. Execution calls
  * the procedure with the oRPC context stored in the Mastra request context
  * (`requestContext.set('orpcContext', context)`), so auth and guards apply.
  *
- * The returned tool keeps the types Mastra's `InferToolInput`,
- * `InferToolOutput` and `InferUITools` read.
+ * Mastra checks the input against the procedure's schema (with dates coerced
+ * from strings) but passes the raw input on, so the procedure parses it once;
+ * the output is the procedure's parsed result, passed through unchanged.
  */
 export function createMastraTool<TProc extends AnyProcedure>(
-	procedure: TProc,
+	procedure: TProc & ObjectInputCheck<TProc>,
 	options: CreateMastraToolOptions = {}
-): CreateMastraToolReturn<TProc> {
+): MastraTool<TProc> {
 	const meta = readFnMeta(procedure)
 	const name = options.id ?? meta.name
 	if (!name) {
@@ -96,10 +70,13 @@ export function createMastraTool<TProc extends AnyProcedure>(
 			'Procedure must be created with fn() to use createMastraTool'
 		)
 	}
-	const inputSchema =
-		meta.inputSchema ??
-		(options.allowMissingInputSchema ? zod.object({}) : undefined)
-	if (!inputSchema) {
+	let inputSchema: ToolSchema | undefined
+	if (meta.inputSchema) {
+		inputSchema = rawInputSchema(meta.inputSchema)
+		if (inputSchema['~standard'].jsonSchema.input().type !== 'object') {
+			throw new Error(`${name} must take an object input to be an agent tool`)
+		}
+	} else if (!options.allowMissingInputSchema) {
 		throw new Error(
 			`${name} must declare an input schema to be exposed as an agent tool`
 		)
@@ -112,12 +89,23 @@ export function createMastraTool<TProc extends AnyProcedure>(
 		id,
 		description: options.description ?? meta.description,
 		requireApproval: options.requireApproval === true,
-		inputSchema: inputSchema as MastraInputSchema<TProc>,
-		outputSchema: (isZodSchema(meta.outputSchema)
-			? meta.outputSchema
-			: zod.any()) as unknown as MastraOutputSchema<TProc>,
-		// biome-ignore lint/suspicious/noExplicitAny: Mastra's execute output type diverges from oRPC call() when output is inferred
-		execute: async (input, ctx): Promise<any> => {
+		inputSchema:
+			inputSchema ??
+			({
+				'~standard': {
+					version: 1,
+					vendor: 'orpc-fn',
+					validate: () => ({ value: {} }),
+					jsonSchema: {
+						input: () => ({ type: 'object', properties: {} }),
+						output: () => ({ type: 'object', properties: {} })
+					}
+				}
+			} satisfies ToolSchema),
+		...(meta.outputSchema
+			? { outputSchema: passThroughOutputSchema(meta.outputSchema) }
+			: {}),
+		execute: async (input, ctx) => {
 			const requestContext = ctx?.requestContext as RequestContext | undefined
 			const context = requestContext?.get(contextKey)
 			if (!context) {
@@ -135,7 +123,7 @@ export function createMastraTool<TProc extends AnyProcedure>(
 			try {
 				const result = await call(
 					procedure,
-					input,
+					meta.inputSchema ? input : undefined,
 					ctx?.abortSignal ? { context, signal: ctx.abortSignal } : { context }
 				)
 				finish('success')
@@ -147,5 +135,6 @@ export function createMastraTool<TProc extends AnyProcedure>(
 		}
 	})
 
-	return tool as unknown as CreateMastraToolReturn<TProc>
+	// The runtime schemas are untyped `ToolSchema`s; `MastraTool` is the typed surface.
+	return tool as unknown as MastraTool<TProc>
 }

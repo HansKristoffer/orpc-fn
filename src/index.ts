@@ -12,11 +12,18 @@ export {
 	type LogAttributes
 } from './logger.js'
 export { FN_META_KEY, type FnMeta, readFnMeta } from './meta.js'
-export type { AttributeValue, OtelApiLike, SpanLike } from './otel.js'
+export type {
+	AttributeValue,
+	OtelApiLike,
+	SpanLike,
+	SpanOf,
+	Tracing
+} from './otel.js'
 export { createRouter } from './router.js'
 export type {
 	AnyFnContext,
 	BuilderLike,
+	CurrentContextOf,
 	Fn,
 	FnCompletedEvent,
 	FnContext,
@@ -24,8 +31,14 @@ export type {
 	FnProcedure,
 	FnRouteOptions,
 	Guard,
+	GuardOptions,
 	GuardParams,
 	HandlerParams,
+	InitialContextOf,
+	ProcedureContext,
+	ProcedureInput,
 	ProcedureKey,
+	ProcedureOutput,
+	ReservedOptionKey,
 	RouteConfig
 } from './types.js'

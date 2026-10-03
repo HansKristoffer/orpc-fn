@@ -1,52 +1,44 @@
-import type {
-	AnySchema,
-	InferSchemaInput,
-	InferSchemaOutput
-} from '@orpc/contract'
-import { type AnyProcedure, call, type Procedure } from '@orpc/server'
+import { type AnyProcedure, call } from '@orpc/server'
 import { readFnMeta } from './meta.js'
-import type { Tracing } from './otel.js'
+import { createTracing, type Tracing } from './otel.js'
+import type {
+	ProcedureContext,
+	ProcedureInput,
+	ProcedureOutput
+} from './types.js'
 
-type InferInput<T> =
-	T extends Procedure<
-		infer _TInitialContext,
-		infer _TCurrentContext,
-		infer TInputSchema extends AnySchema,
-		AnySchema,
-		infer _TErrorMap,
-		infer _TMeta
-	>
-		? InferSchemaInput<TInputSchema>
-		: unknown
-
-type InferOutput<T> =
-	T extends Procedure<
-		infer _TInitialContext,
-		infer _TCurrentContext,
-		AnySchema,
-		infer TOutputSchema extends AnySchema,
-		infer _TErrorMap,
-		infer _TMeta
-	>
-		? InferSchemaOutput<TOutputSchema>
-		: unknown
-
-/** Calls another procedure with the caller's context and signal. */
-export type BoundCall = <T extends AnyProcedure>(
-	procedure: T,
-	input: InferInput<T>
-) => Promise<InferOutput<T>>
+/** Rejects a procedure whose context the caller's context does not satisfy. */
+type ContextCheck<TContext, T> = [TContext] extends [ProcedureContext<T>]
+	? unknown
+	: {
+			'orpc-fn: the calling context does not satisfy this procedure': ProcedureContext<T>
+		}
 
 /**
- * Creates a bound call: nested `fn` calls keep the caller's context and abort
+ * Calls another procedure with the caller's context and signal. `TContext` is
+ * the caller's context; the callee must accept it.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: an unbound call accepts any procedure
+export type BoundCall<TContext = any> = <T extends AnyProcedure>(
+	procedure: T & ContextCheck<TContext, T>,
+	input: ProcedureInput<T>
+) => Promise<ProcedureOutput<T>>
+
+const noTracing = createTracing(undefined)
+
+/**
+ * Creates a bound call: nested calls keep the caller's context and abort
  * signal and run inside a `call: <name>` child span, so the trace shows the
  * whole call tree. oRPC's `call` runs the callee's own middleware and guards.
+ *
+ * Handlers get one as `call`. Outside a handler (seeders, tests) use
+ * `createCall` from `createFn`, which traces with the instance's OpenTelemetry.
  */
-export function createBoundCall(
-	context: unknown,
-	signal: AbortSignal | undefined,
-	tracing: Tracing
-): BoundCall {
+export function createBoundCall<TContext>(
+	context: TContext,
+	signal?: AbortSignal,
+	tracing: Tracing = noTracing
+): BoundCall<TContext> {
 	return ((procedure: AnyProcedure, input: unknown) => {
 		const name = readFnMeta(procedure).name ?? 'unknown_procedure'
 		return tracing.inSpan(`call: ${name}`, 'INTERNAL', async (span) => {
@@ -67,5 +59,5 @@ export function createBoundCall(
 				span?.end()
 			}
 		})
-	}) as BoundCall
+	}) as BoundCall<TContext>
 }

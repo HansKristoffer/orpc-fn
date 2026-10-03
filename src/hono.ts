@@ -1,7 +1,11 @@
 import { SmartCoercionPlugin } from '@orpc/json-schema'
 import { OpenAPIHandler } from '@orpc/openapi/fetch'
 import { OpenAPIReferencePlugin } from '@orpc/openapi/plugins'
-import { type AnyRouter, onError as orpcOnError } from '@orpc/server'
+import {
+	type AnyRouter,
+	type InferRouterInitialContext,
+	onError as orpcOnError
+} from '@orpc/server'
 import { RPCHandler } from '@orpc/server/fetch'
 import { BatchHandlerPlugin } from '@orpc/server/plugins'
 import type { StandardHandlerPlugin } from '@orpc/server/standard'
@@ -11,14 +15,38 @@ import { isExpectedClientError } from './expected-client-error.js'
 import type { ProcedureFilter } from './mcp.js'
 
 /** Per-request timings in ms; `fn()` adds `handler_ms`. Sent as Server-Timing. */
-export type RequestTiming = Record<string, number | undefined>
+export type RequestTiming = Record<string, number>
+
+/** What every request starts with; the default context when `context` is omitted. */
+export type BaseContext = { headers: Headers; timing: RequestTiming }
+
+/**
+ * Builds the router's initial context from the request. Return a `Response`
+ * to answer (e.g. 401) instead.
+ */
+export type ContextFactory<E extends Env, R extends AnyRouter> = (
+	c: HonoContext<E>,
+	base: BaseContext
+) =>
+	| InferRouterInitialContext<R>
+	| Response
+	| Promise<InferRouterInitialContext<R> | Response>
+
+/** `context` is optional only when the base context already satisfies the router. */
+type ContextOption<E extends Env, R extends AnyRouter> =
+	BaseContext extends InferRouterInitialContext<R>
+		? { context?: ContextFactory<E, R> }
+		: { context: ContextFactory<E, R> }
 
 type Path = `/${string}`
 // biome-ignore lint/suspicious/noExplicitAny: plugins are context-agnostic here
 type Plugin = StandardHandlerPlugin<any>
 
-export type MountOrpcOptions<E extends Env> = {
-	router: AnyRouter
+export type MountOrpcOptions<
+	E extends Env,
+	R extends AnyRouter
+> = ContextOption<E, R> & {
+	router: R
 	/** Mount the RPC handler (oRPC's `RPCLink`) here. Omit to skip it. */
 	rpcPrefix?: Path
 	/** Mount the OpenAPI (REST) handler and its Scalar docs here. */
@@ -43,11 +71,6 @@ export type MountOrpcOptions<E extends Env> = {
 	sseKeepAlive?: boolean | number
 	/** Extra RPC plugins (e.g. `CORSPlugin`). */
 	plugins?: Plugin[]
-	/** Build the oRPC context. Return a `Response` to answer (e.g. 401) instead. */
-	context?: (
-		c: HonoContext<E>,
-		base: { headers: Headers; timing: RequestTiming }
-	) => unknown | Promise<unknown>
 	/** Rewrite request headers before they reach the context (see `normalizeExpoOrigin`). */
 	normalizeHeaders?: (headers: Headers) => Headers
 	/** Time spent before the handler ran, reported as `queue`. */
@@ -74,7 +97,7 @@ export function normalizeExpoOrigin(raw: Headers): Headers {
 
 export function formatServerTiming(
 	totalMs: number,
-	timing: RequestTiming
+	timing: Record<string, number | undefined>
 ): string {
 	const parts = [`total;dur=${totalMs.toFixed(2)}`]
 	for (const [key, value] of Object.entries(timing)) {
@@ -111,9 +134,9 @@ function finishResponse(
 }
 
 /** Mount oRPC's RPC and OpenAPI handlers on a Hono app. */
-export function mountOrpc<E extends Env>(
+export function mountOrpc<E extends Env, R extends AnyRouter>(
 	app: Hono<E>,
-	options: MountOrpcOptions<E>
+	options: MountOrpcOptions<E, R>
 ): void {
 	const {
 		router,

@@ -78,7 +78,10 @@ mountOrpc(app, {
 	rpcPrefix: '/rpc',
 	openapi: { prefix: '/api', info: { title: 'Todo API', version: '1.0.0' } },
 	// Demo auth: `x-user-id` header. Real apps resolve a session here.
-	context: (c, base) => ({ ...base, userId: c.req.header('x-user-id') })
+	context: (c, base) => {
+		const userId = c.req.header('x-user-id')
+		return userId ? { ...base, userId } : base
+	}
 })
 
 export default { port: 3000, fetch: app.fetch }

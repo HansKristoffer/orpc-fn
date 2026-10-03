@@ -105,6 +105,27 @@ describe('createRpcLink', () => {
 		expect(hits).toHaveLength(2)
 	})
 
+	test('calls with a client context are not batched and keep it', async () => {
+		hits.length = 0
+		const seen: unknown[] = []
+		const typed: RouterClient<typeof router, { token: string }> =
+			createORPCClient(
+				createRpcLink<{ token: string }>({
+					url,
+					fetch: (request, _init, options) => {
+						seen.push(options.context.token)
+						return serve(request)
+					}
+				})
+			)
+		await Promise.all([
+			typed.echo({ text: 'a' }, { context: { token: 't1' } }),
+			typed.echo({ text: 'b' }, { context: { token: 't2' } })
+		])
+		expect(seen.sort()).toEqual(['t1', 't2'])
+		expect(hits).toHaveLength(2)
+	})
+
 	test('hasOrpcErrorCode checks route errors', async () => {
 		const error = await client.missing().catch((caught: unknown) => caught)
 		expect(hasOrpcErrorCode(error, 'NOT_FOUND')).toBe(true)

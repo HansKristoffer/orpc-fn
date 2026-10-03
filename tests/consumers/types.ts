@@ -247,6 +247,15 @@ type LiveOutputs = InferRouterOutputs<{ list: typeof list.procedure }>
 export type LiveOutput = Assert<
 	Equal<LiveOutputs['list'], { org: string; by: string }>
 >
+type LiveItem =
+	InferRouterOutputs<{ s: typeof list.subscribe }>['s'] extends AsyncIterable<
+		infer U
+	>
+		? U
+		: never
+export type LiveStream = Assert<
+	Equal<LiveItem, { org: string; by: string } | { touched: string }>
+>
 list.publish({ org: 'a' })
 const patch: FnLivePatch<number, string> = fnLivePatch(1, 'x')
 void [patch, streamLiveSnapshots]
@@ -264,10 +273,17 @@ void transports
 // ── Adapters ────────────────────────────────────────────────────────────────
 const tool = createMastraTool(inOut)
 export type ToolTypes = [
-	// Mastra infers the schemas; their values are the procedure's types.
-	Assert<Equal<z.infer<InferToolInput<typeof tool>>, { id: string }>>,
-	Assert<Equal<z.infer<InferToolOutput<typeof tool>>, { ok: boolean }>>
+	// Raw procedure input in, parsed procedure output out.
+	Assert<Equal<InferToolInput<typeof tool>, { id: string }>>,
+	Assert<Equal<InferToolOutput<typeof tool>, { ok: boolean }>>
 ]
+const stringInput = fn({
+	name: 'stringInput',
+	input: z.string(),
+	handler: () => 1
+})
+// @ts-expect-error agent tools need an object input
+createMastraTool(stringInput)
 const tools = listTools(router, { filter: hasTag('external') })
 const toolName: string | undefined = tools[0]?.name
 void toolName
@@ -275,12 +291,20 @@ mountOrpc(new Hono(), {
 	router,
 	rpcPrefix: '/rpc',
 	openapi: { prefix: '/api', filter: hasTag('external') },
-	context: (c, { headers, timing }) => ({
-		headers,
-		timing,
-		ip: c.req.header('x-ip')
-	})
+	context: (c, { headers }) =>
+		c.req.header('x-deny') ? new Response(null, { status: 401 }) : { headers }
 })
+mountOrpc(new Hono(), {
+	router,
+	rpcPrefix: '/rpc',
+	// @ts-expect-error the factory must return the router's context
+	context: () => ({ headers: 'not headers' })
+})
+const strict = os
+	.$context<{ tenant: string }>()
+	.handler(({ context }) => context.tenant)
+// @ts-expect-error `context` is required when the base context is not enough
+mountOrpc(new Hono(), { router: { strict }, rpcPrefix: '/rpc' })
 
 // ── Client ──────────────────────────────────────────────────────────────────
 const client: RouterClient<typeof router> = createORPCClient(
@@ -298,17 +322,103 @@ void isMissing
 declare const expoFetch: (
 	input: string | URL | Request,
 	init?: {
-		body?: BodyInit | null
-		headers?: HeadersInit
+		body?: RequestInit['body']
+		headers?: RequestInit['headers']
 		method?: string
 		signal?: AbortSignal | null
-		credentials?: RequestCredentials
-		redirect?: RequestRedirect
+		credentials?: RequestInit['credentials']
+		redirect?: RequestInit['redirect']
 	}
-) => Promise<{ status: number }>
+) => Promise<Response>
 createExpoLink<{ keepalive?: boolean }>({
 	url: 'http://localhost/rpc',
 	fetch: expoFetch,
 	native: true,
 	getCookie: () => null
+})
+createExpoLink({
+	url: 'http://localhost/rpc',
+	// @ts-expect-error a fetch must resolve to a response oRPC can read
+	fetch: async () => ({ status: 200 }),
+	native: true
+})
+
+// ── Transformed schemas ─────────────────────────────────────────────────────
+const lengthOut = z.string().transform((value) => value.length)
+const measured = fn({
+	name: 'measured',
+	input: z.object({ at: z.string().transform((value) => new Date(value)) }),
+	output: lengthOut,
+	handler: ({ input }) => input.at.toISOString()
+})
+export type Transformed = [
+	Assert<Equal<InferRouterInputs<{ m: typeof measured }>['m'], { at: string }>>,
+	Assert<Equal<InferRouterOutputs<{ m: typeof measured }>['m'], number>>
+]
+// biome-ignore format: the expected error must stay on one line
+// @ts-expect-error the handler returns the output schema's input (string)
+fn({ name: 'badMeasured', output: lengthOut, handler: () => 3 })
+const transformedEvents = createPubSub({
+	name: 'transformedEvents',
+	channel: 'x',
+	inputSchema: z.object({}),
+	eventSchema: z.object({
+		at: z.string().transform((value) => new Date(value))
+	}),
+	filterFn: ({ data }) => data.at instanceof Date
+})
+transformedEvents.publish({ at: '2026-01-01' })
+// @ts-expect-error publish takes the event schema input
+transformedEvents.publish({ at: new Date() })
+
+// ── Context-checked calls ───────────────────────────────────────────────────
+const tenantOnly = os
+	.$context<{ tenant: string }>()
+	.handler(({ context }) => context.tenant)
+fn({
+	name: 'callsTenant',
+	handler: ({ call }) =>
+		// @ts-expect-error the protected context has no tenant
+		call(tenantOnly, undefined)
+})
+const { createCall } = createFn({
+	procedures: { public: os },
+	default: 'public'
+})
+createCall({ tenant: 't' })(tenantOnly, undefined)
+// @ts-expect-error the context lacks tenant
+createCall({})(tenantOnly, undefined)
+
+// ── Option collisions ───────────────────────────────────────────────────────
+createFn({
+	procedures: { public: os },
+	default: 'public',
+	// @ts-expect-error `name` is a route option
+	guards: { name: (_value: string) => {} }
+})
+createFn({
+	procedures: { public: os },
+	default: 'public',
+	// @ts-expect-error `path` is a route option
+	meta: {} as { path?: string }
+})
+
+// ── Extras ──────────────────────────────────────────────────────────────────
+const asyncExtras = createFn({
+	procedures: { public: os },
+	default: 'public',
+	extras: async () => ({ db: { ready: true as const } })
+})
+asyncExtras.fn({
+	name: 'usesDb',
+	handler: ({ db }) => {
+		const ready: true = db.ready
+		return ready
+	}
+})
+createFn({
+	procedures: { public: os },
+	default: 'public',
+	// @ts-expect-error extras need known keys
+	extras: () => ({}) as Record<string, number>
 })

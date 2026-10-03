@@ -12,8 +12,17 @@ export type ExpoFetchInit = {
 	redirect?: NonNullable<RequestInit['redirect']>
 }
 
+/** The response members oRPC reads; `expo/fetch`'s `FetchResponse` has them. */
+export type ExpoResponse = Pick<
+	Response,
+	'status' | 'headers' | 'body' | 'text' | 'blob' | 'formData'
+>
+
 /** `fetch` from `expo/fetch` (the only fetch that streams on native). */
-export type ExpoFetch = (url: string, init: ExpoFetchInit) => Promise<unknown>
+export type ExpoFetch = (
+	url: string,
+	init: ExpoFetchInit
+) => Promise<ExpoResponse>
 
 /**
  * oRPC's link `fetch` for React Native, built on `expo/fetch`.
@@ -50,8 +59,8 @@ export function createExpoFetch(options: {
 			signal: request.signal,
 			credentials: 'omit'
 		})
-		// expo/fetch's response lacks a few DOM fields; oRPC only reads the body
-		// stream, status and headers, which it has.
+		// Not rebuilt with `new Response(...)`: React Native's Response polyfill
+		// cannot stream a body. oRPC reads only the `ExpoResponse` members.
 		return response as Response
 	}
 }

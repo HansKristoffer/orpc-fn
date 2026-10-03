@@ -60,7 +60,15 @@ lullu passes `summary: { base, chat, voice }` in five files. The library keeps `
 
 ## Mastra version
 
-`createMastraTool` returns `Tool<InputSchema, OutputSchema>`, which is how `@mastra/core` 1.51 (lullu) types tools. Mastra 1.0.x typed `Tool<>` with values instead, so the optional peer is `^1.51.0`. gey-mono bumps Mastra during its migration.
+Mastra 1.51 accepts any Standard Schema with JSON Schema attached, so `createMastraTool` gives Mastra a schema that checks the procedure's input and passes the raw value on, and a pass-through output schema. The procedure parses everything exactly once; handing Mastra the procedure's own Zod schemas would apply every transform twice. Mastra 1.0.x requires Zod schemas, so the optional peer is `^1.51.0`. gey-mono bumps Mastra during its migration.
+
+## Schema input and output
+
+oRPC parses a handler's return value through the output schema, so the handler returns the schema's input type and callers receive its output type. The same split applies to pub/sub: publishers pass the event schema's input type; subscribers, filters and channel resolvers receive its output type. The raw event travels in oRPC's own JSON format (`StandardRPCJsonSerializer`, from `@orpc/client`, which `@orpc/server` already depends on) and each receiver parses it once. Payloads without the envelope are read as plain JSON, so mixed versions keep working during a rolling deploy.
+
+## Live subscriptions open eagerly
+
+`fnLive` authorizes and subscribes before it builds the initial snapshot. The earlier pattern, calling the subscribe procedure and then loading the snapshot, sent the snapshot before `authFn` ran (an async generator does not run until its first `next()`). It also missed events published while the snapshot loaded. lullu's in-repo `fn-live.ts` has both problems.
 
 ## Client helpers
 

@@ -5,10 +5,10 @@ Define a backend function once. You get a typed [oRPC](https://orpc.dev) procedu
 Your app keeps everything app-specific: auth and session, context shape, database, queues, i18n, feature flags and permissions. You inject them once with `createFn`.
 
 ```sh
-bun add orpc-fn @orpc/server @orpc/contract zod
+bun add orpc-fn @orpc/server @orpc/contract @orpc/client zod
 ```
 
-ESM only, Node 20+ or Bun, TypeScript 5.7+, oRPC 1.14+, Zod 4. Optional peers per subpath are listed below.
+ESM only, Node 20+ or Bun, TypeScript 5.7+, oRPC 1.14+ (`@orpc/client` is already a dependency of `@orpc/server`), Zod 4. Optional peers per subpath are listed below.
 
 ## 30 seconds
 
@@ -60,7 +60,7 @@ Every call runs in an OpenTelemetry span named `order.get`, runs the `permission
 createFn({
   procedures,      // named oRPC builders; the handler context is the builder's context
   default,         // builder used when a route omits `procedure`
-  extras,          // ({ context, span, signal, name, procedure }) => values merged into handler params
+  extras,          // ({ context, span, signal, name, procedure }) => values (or a promise) merged into handler params
   guards,          // { key: (value, { context, input, name, meta, signal }) => void } — each key is a typed fn() option
   meta,            // `{} as { readOnly?: boolean }` — typed fn() options stored on the procedure
   tags,            // ['internal', 'external'] — allowed route tags
@@ -73,17 +73,19 @@ createFn({
 })
 ```
 
-It returns `fn`, `fnLive`, `createPubSub`, `createPublisher`, `createRouter`, `readMeta`, `drainPubSubSubscribers` and `activePubSubSubscriberCount`.
+It returns `fn`, `fnLive`, `createPubSub`, `createPublisher`, `createRouter`, `readMeta`, `createCall`, `drainPubSubSubscribers` and `activePubSubSubscriberCount`.
 
-**`fn(options)`** has four overloads (input and output schema, each given or inferred). Route options: `name` (required; operationId and span name), `procedure`, `path`, `method`, `summary`, `description`, `tags`, `deprecated`, `successStatus`, `successDescription`, `inputStructure`, `outputStructure`, every guard key and every meta key. The handler receives `input`, `context`, `call`, `signal`, `span`, `logger` and your extras.
+Procedure builders must not set an input or output schema (`os.input(...)`); put schemas on routes. Guard and meta keys must not reuse a route option name (`name`, `tags`, `input`, …), and guards and meta must not share a key. Both are type errors, and a reserved guard name also throws at startup.
+
+**`fn(options)`** has four overloads (input and output schema, each given or inferred). Route options: `name` (required; operationId and span name), `procedure`, `path`, `method`, `summary`, `description`, `tags`, `deprecated`, `successStatus`, `successDescription`, `inputStructure`, `outputStructure`, every guard key and every meta key. The handler receives `input`, `context`, `call`, `signal`, `span`, `logger` and your extras. With an output schema, the handler returns the schema's input type and callers receive its output type, so `output: z.string().transform(Number)` means the handler returns a string and callers get a number.
 
 **Guards** run inside the span, before the handler, and only on routes that set their option. Throw (usually an `ORPCError`) to refuse.
 
-**`call(procedure, input)`** calls another procedure with the caller's context and abort signal, inside a `call: <name>` child span. Input and output are typed from the callee.
+**`call(procedure, input)`** calls another procedure with the caller's context and abort signal, inside a `call: <name>` child span. Input and output are typed from the callee. Calling a procedure whose context the caller's context does not satisfy is a type error. Outside a handler (seeders, scripts, tests), use `createCall(context, signal?)` from `createFn`.
 
 **Meta** is stored in oRPC's own procedure meta. It survives `os.router()`, prefixes and lazy routers. Read it with `readMeta(procedure)` (typed) or `readFnMeta(procedure)`.
 
-Also exported: `isExpectedClientError`, `createBoundedEventQueue`, `createRouter`, and the types `HandlerParams`, `RouteConfig`, `BoundCall`, `FnMeta`, `FnContext`, `FnCompletedEvent`.
+Also exported: `isExpectedClientError`, `createBoundedEventQueue`, `createRouter`, `createBoundCall`, and the types `HandlerParams`, `RouteConfig`, `BoundCall`, `FnMeta`, `FnContext`, `FnCompletedEvent`, `ProcedureInput`, `ProcedureOutput`, `ProcedureContext`, `InitialContextOf`, `CurrentContextOf` and `GuardOptions`.
 
 ## `orpc-fn/live`: pub/sub and live queries
 
@@ -111,7 +113,7 @@ export const listOrders = fnLive({
 await listOrders.publish({ organizationId, orderId }) // after a write
 ```
 
-The `subscribe` route streams the initial snapshot, then a new one per event. Options:
+The `subscribe` route first runs `authFn` and subscribes to the channel, then streams the initial snapshot, then a new one per event. A refused subscriber receives nothing, and events published while the snapshot loads are not lost. Snapshots go through the output schema, like the route's own result. Options:
 
 - `shouldUpdate` skips an event.
 - `transformerFn` folds an event into `previous` instead of re-running the handler. It may return `fnLivePatch(state, emit)` to send a small payload and keep the full state.
@@ -120,7 +122,7 @@ The `subscribe` route streams the initial snapshot, then a new one per event. Op
 - `overflowMarker` is enqueued when a slow subscriber's queue overflows, once per overflow episode, so the client can resync.
 - `safePublish` logs publish errors instead of throwing them.
 
-**`createPubSub`** returns a typed `subscribe` route plus `publish`, `publishMany` (one atomic round-trip across channels) and `getChannelName`. Options: `filterFn`, `authFn`, `mirrorChannel`, `overflowMarker`, `procedure`. Each pub/sub definition subscribes to each channel once and parses each payload once for all local subscribers. A lost subscription is retried with exponential backoff and jitter. **`createPublisher`** is the publish-only half.
+**`createPubSub`** returns a typed `subscribe` route plus `publish`, `publishMany` (one atomic round-trip across channels) and `getChannelName`. Publishers pass the event schema's input type; subscribers, filters and channel resolvers get its output type. The raw event travels in oRPC's JSON format, so `Date`, `Map`, `Set` and `BigInt` survive, and each receiver parses it once. Options: `filterFn`, `authFn`, `mirrorChannel`, `overflowMarker`, `procedure`. Each pub/sub definition subscribes to each channel once and parses each payload once for all local subscribers. A lost subscription is retried with exponential backoff and jitter. **`createPublisher`** is the publish-only half.
 
 **Graceful shutdown:** call `drainPubSubSubscribers()` on SIGTERM. Open streams end cleanly and clients reconnect to the new deployment. Draining is per `createFn` instance.
 
@@ -138,7 +140,7 @@ The Redis transports publish and maintain backlogs with one Lua script, sent by 
 
 ## `orpc-fn/mastra`
 
-Optional peer: `@mastra/core` ^1.51.
+Optional peers: `@mastra/core` ^1.51, `@orpc/zod`, `@orpc/json-schema`.
 
 ```ts
 import { createMastraTool } from 'orpc-fn/mastra'
@@ -147,7 +149,9 @@ const tool = createMastraTool(getOrder, { requireApproval: true })
 // at run time: requestContext.set('orpcContext', context)
 ```
 
-Options: `id`, `description`, `requireApproval`, `allowMissingInputSchema`, `onExecuteFinish`, `contextKey` (default `'orpcContext'`). The tool keeps the types Mastra's `InferToolInput`/`InferUITools` read. Execution goes through oRPC `call`, so middleware and guards apply.
+Options: `id`, `description`, `requireApproval`, `allowMissingInputSchema`, `onExecuteFinish`, `contextKey` (default `'orpcContext'`). Execution goes through oRPC `call`, so middleware and guards apply.
+
+The tool takes the procedure's raw input and returns its parsed output, and `InferToolInput`/`InferToolOutput`/`InferUITools` see exactly those types. Mastra validates the input (coercing date strings) but passes the raw value on, so the procedure parses it once. Agent tools need an object input: any other input is a type error and throws.
 
 ## `orpc-fn/mcp`
 
@@ -161,7 +165,7 @@ for (const { name, procedure, config } of listTools(router, { filter: hasTag('ex
 }
 ```
 
-Tool names are the sanitized `fn` names (`user.me` becomes `user-me`). Input schemas carry the same JSON Schema as your OpenAPI docs (dates become `string`/`date-time`), and validation turns them back into `Date`s. `readOnlyHint` defaults to GET routes; pass `readOnly` to change it. `hasTag(tag)` also works as an oRPC `OpenAPIHandler` filter.
+Tool names are the sanitized `fn` names (`user.me` becomes `user-me`). Input schemas carry the same JSON Schema as your OpenAPI docs (dates become `string`/`date-time`), and validation turns them back into `Date`s. Validation returns the raw arguments, so `call(procedure, args, { context })` parses them exactly once. `readOnlyHint` defaults to GET routes; pass `readOnly` to change it. `hasTag(tag)` also works as an oRPC `OpenAPIHandler` filter.
 
 ## `orpc-fn/hono`
 
@@ -188,11 +192,11 @@ Behaviour:
 - Scalar docs are served at the OpenAPI prefix.
 - `onError` sees only unexpected errors.
 - `openapi.filter`, `openapi.smartCoercion` and `openapi.spec` (for security schemes) cover an external API with its own auth.
-- `context` may return a `Response`, for example a 401.
+- `context` builds the router's context and is checked against it: it is required when `{ headers, timing }` alone does not satisfy the router. It may return a `Response`, for example a 401.
 
 ## `orpc-fn/client`
 
-Optional peer: `@orpc/client`. Has no server code, so it is safe in frontends (Vue, React, Expo).
+Has no server code, so it is safe in frontends (Vue, React, Expo).
 
 ```ts
 import { createORPCClient } from '@orpc/client'
@@ -211,11 +215,11 @@ export const orpc = createTanstackQueryUtils(client) // Vue Query or React Query
 if (hasOrpcErrorCode(error, 'NOT_FOUND')) { /* … */ }
 ```
 
-`createRpcLink` takes every `RPCLink` option. It also batches parallel calls into one request, matching `mountOrpc`'s server-side batching (`batch: { maxSize, exclude }`, or `false` to turn it off). A streaming response cannot be batched, and the request doesn't say whether the response will stream, so streaming routes are recognised by name: any path segment containing `subscribe` is sent on its own (`isSubscriptionPath`).
+`createRpcLink` takes every `RPCLink` option. It also batches parallel calls into one request, matching `mountOrpc`'s server-side batching (`batch: { maxSize, exclude, groups }`, or `false` to turn it off). A batch is one request with one client context, so by default only calls without a client context are batched; pass `groups` to batch calls that share one. A streaming response cannot be batched, and the request doesn't say whether the response will stream, so streaming routes are recognised by name: any path segment containing `subscribe` is sent on its own (`isSubscriptionPath`).
 
 ## `orpc-fn/expo`
 
-Optional peer: `@orpc/client`. Expo itself is passed in, not imported.
+Expo itself is passed in, not imported. The fetch must resolve to a response with the members oRPC reads (`expo/fetch` does).
 
 ```ts
 import { fetch } from 'expo/fetch'

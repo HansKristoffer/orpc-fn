@@ -1,13 +1,13 @@
 import type { AnySchema } from '@orpc/contract'
 import type { AnyProcedure } from '@orpc/server'
-import { createBoundCall } from './bound-call.js'
+import { type BoundCall, createBoundCall } from './bound-call.js'
 import { isExpectedClientError } from './expected-client-error.js'
 import { createFnLive, type FnLive } from './live/fn-live.js'
 import {
 	type CreatePublisher,
 	type CreatePubSub,
 	createLiveRuntime,
-	type LiveRuntimeOptions
+	type PubSubRuntimeOptions
 } from './live/pub-sub.js'
 import {
 	createDefaultLogger,
@@ -32,11 +32,15 @@ import { createRouter } from './router.js'
 import type {
 	AnyFnContext,
 	BuilderLike,
+	FiniteExtras,
 	Fn,
 	FnCompletedEvent,
 	FnDefinition,
 	Guard,
-	GuardParams
+	GuardParams,
+	MaybePromise,
+	RejectKeys,
+	ReservedOptionKey
 } from './types.js'
 
 const ROUTE_KEYS = [
@@ -51,6 +55,17 @@ const ROUTE_KEYS = [
 	'outputStructure',
 	'tags'
 ] as const
+
+const RESERVED_KEYS: readonly ReservedOptionKey[] = [
+	...ROUTE_KEYS,
+	'name',
+	'procedure',
+	'input',
+	'output',
+	'handler',
+	'live',
+	'operationId'
+]
 
 type BuilderChain = {
 	route(route: Record<string, unknown>): BuilderChain
@@ -92,19 +107,38 @@ export type CreateFnOptions<
 	procedures: TProcedures
 	/** Builder used when a route omits `procedure`. */
 	default: TDefault
-	/** Per-call values merged into every handler's params. */
+	/** Per-call values merged into every handler's params; may be async. */
 	extras?: (params: {
 		context: UnionContext<TProcedures>
 		span: SpanOf<TOtel> | undefined
 		signal: AbortSignal | undefined
 		name: string
 		procedure: string
-	}) => TExtras
-	/** Checks run before the handler; each key becomes a typed `fn()` option. */
+	}) => MaybePromise<TExtras>
+	/**
+	 * Checks run before the handler; each key becomes a typed `fn()` option.
+	 * Keys must not reuse route options or meta keys.
+	 */
 	guards?: TGuards &
-		Record<string, Guard<never, GuardParams<UnionContext<TProcedures>, TMeta>>>
-	/** Typed route metadata: `meta: {} as { readOnly?: boolean }`. Keys become `fn()` options. */
-	meta?: TMeta
+		Record<
+			string,
+			Guard<never, GuardParams<UnionContext<TProcedures>, TMeta>>
+		> &
+		RejectKeys<
+			NoInfer<TGuards>,
+			ReservedOptionKey | keyof NoInfer<TMeta>,
+			'orpc-fn: this guard name is a route option or meta key'
+		>
+	/**
+	 * Typed route metadata: `meta: {} as { readOnly?: boolean }`. Keys become
+	 * `fn()` options and must not reuse route options.
+	 */
+	meta?: TMeta &
+		RejectKeys<
+			NoInfer<TMeta>,
+			ReservedOptionKey,
+			'orpc-fn: this meta key is a route option'
+		>
 	/** Allowed route tags: `tags: ['internal', 'external']`. */
 	tags?: readonly TTag[]
 	/** `import * as otel from '@opentelemetry/api'`. Omit for no tracing. */
@@ -125,7 +159,7 @@ export type CreateFnOptions<
 	/** Errors that are the caller's fault, logged at `warn`. Default: 4xx `ORPCError` or `AbortError`. */
 	isExpectedError?: (error: unknown) => boolean
 	/** Needed for `fnLive` and `createPubSub`. */
-	pubsub?: LiveRuntimeOptions['pubsub']
+	pubsub?: PubSubRuntimeOptions
 }
 
 type Definition<
@@ -155,6 +189,14 @@ export type FnFactory<TDef extends FnDefinition> = {
 	createPublisher: CreatePublisher
 	createRouter: typeof createRouter
 	readMeta: (procedure: AnyProcedure) => FnMeta<TDef['meta']>
+	/**
+	 * A `call` outside any handler (seeders, scripts, tests), traced with this
+	 * instance's OpenTelemetry.
+	 */
+	createCall: <TContext>(
+		context: TContext,
+		signal?: AbortSignal
+	) => BoundCall<TContext>
 	/** End every open subscription of this instance; returns how many closed. */
 	drainPubSubSubscribers: () => number
 	activePubSubSubscriberCount: () => number
@@ -183,7 +225,8 @@ export function createFn<
 		TTag,
 		TOtel,
 		TLogger
-	>
+	> &
+		FiniteExtras<NoInfer<TExtras>>
 ): FnFactory<
 	Definition<
 		TProcedures,
@@ -211,6 +254,21 @@ export function createFn<
 		string,
 		BuilderChain
 	>
+	for (const guard of Object.keys(guards)) {
+		if ((RESERVED_KEYS as readonly string[]).includes(guard)) {
+			throw new Error(
+				`orpc-fn: guard "${guard}" reuses a route option name; rename it`
+			)
+		}
+	}
+	for (const [key, builder] of Object.entries(procedures)) {
+		const def = (builder as { '~orpc'?: Record<string, unknown> })['~orpc']
+		if (def?.inputSchema !== undefined || def?.outputSchema !== undefined) {
+			throw new Error(
+				`orpc-fn: procedure "${key}" sets an input or output schema; set schemas on routes instead`
+			)
+		}
+	}
 	const resolveBuilder = (key: string | undefined) => {
 		const builder = procedures[key ?? options.default]
 		if (!builder) throw new Error(`orpc-fn: unknown procedure "${key}"`)
@@ -264,7 +322,7 @@ export function createFn<
 						})
 					}
 
-					const extras = options.extras?.({
+					const extras = await options.extras?.({
 						context: context as never,
 						span: span as never,
 						signal,
@@ -363,15 +421,18 @@ export function createFn<
 		...(options.pubsub ? { pubsub: options.pubsub } : {})
 	})
 
+	// The runtimes are untyped; `Fn`, `FnLive`, `CreatePubSub` and
+	// `CreatePublisher` are their typed surface.
 	return {
 		fn: fn as never,
-		fnLive: createFnLive(fn, live.createPubSub, createLogger, (option) =>
+		fnLive: createFnLive(fn, live.createChannel, createLogger, (option) =>
 			Object.hasOwn(guards, option)
 		) as never,
 		createPubSub: live.createPubSub as never,
-		createPublisher: live.createPublisher,
+		createPublisher: live.createPublisher as never,
 		createRouter,
 		readMeta: (procedure) => readFnMeta(procedure),
+		createCall: (context, signal) => createBoundCall(context, signal, tracing),
 		drainPubSubSubscribers: live.drainPubSubSubscribers,
 		activePubSubSubscriberCount: live.activePubSubSubscriberCount
 	}

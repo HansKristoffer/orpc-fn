@@ -2,11 +2,19 @@ import { type ClientContext, ORPCError, type ORPCErrorCode } from '@orpc/client'
 import { RPCLink, type RPCLinkOptions } from '@orpc/client/fetch'
 import { BatchLinkPlugin } from '@orpc/client/plugins'
 
+type BatchOptions<T extends ClientContext> = ConstructorParameters<
+	typeof BatchLinkPlugin<T>
+>[0]
+
 export type CreateRpcLinkOptions<T extends ClientContext> =
 	RPCLinkOptions<T> & {
 		/**
 		 * Collapse parallel calls into one HTTP request, matching `mountOrpc`'s
 		 * server-side batching. Default: true (25 calls). Pass false to turn off.
+		 *
+		 * A batch is one HTTP request, so it carries one client context. By
+		 * default only calls without a client context are batched; pass
+		 * `groups` to batch calls that share a context (e.g. a token).
 		 */
 		batch?:
 			| boolean
@@ -14,6 +22,7 @@ export type CreateRpcLinkOptions<T extends ClientContext> =
 					maxSize?: number
 					/** Calls that must not be batched. Default: {@link isSubscriptionPath}. */
 					exclude?: (path: readonly string[]) => boolean
+					groups?: BatchOptions<T>['groups']
 			  }
 	}
 
@@ -40,15 +49,24 @@ export function createRpcLink<T extends ClientContext = ClientContext>(
 ): RPCLink<T> {
 	const { batch = true, plugins = [], ...rest } = options
 	if (batch === false) return new RPCLink<T>({ ...rest, plugins })
-	const { maxSize = 25, exclude = isSubscriptionPath } =
-		batch === true ? {} : batch
+	const {
+		maxSize = 25,
+		exclude = isSubscriptionPath,
+		groups
+	} = batch === true ? {} : batch
 	return new RPCLink<T>({
 		...rest,
 		plugins: [
 			new BatchLinkPlugin<T>({
 				maxSize,
-				groups: [{ condition: () => true, context: {} as T }],
-				exclude: ({ path }) => exclude(path)
+				groups: groups ?? [
+					// Only context-free calls reach this group (see `exclude` below),
+					// so the batch's empty context is exactly theirs.
+					{ condition: () => true, context: {} as T }
+				],
+				exclude: ({ path, context }) =>
+					exclude(path) ||
+					(groups === undefined && Object.keys(context).length > 0)
 			}),
 			...plugins
 		]

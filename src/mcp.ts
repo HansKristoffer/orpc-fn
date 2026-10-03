@@ -1,32 +1,20 @@
-import type { AnySchema } from '@orpc/contract'
-import { JsonSchemaCoercer } from '@orpc/json-schema'
 import {
 	type AnyProcedure,
 	type AnyRouter,
 	type TraverseContractProcedureCallbackOptions,
 	traverseContractProcedures
 } from '@orpc/server'
-import { ZodToJsonSchemaConverter } from '@orpc/zod/zod4'
+import { rawInputSchema, type ToolSchema } from './json-schema.js'
 import { readFnMeta, toToolName } from './meta.js'
 
 export { toToolName }
+export { rawInputSchema as toolInputSchema }
+export type { ToolSchema }
 
 /** Picks procedures; also fits oRPC's `OpenAPIHandler({ filter })`. */
 export type ProcedureFilter = (
 	options: TraverseContractProcedureCallbackOptions
 ) => boolean
-
-type JsonSchema = Record<string, unknown>
-
-/** A Standard Schema that also exposes JSON Schema, as MCP SDKs expect. */
-export type ToolInputSchema = {
-	'~standard': AnySchema['~standard'] & {
-		jsonSchema: {
-			input: (options?: unknown) => JsonSchema
-			output: (options?: unknown) => JsonSchema
-		}
-	}
-}
 
 export type McpTool = {
 	/** Tool name: the sanitized `fn` name (`user.me` becomes `user-me`). */
@@ -34,7 +22,11 @@ export type McpTool = {
 	procedure: AnyProcedure
 	config: {
 		description?: string
-		inputSchema?: ToolInputSchema
+		/**
+		 * Validates and coerces (date strings to `Date`) but returns the raw
+		 * input: pass it to `call(procedure, args)`, which parses it once.
+		 */
+		inputSchema?: ToolSchema
 		annotations: { readOnlyHint: boolean }
 	}
 }
@@ -47,33 +39,6 @@ export const hasTag =
 
 const isGet: ProcedureFilter = ({ contract }) =>
 	contract['~orpc'].route.method === 'GET'
-
-const jsonSchemaConverter = new ZodToJsonSchemaConverter()
-const jsonSchemaCoercer = new JsonSchemaCoercer()
-
-/**
- * Zod validates the tool input, but its own JSON Schema export rejects types
- * like `z.date()`, which breaks the whole tool list. Use oRPC's converter so
- * tools get the same JSON Schema as the OpenAPI docs (dates become
- * string/date-time). Clients then send those dates as strings, so validation
- * coerces them back first; without it every `z.date()` input fails.
- */
-export function toolInputSchema(schema: AnySchema): ToolInputSchema {
-	const [, jsonSchema] = jsonSchemaConverter.convert(schema, {
-		strategy: 'input'
-	})
-	const json = jsonSchema as JsonSchema
-	return {
-		'~standard': {
-			...schema['~standard'],
-			validate: (value) =>
-				schema['~standard'].validate(
-					jsonSchemaCoercer.coerce(jsonSchema, value)
-				),
-			jsonSchema: { input: () => json, output: () => json }
-		}
-	}
-}
 
 /**
  * MCP tool definitions for the procedures in `router` matching `filter`
@@ -99,7 +64,7 @@ export function listTools(
 			procedure,
 			config: {
 				...(description === undefined ? {} : { description }),
-				...(inputSchema ? { inputSchema: toolInputSchema(inputSchema) } : {}),
+				...(inputSchema ? { inputSchema: rawInputSchema(inputSchema) } : {}),
 				annotations: { readOnlyHint: readOnly(traversed) }
 			}
 		})

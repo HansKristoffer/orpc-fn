@@ -9,7 +9,7 @@ bun add orpc-fn
 # before the first release: "orpc-fn": "file:../orpc-fn" in the root catalog, or `bun link orpc-fn`
 ```
 
-Use oRPC 1.14 or newer and Zod 4. Add the optional peers you use: `@opentelemetry/api`; `ioredis` for the ioredis transport; `@mastra/core` ^1.51; and `hono`, `@orpc/openapi`, `@orpc/zod` and `@orpc/json-schema` for the adapters.
+Use oRPC 1.14 or newer and Zod 4. `@orpc/client` is a required peer, and it is already installed with `@orpc/server`. Add the optional peers you use: `@opentelemetry/api`; `ioredis` for the ioredis transport; `@mastra/core` ^1.51; and `hono`, `@orpc/openapi`, `@orpc/zod` and `@orpc/json-schema` for the adapters.
 
 ## 2. What moves where
 
@@ -48,7 +48,7 @@ import { assertNeededFeatureFlags } from './needed-feature-flags'
 
 export const {
   fn, fnLive, createPubSub, createPublisher, createRouter,
-  readMeta, drainPubSubSubscribers, activePubSubSubscriberCount
+  readMeta, createCall: createBoundCall, drainPubSubSubscribers, activePubSubSubscriberCount
 } = createFn({
   procedures: { public: publicProcedure, protected: protectedProcedure, support: supportProcedure },
   default: 'protected',
@@ -120,12 +120,14 @@ guards: {
 | `readFnProcedureMeta(p).inputSchema`, `.outputSchema`, `.description`, `.summary` | same names on `readMeta(p)` |
 | `requireAgentToolMeta(p)` | `readMeta(p)`, then check `inputSchema` |
 | `FN_OPERATION_ID` symbol lookups | `readMeta(p).name` |
+| `createBoundCall(context)` in seeders and tests | `createCall(context)` from `createFn`, re-exported as `createBoundCall` if you want no diff |
 | `getOperationId(p)` (gey-mono) | `toToolName(readMeta(p).name)` from `orpc-fn/mcp` |
 
 ## 6. Live
 
 - **Shutdown:** `drainPubSubSubscribers()` and `activePubSubSubscriberCount()` now come from the `createFn` result, not a module. Call them in the SIGTERM handler and the OTel gauge.
 - **Redis connection:** the transport opens its own subscriber connection with `duplicate()`. The old managed client's subscriber half (leases, ref counts, mux handlers) is no longer used.
+- **Behaviour fixed:** `fnLive` now runs `authFn` before sending the initial snapshot, parses its input once, and sends snapshots through the output schema. `publish` takes the event schema's input type. A `filterFn` that throws no longer stops delivery to other subscribers. lullu's in-repo copy has all four bugs.
 - **Behaviour kept:** per-channel fan-out, backlog replay, the drop-oldest bounded queue with one overflow marker per episode, resubscribe backoff with jitter, `coalesceMs`, `shouldUpdate`, `transformerFn`, patch emits, `mirrorChannel` and `publishMany`.
 
 ## 7. HTTP

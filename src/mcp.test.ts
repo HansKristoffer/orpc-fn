@@ -1,4 +1,5 @@
-import { describe, test, expect } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
+import { call } from '@orpc/server'
 import { z } from 'zod'
 import { createRouter, fn } from '../tests/fixture.js'
 import { hasTag, listTools, type ProcedureFilter } from './mcp.js'
@@ -125,5 +126,27 @@ describe('listExternalTools', () => {
 		expect(
 			tools.find((t) => t.name === 'thing-report')?.config.annotations
 		).toEqual({ readOnlyHint: false })
+	})
+
+	test('validated arguments are raw input: call() transforms them once', async () => {
+		const counted = fn({
+			name: 'thing.count',
+			procedure: 'public',
+			input: z.object({ n: z.string().transform(Number) }),
+			handler: ({ input }) => input.n + 1
+		})
+		const [tool] = listTools(createRouter({ counted }))
+		const validated = await tool?.config.inputSchema?.['~standard'].validate({
+			n: '2'
+		})
+		expect(validated).toEqual({ value: { n: '2' } })
+		const args = validated && 'value' in validated ? validated.value : undefined
+		expect(await call(counted, args as { n: string }, { context: {} })).toBe(3)
+	})
+
+	test('invalid arguments still fail validation', async () => {
+		const [tool] = listTools(router, { filter: isExternal })
+		const result = await tool?.config.inputSchema?.['~standard'].validate({})
+		expect(result && 'issues' in result && result.issues?.length).toBeTruthy()
 	})
 })

@@ -85,7 +85,7 @@
 	"scripts": {
 		"build": "bun scripts/build.ts",
 		"test": "bun test",
-		"typecheck": "tsc --noEmit",
+		"typecheck": "tsc --noEmit && tsc --noEmit -p tests/consumers/tsconfig.json",
 		"lint": "bun run typecheck && biome check",
 		"lint:write": "bun run typecheck && biome check --write",
 		"attw": "attw --pack . --profile esm-only",
@@ -111,9 +111,6 @@
 			"optional": true
 		},
 		"@opentelemetry/api": {
-			"optional": true
-		},
-		"@orpc/client": {
 			"optional": true
 		},
 		"@orpc/json-schema": {
