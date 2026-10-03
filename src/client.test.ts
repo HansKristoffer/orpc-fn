@@ -9,7 +9,11 @@ import {
 	hasOrpcErrorCode,
 	isSubscriptionPath
 } from './client.js'
-import { createExpoFetch, createExpoLink, type ExpoFetchInit } from './expo.js'
+import {
+	createExpoFetch,
+	createBetterAuthExpoLink,
+	type ExpoFetchInit
+} from './expo.js'
 import { mountOrpc, normalizeExpoOrigin } from './hono.js'
 
 const echo = fn({
@@ -37,6 +41,7 @@ const counter = fnLive({
 	live: {
 		eventSchema: z.object({ id: z.string() }),
 		channel: ({ id }) => `client-counter:${id}`,
+		stateSchema: z.object({ count: z.number() }),
 		transformerFn: ({ previous }) => ({ count: (previous?.count ?? 0) + 1 })
 	}
 })
@@ -150,7 +155,7 @@ describe('Expo', () => {
 	test('native: forwards body, signal and Better Auth headers', async () => {
 		inits.length = 0
 		const client: RouterClient<typeof router> = createORPCClient(
-			createExpoLink({
+			createBetterAuthExpoLink({
 				url,
 				fetch: expoFetch,
 				native: true,
@@ -179,7 +184,7 @@ describe('Expo', () => {
 
 	test('native: aborting a subscription closes the server stream', async () => {
 		const client: RouterClient<typeof router> = createORPCClient(
-			createExpoLink({ url, fetch: expoFetch, native: true })
+			createBetterAuthExpoLink({ url, fetch: expoFetch, native: true })
 		)
 		const abort = new AbortController()
 		const stream = await client.counter.subscribe(
@@ -214,4 +219,58 @@ describe('Expo', () => {
 			globalThis.fetch = original
 		}
 	})
+})
+
+test('manifest excludes aliased streaming routes with ordinary names from batches', async () => {
+	const { createStreamManifest } = await import('./router.js')
+	const mixed = { watch: counter.subscribe, health: echo }
+	const mixedApp = new Hono()
+	let requests = 0
+	mixedApp.use('*', async (_c, next) => {
+		requests++
+		await next()
+	})
+	mountOrpc(mixedApp, { router: mixed, rpcPrefix: '/rpc' })
+	const mixedClient: RouterClient<typeof mixed> = createORPCClient(
+		createRpcLink({
+			url,
+			fetch: (request) => Promise.resolve(mixedApp.fetch(request)),
+			streamPaths: createStreamManifest(mixed)
+		})
+	)
+	const abort = new AbortController()
+	const [stream, result] = await Promise.all([
+		mixedClient.watch({ id: 'watch' }, { signal: abort.signal }),
+		mixedClient.health({ text: 'healthy' })
+	])
+	expect(result.text).toBe('healthy')
+	expect((await stream.next()).value).toEqual({ count: 0 })
+	expect(requests).toBe(2)
+	abort.abort()
+})
+
+test('generic Expo headers support async context and browser fetch injection', async () => {
+	const { createExpoLink } = await import('./expo.js')
+	let seen: Headers | undefined
+	const generic: RouterClient<typeof router, { token: string }> =
+		createORPCClient(
+			createExpoLink<{ token: string }>({
+				url,
+				native: false,
+				fetch: async () => {
+					throw new Error('native fetch used on web')
+				},
+				webFetch: async (input, init) => {
+					const request = new Request(input, init)
+					seen = request.headers
+					return serve(request)
+				},
+				headers: async ({ context }) => ({
+					Authorization: `Bearer ${context.token}`
+				})
+			})
+		)
+	await generic.echo({ text: 'hi' }, { context: { token: 'secret' } })
+	expect(seen?.get('authorization')).toBe('Bearer secret')
+	expect(seen?.has('x-skip-oauth-proxy')).toBe(false)
 })

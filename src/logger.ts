@@ -26,3 +26,23 @@ export function createDefaultLogger(scope: string): FnLogger {
 			console.error(format(scope, message, attributes))
 	}
 }
+
+/** Protect telemetry calls while preserving application logger extensions. */
+export function protectLogger<T extends FnLogger>(logger: T): T {
+	return new Proxy(logger, {
+		get(target, key) {
+			const value = Reflect.get(target, key, target)
+			if (typeof value !== 'function') return value
+			if (['debug', 'info', 'warn', 'error'].includes(String(key))) {
+				return (...args: unknown[]) => {
+					try {
+						return value.apply(target, args)
+					} catch {
+						/* Telemetry must not replace a procedure outcome. */
+					}
+				}
+			}
+			return value.bind(target)
+		}
+	})
+}

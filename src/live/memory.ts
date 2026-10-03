@@ -12,6 +12,10 @@ export function memoryTransport(): PubSubTransport & {
 	const backlogs = new Map<string, { items: string[]; expiresAt: number }>()
 
 	return {
+		async close() {
+			listeners.clear()
+			backlogs.clear()
+		},
 		async publish(messages, backlog) {
 			for (const { channel, payload } of messages) {
 				if (backlog) {

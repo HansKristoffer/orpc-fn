@@ -3,7 +3,7 @@ import type {
 	ErrorMap,
 	InferSchemaInput,
 	InferSchemaOutput,
-	Meta,
+	MergedErrorMap,
 	Schema
 } from '@orpc/contract'
 import type {
@@ -12,7 +12,9 @@ import type {
 	Procedure,
 	Route
 } from '@orpc/server'
-import type { ZodType, z } from 'zod'
+import type { createORPCErrorConstructorMap } from '@orpc/server'
+import type { StoredFnMeta } from './meta.js'
+import type { NativeErrors, NativeMeta } from './compatibility.js'
 import type { BoundCall } from './bound-call.js'
 import type { FnLogger } from './logger.js'
 import type { SpanLike } from './otel.js'
@@ -93,7 +95,7 @@ export const ROUTE_OPTION_KEYS = [
 ] as const satisfies readonly (keyof Route)[]
 
 /**
- * `fn()` option names owned by the route itself. Guard and meta keys must not
+ * `fn()` option names owned by the route itself. Guard keys must not
  * reuse them: such an option would be read as the route option and the guard
  * would never run.
  */
@@ -105,12 +107,16 @@ export const RESERVED_OPTION_KEYS = [
 	'output',
 	'handler',
 	'live',
-	'operationId'
+	'operationId',
+	'meta',
+	'stream',
+	'errors',
+	'guardResolvers'
 ] as const
 
 export type ReservedOptionKey = (typeof RESERVED_OPTION_KEYS)[number]
 
-/** @internal Builds one route from a `procedures` builder; shared by `fn` and `createPubSub`. */
+/** @internal Builds one route from a selected native procedure builder. */
 export type BuildProcedure = (options: {
 	name: string
 	procedure: string | undefined
@@ -118,10 +124,14 @@ export type BuildProcedure = (options: {
 	meta: Record<string, unknown>
 	input?: AnySchema | undefined
 	output?: AnySchema | undefined
+	stream?: boolean
+	errors?: ErrorMap
 	handler: (options: {
 		input: unknown
-		context: Record<string, unknown>
+		context: Record<string | symbol, unknown>
 		signal?: AbortSignal
+		lastEventId?: string
+		errors: ReturnType<typeof createORPCErrorConstructorMap>
 	}) => unknown
 }) => AnyProcedure
 
@@ -134,11 +144,25 @@ export type RejectKeys<T, K extends PropertyKey, TMessage extends string> = {
  * Handler extras must have known keys: an index signature would claim every
  * handler param. Intersected into `createFn`'s options to reject it.
  */
-export type FiniteExtras<T> = string extends keyof T
-	? { extras: 'orpc-fn: extras need known keys, not an index signature' }
-	: number extends keyof T
+export type FiniteExtras<T> = T extends unknown
+	? string extends keyof T
 		? { extras: 'orpc-fn: extras need known keys, not an index signature' }
-		: unknown
+		: number extends keyof T
+			? { extras: 'orpc-fn: extras need known keys, not an index signature' }
+			: Extract<
+						keyof T,
+						| 'input'
+						| 'context'
+						| 'call'
+						| 'signal'
+						| 'span'
+						| 'logger'
+						| 'errors'
+						| 'lastEventId'
+					> extends never
+				? unknown
+				: { extras: 'orpc-fn: extras cannot shadow handler parameters' }
+	: never
 
 type ProcedureOf<TBuilder> = TBuilder extends {
 	handler(handler: never): infer TProcedure
@@ -162,16 +186,8 @@ export type CurrentContextOf<TBuilder> =
 		? TContext
 		: never
 
-type ErrorMapOf<TBuilder> =
-	ProcedureOf<TBuilder> extends {
-		'~orpc': { errorMap: infer T extends ErrorMap }
-	}
-		? T
-		: ErrorMap
-type MetaOf<TBuilder> =
-	ProcedureOf<TBuilder> extends { '~orpc': { meta: infer T extends Meta } }
-		? T
-		: Meta
+export type ErrorMapOf<TBuilder> = NativeErrors<ProcedureOf<TBuilder>>
+type MetaOf<TBuilder> = NativeMeta<ProcedureOf<TBuilder>>
 
 /**
  * Everything `createFn` inferred from its options. Route types read from it;
@@ -181,6 +197,7 @@ export type FnDefinition = {
 	procedures: Record<string, BuilderLike>
 	default: string
 	extras: object
+	extrasByProcedure?: Partial<Record<string, object>>
 	guards: object
 	meta: object
 	tag: string
@@ -218,7 +235,12 @@ export type GuardParams<TContext, TMeta> = {
  * `fn({...})`; the guard runs only on routes that set it. Throw (usually an
  * `ORPCError`) to refuse the call.
  */
-export type Guard<TValue, TParams> = (value: TValue, params: TParams) => unknown
+/* biome-ignore-start lint/suspicious/noConfusingVoidType: union prevents accidental value returns while accepting assertion-style guards */
+export type Guard<TValue, TParams> = (
+	value: TValue,
+	params: TParams
+) => MaybePromise<void | boolean>
+/* biome-ignore-end lint/suspicious/noConfusingVoidType: assertion-style guards */
 
 export type GuardOptions<TGuards> = {
 	[K in keyof TGuards]?: TGuards[K] extends (
@@ -229,13 +251,35 @@ export type GuardOptions<TGuards> = {
 		: never
 }
 
+/** Match object spread: scoped extras replace shared keys, preserving unions. */
+type MergeExtras<TShared, TScoped> = TShared extends unknown
+	? TScoped extends unknown
+		? Omit<TShared, keyof TScoped> & TScoped
+		: never
+	: never
+
 export type HandlerParams<
 	TDef extends FnDefinition,
 	TInput,
-	TKey extends ProcedureKey<TDef>
+	TKey extends ProcedureKey<TDef>,
+	TErrors extends ErrorMap = Record<never, never>
 > = DistributiveOmit<
-	TDef['extras'],
-	'input' | 'context' | 'call' | 'signal' | 'span' | 'logger'
+	MergeExtras<
+		TDef['extras'],
+		TDef extends { extrasByProcedure: infer E }
+			? TKey extends keyof E
+				? E[TKey]
+				: object
+			: object
+	>,
+	| 'input'
+	| 'context'
+	| 'call'
+	| 'signal'
+	| 'span'
+	| 'logger'
+	| 'errors'
+	| 'lastEventId'
 > & {
 	input: TInput
 	context: FnContext<TDef, TKey>
@@ -246,6 +290,12 @@ export type HandlerParams<
 	/** Active OpenTelemetry span, undefined when `createFn({ otel })` is not set. */
 	span: TDef['span'] | undefined
 	logger: TDef['logger']
+	lastEventId: string | undefined
+	errors: ReturnType<
+		typeof createORPCErrorConstructorMap<
+			MergedErrorMap<ErrorMapOf<TDef['procedures'][TKey]>, TErrors>
+		>
+	>
 }
 
 /** Route options shared by every `fn()` overload. */
@@ -260,11 +310,22 @@ export type RouteConfig<TTag extends string = string> = Pick<
 
 export type FnRouteOptions<
 	TDef extends FnDefinition,
-	TKey extends ProcedureKey<TDef>
+	TKey extends ProcedureKey<TDef>,
+	TInput = unknown,
+	TErrors extends ErrorMap = Record<never, never>
 > = RouteConfig<TDef['tag']> &
-	GuardOptions<TDef['guards']> &
-	TDef['meta'] &
-	ProcedureOption<TDef, TKey>
+	GuardOptions<TDef['guards']> & {
+		meta?: TDef['meta']
+		stream?: boolean
+		errors?: TErrors
+		guardResolvers?: {
+			[K in keyof TDef['guards']]?: (params: {
+				input: TInput
+				context: FnContext<TDef, TKey>
+				signal: AbortSignal | undefined
+			}) => MaybePromise<GuardOptions<TDef['guards']>[K]>
+		}
+	} & ProcedureOption<TDef, TKey>
 
 /**
  * Which `createFn({ procedures })` builder a route uses. Optional when
@@ -281,97 +342,128 @@ export type FnProcedure<
 	TDef extends FnDefinition,
 	TKey extends ProcedureKey<TDef>,
 	TInputSchema extends Schema<unknown, unknown>,
-	TOutputSchema extends Schema<unknown, unknown>
+	TOutputSchema extends Schema<unknown, unknown>,
+	TErrors extends ErrorMap = Record<never, never>
 > = DecoratedProcedure<
 	InitialContextOf<TDef['procedures'][TKey]>,
 	FnContext<TDef, TKey>,
 	TInputSchema,
 	TOutputSchema,
-	ErrorMapOf<TDef['procedures'][TKey]>,
-	MetaOf<TDef['procedures'][TKey]>
+	MergedErrorMap<ErrorMapOf<TDef['procedures'][TKey]>, TErrors>,
+	MetaOf<TDef['procedures'][TKey]> & {
+		'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
+	}
 >
 
-type InputOf<T> = [T] extends [ZodType] ? z.output<T> : unknown
-type ReturnOf<TOut, TReturn> = [TOut] extends [ZodType]
-	? z.input<TOut>
+type InputOf<T> = [T] extends [AnySchema] ? InferSchemaOutput<T> : unknown
+type ReturnOf<TOut, TReturn> = [TOut] extends [AnySchema]
+	? InferSchemaInput<TOut>
 	: TReturn
 
 /** `fn()`: four overloads for input/output schema × inferred. */
 export interface Fn<TDef extends FnDefinition> {
 	// 1. With input + output schema
 	<
-		TInput extends ZodType,
-		TOut extends ZodType,
-		TKey extends ProcedureKey<TDef> = TDef['default']
+		TInput extends AnySchema,
+		TOut extends AnySchema,
+		TKey extends ProcedureKey<TDef> = TDef['default'],
+		TErrors extends ErrorMap = Record<never, never>
 	>(
 		options: {
 			input: TInput
 			output: TOut
 			// The output schema parses what the handler returns: its input type.
 			handler: (
-				params: HandlerParams<TDef, z.output<TInput>, NoInfer<TKey>>
-			) => MaybePromise<z.input<TOut>>
-		} & FnRouteOptions<TDef, TKey>
-	): FnProcedure<TDef, TKey, TInput, TOut>
+				params: HandlerParams<
+					TDef,
+					InferSchemaOutput<TInput>,
+					NoInfer<TKey>,
+					TErrors
+				>
+			) => MaybePromise<InferSchemaInput<TOut>>
+		} & FnRouteOptions<TDef, TKey, InferSchemaOutput<TInput>, TErrors>
+	): FnProcedure<TDef, TKey, TInput, TOut, TErrors>
 
 	// 2. With input, inferred output
 	<
-		TInput extends ZodType,
+		TInput extends AnySchema,
 		TReturn,
-		TKey extends ProcedureKey<TDef> = TDef['default']
+		TKey extends ProcedureKey<TDef> = TDef['default'],
+		TErrors extends ErrorMap = Record<never, never>
 	>(
 		options: {
 			input: TInput
 			output?: undefined
 			handler: (
-				params: HandlerParams<TDef, z.output<TInput>, NoInfer<TKey>>
+				params: HandlerParams<
+					TDef,
+					InferSchemaOutput<TInput>,
+					NoInfer<TKey>,
+					TErrors
+				>
 			) => MaybePromise<TReturn>
-		} & FnRouteOptions<TDef, TKey>
-	): FnProcedure<TDef, TKey, TInput, Schema<TReturn, TReturn>>
+		} & FnRouteOptions<TDef, TKey, InferSchemaOutput<TInput>, TErrors>
+	): FnProcedure<TDef, TKey, TInput, Schema<TReturn, TReturn>, TErrors>
 
 	// 3. No input, with output schema
-	<TOut extends ZodType, TKey extends ProcedureKey<TDef> = TDef['default']>(
+	<
+		TOut extends AnySchema,
+		TKey extends ProcedureKey<TDef> = TDef['default'],
+		TErrors extends ErrorMap = Record<never, never>
+	>(
 		options: {
 			input?: undefined
 			output: TOut
 			handler: (
-				params: HandlerParams<TDef, unknown, NoInfer<TKey>>
-			) => MaybePromise<z.input<TOut>>
-		} & FnRouteOptions<TDef, TKey>
-	): FnProcedure<TDef, TKey, Schema<unknown, unknown>, TOut>
+				params: HandlerParams<TDef, unknown, NoInfer<TKey>, TErrors>
+			) => MaybePromise<InferSchemaInput<TOut>>
+		} & FnRouteOptions<TDef, TKey, unknown, TErrors>
+	): FnProcedure<TDef, TKey, Schema<unknown, unknown>, TOut, TErrors>
 
 	// 4. No input, inferred output
-	<TReturn, TKey extends ProcedureKey<TDef> = TDef['default']>(
+	<
+		TReturn,
+		TKey extends ProcedureKey<TDef> = TDef['default'],
+		TErrors extends ErrorMap = Record<never, never>
+	>(
 		options: {
 			input?: undefined
 			output?: undefined
 			handler: (
-				params: HandlerParams<TDef, unknown, NoInfer<TKey>>
+				params: HandlerParams<TDef, unknown, NoInfer<TKey>, TErrors>
 			) => MaybePromise<TReturn>
-		} & FnRouteOptions<TDef, TKey>
-	): FnProcedure<TDef, TKey, Schema<unknown, unknown>, Schema<TReturn, TReturn>>
+		} & FnRouteOptions<TDef, TKey, unknown, TErrors>
+	): FnProcedure<
+		TDef,
+		TKey,
+		Schema<unknown, unknown>,
+		Schema<TReturn, TReturn>,
+		TErrors
+	>
 
 	// 5. Never matches valid code first; it only words the type errors, which
 	// TypeScript reports against the last overload.
 	<
 		TReturn,
-		TInput extends ZodType | undefined = undefined,
-		TOut extends ZodType | undefined = undefined,
-		TKey extends ProcedureKey<TDef> = TDef['default']
+		TInput extends AnySchema | undefined = undefined,
+		TOut extends AnySchema | undefined = undefined,
+		TKey extends ProcedureKey<TDef> = TDef['default'],
+		TErrors extends ErrorMap = Record<never, never>
 	>(
 		options: {
 			input?: TInput
 			output?: TOut
 			// The output schema parses what the handler returns: its input type.
 			handler: (
-				params: HandlerParams<TDef, InputOf<TInput>, NoInfer<TKey>>
+				params: HandlerParams<TDef, InputOf<TInput>, NoInfer<TKey>, TErrors>
 			) => MaybePromise<ReturnOf<TOut, TReturn>>
-		} & FnRouteOptions<TDef, TKey>
+		} & FnRouteOptions<TDef, TKey, InputOf<TInput>, TErrors>
 	): FnProcedure<
 		TDef,
 		TKey,
-		[TInput] extends [ZodType] ? TInput : Schema<unknown, unknown>,
-		[TOut] extends [ZodType] ? TOut : Schema<TReturn, TReturn>
+		[TInput] extends [AnySchema] ? TInput : Schema<unknown, unknown>,
+		[TOut] extends [AnySchema] ? TOut : Schema<TReturn, TReturn>,
+		TErrors
 	>
 }
 
@@ -381,9 +473,59 @@ export type FnCompletedEvent<TContext = unknown, TSpan = SpanLike> = {
 	procedure: string
 	durationMs: number
 	success: boolean
+	/** False when authentication or input validation prevented handler execution. */
+	handlerStarted: boolean
 	error: unknown
 	input: unknown
 	context: TContext
 	span: TSpan | undefined
 	meta: Record<string, unknown>
 }
+
+/** Factory hooks retain the builder key/context relationship. */
+export type ProcedureHookParams<
+	TProcedures extends Record<string, BuilderLike>,
+	TExtra = object
+> = {
+	[K in keyof TProcedures & string]: TExtra & {
+		procedure: K
+		context: CurrentContextOf<TProcedures[K]>
+	}
+}[keyof TProcedures & string]
+
+export type CompletedHookEvent<
+	TProcedures extends Record<string, BuilderLike>,
+	TSpan
+> = {
+	[K in keyof TProcedures & string]: Omit<
+		FnCompletedEvent<unknown, TSpan>,
+		'context' | 'procedure' | 'handlerStarted'
+	> & { procedure: K } & (
+			| { handlerStarted: true; context: CurrentContextOf<TProcedures[K]> }
+			| { handlerStarted: false; context: InitialContextOf<TProcedures[K]> }
+		)
+}[keyof TProcedures & string]
+
+export type FiniteScopedExtras<T> = {
+	[K in keyof T]: string extends keyof T[K]
+		? K
+		: number extends keyof T[K]
+			? K
+			: Extract<
+						keyof T[K],
+						| 'input'
+						| 'context'
+						| 'call'
+						| 'signal'
+						| 'span'
+						| 'logger'
+						| 'errors'
+						| 'lastEventId'
+					> extends never
+				? never
+				: K
+}[keyof T] extends never
+	? unknown
+	: {
+			extrasByProcedure: 'orpc-fn: scoped extras need finite keys and cannot shadow handler parameters'
+		}

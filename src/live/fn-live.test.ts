@@ -52,6 +52,10 @@ const liveWithTransformer = fnLive({
 	live: {
 		eventSchema,
 		channel: 'test.liveTransformer',
+		stateSchema: z.object({
+			items: z.array(z.object({ id: z.string() })),
+			totalItems: z.number()
+		}),
 		coalesceMs: 25,
 		shouldUpdate: ({ input, event }) =>
 			input.organizationId === event.organizationId,
@@ -142,6 +146,8 @@ describe('fnLive runtime (memory transport)', () => {
 		live: {
 			eventSchema,
 			channel: ({ organizationId }) => `counter:${organizationId}`,
+			stateSchema: z.object({ organizationId: z.string(), count: z.number() }),
+			emitSchema: z.object({ bumped: z.string() }),
 			shouldUpdate: ({ input, event }) =>
 				input.organizationId === event.organizationId,
 			transformerFn: ({ previous, event }) =>

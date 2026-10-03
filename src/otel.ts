@@ -84,9 +84,15 @@ export type Tracing = {
 }
 
 export function createTracing(otel: OtelApiLike | undefined): Tracing {
-	const tracer = otel?.trace.getTracer('orpc-fn')
+	let tracer: TracerLike<SpanLike> | undefined
+	try {
+		tracer = otel?.trace.getTracer('orpc-fn')
+	} catch {
+		/* Missing telemetry cannot prevent execution. */
+	}
 	const end: Tracing['end'] = (span, ...error) => {
 		if (!span || !otel) return
+		span = protectSpan(span)
 		if (error.length === 0) {
 			span.setStatus({ code: otel.SpanStatusCode.OK })
 		} else {
@@ -103,6 +109,8 @@ export function createTracing(otel: OtelApiLike | undefined): Tracing {
 			const settle = (span: SpanLike | undefined, ...error: [] | [unknown]) => {
 				try {
 					onSettled?.(span, ...error)
+				} catch {
+					/* Telemetry callbacks cannot replace the original result. */
 				} finally {
 					end(span, ...error)
 				}
@@ -111,6 +119,7 @@ export function createTracing(otel: OtelApiLike | undefined): Tracing {
 				span: SpanLike | undefined,
 				scope?: StreamScope
 			): Promise<Awaited<ReturnType<typeof fn>>> => {
+				span = span ? protectSpan(span) : undefined
 				let result: Awaited<ReturnType<typeof fn>>
 				try {
 					result = await fn(span)
@@ -129,18 +138,54 @@ export function createTracing(otel: OtelApiLike | undefined): Tracing {
 				return result
 			}
 			if (!tracer || !otel) return run(undefined)
-			return tracer.startActiveSpan(
-				name,
-				{ kind: otel.SpanKind[kind] },
-				(span) => {
-					const active = otel.context.active()
-					return run(span, (step) => otel.context.with(active as never, step))
-				}
-			)
+			let started: Promise<Awaited<ReturnType<typeof fn>>> | undefined
+			try {
+				return tracer.startActiveSpan(
+					name,
+					{ kind: otel.SpanKind[kind] },
+					(span) => {
+						let active: unknown
+						try {
+							active = otel.context.active()
+						} catch {
+							/* Fall back to the span without scope restoration. */
+						}
+						started = run(span, (step) => {
+							let completed: { value: ReturnType<typeof step> } | undefined
+							let failed: { error: unknown } | undefined
+							try {
+								return otel.context.with(active as never, () => {
+									try {
+										const value = step()
+										completed = { value }
+										return value
+									} catch (error) {
+										failed = { error }
+										throw error
+									}
+								})
+							} catch {
+								if (completed) return completed.value
+								if (failed) throw failed.error
+								return step()
+							}
+						})
+						return started
+					}
+				)
+			} catch {
+				return started ?? run(undefined)
+			}
 		},
 		startSpan(name, kind, attributes) {
 			if (!tracer || !otel) return undefined
-			return tracer.startSpan(name, { kind: otel.SpanKind[kind], attributes })
+			try {
+				return protectSpan(
+					tracer.startSpan(name, { kind: otel.SpanKind[kind], attributes })
+				)
+			} catch {
+				return undefined
+			}
 		},
 		end
 	}
@@ -148,4 +193,26 @@ export function createTracing(otel: OtelApiLike | undefined): Tracing {
 
 export function errorMessageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error)
+}
+
+function protectSpan<T extends SpanLike>(span: T): T {
+	return new Proxy(span, {
+		get(target, key) {
+			const value = Reflect.get(target, key, target)
+			if (typeof value !== 'function') return value
+			if (
+				['setAttribute', 'setStatus', 'recordException', 'end'].includes(
+					String(key)
+				)
+			)
+				return (...args: unknown[]) => {
+					try {
+						return value.apply(target, args)
+					} catch {
+						/* Ignore exporter failures. */
+					}
+				}
+			return value.bind(target)
+		}
+	})
 }

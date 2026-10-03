@@ -11,6 +11,8 @@ export {
 export {
 	type AuthFn,
 	type ChannelDefinition,
+	type ChannelQueueOptions,
+	type PubSubMetric,
 	type CreatePublisher,
 	type CreatePubSub,
 	createBoundedEventQueue,

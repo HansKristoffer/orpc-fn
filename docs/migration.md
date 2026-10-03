@@ -1,167 +1,173 @@
-# Migrating from an in-repo `lib/fn`
+# Adopting the library before migrating projects
 
-This guide is for apps that still carry their own copy of `fn` (lullu and gey-mono, `apps/backend/src/lib/fn/`). The aim is a thin `lib/fn/index.ts` that calls `createFn` and keeps the same exports, so route files compile unchanged apart from one codemod.
+Keep one app-bound `createFn`. The application owns auth builders, domain services, permission vocabulary, tenant authorization and reliable publication. This release changes several `0.x` contracts; settle the app wrapper first, then migrate a small router and verify it before moving the rest. These instructions do not migrate or audit external projects automatically.
 
-## 1. Install and link
+## Install the features you use
 
 ```sh
-bun add orpc-fn
-# before the first release: "orpc-fn": "file:../orpc-fn" in the root catalog, or `bun link orpc-fn`
+bun add orpc-fn @orpc/server @orpc/contract @orpc/client zod
 ```
 
-Use oRPC 1.14 or newer and Zod 4. `@orpc/client` is a required peer, and it is already installed with `@orpc/server`. Add the optional peers you use: `@opentelemetry/api`; `ioredis` for the ioredis transport; `@mastra/core` ^1.51; and `hono`, `@orpc/openapi`, `@orpc/zod` and `@orpc/json-schema` for the adapters.
+Use TypeScript 5.7+, oRPC 1.14+, Zod 4 and Node 20+ or Bun. Optional peers:
 
-## 2. What moves where
+| Feature | Peers |
+| --- | --- |
+| Tracing | `@opentelemetry/api` |
+| Hono/OpenAPI | `hono`, `@orpc/openapi`, `@orpc/zod`, `@orpc/json-schema` |
+| Mastra | `@mastra/core` ^1.51.0, `@orpc/zod`, `@orpc/json-schema` |
+| Executable MCP | `@modelcontextprotocol/sdk` ^1.32.0, `@orpc/zod`, `@orpc/json-schema` |
+| ioredis transport | `ioredis` |
+| Expo native app | Inject `fetch` from `expo/fetch`; the library does not import Expo |
 
-| In-repo file | After |
-|---|---|
-| `fn.ts`, `bound-call.ts`, `handler-types.ts`, `router.ts` | `createFn` in `lib/fn/index.ts` |
-| `pub-sub-fn.ts`, `fn-live.ts` | `createFn({ pubsub })` → `fnLive`, `createPubSub`, `createPublisher`; `streamLiveSnapshots`, `fnLivePatch` from `orpc-fn/live` |
-| `../redis` managed client (pub/sub part) | `bunRedisTransport(redisClient)` (lullu) or `ioredisTransport(redis)` (gey-mono) |
-| `expected-client-error.ts` | `isExpectedClientError` from `orpc-fn`; add `isApiError` with `createFn({ isExpectedError })` |
-| `utils/procedure-meta.ts`, `utils/tool-meta.ts` | `readMeta(procedure)` from `createFn`, or `readFnMeta` |
-| `utils/create-mastra-tool.ts` | `createMastraTool` from `orpc-fn/mastra` |
-| `external-api.ts` (`listExternalTools`, `toolInputSchema`) | `listTools` and `hasTag` from `orpc-fn/mcp` |
-| `use-orpc-hono-handler.ts`, `use-external-api-hono-handler.ts`, `orpc-context-headers.ts` | `mountOrpc` and `normalizeExpoOrigin` from `orpc-fn/hono` |
-| `needed-feature-flags.ts`, gey `permission` | guards in `createFn({ guards })`; the check functions stay in the app |
-| `FN_SUPPORT_*`, `FN_DRAFT_ACTION`, `FN_AUTOMATION_SAFE`, `FN_CHANNEL_SUMMARY` | typed `createFn({ meta })` |
+## Breaking decisions
 
-These stay in the app: `orpc.ts` (context, auth, the procedure builders), `get-auth-filters.ts`, `get-orpc-tenant-scope.ts`, `define-organization-change-bus.ts`, `channel-scope.ts` and `utils/pagination.ts`. The MCP instructions, `authenticateBasic`/`authenticateMcp` and the MCP server itself stay too.
+| Before | Now |
+| --- | --- |
+| Flat metadata such as `fn({ readOnly: true })` | `fn({ meta: { readOnly: true } })`; unknown top-level options throw |
+| Factory `meta: {} as AppMeta` | Prefer `meta: defineMeta<AppMeta>()`; a type declaration, no defaults |
+| Permission predicates returning false are ignored | `false` denies with `FORBIDDEN`; true/void allow; unsupported returns fail |
+| Metadata reads use the calling factory's type | Readers infer the passed procedure's metadata and builder key |
+| Zod-only core schemas | Core accepts native oRPC/Standard Schema, including `eventIterator` |
+| Streaming inferred by `subscribe` in the path | Declare `stream: true` or use `eventIterator`; send the router manifest to the client |
+| `BoundCall` defaults to any context; input always required | Explicit context generic; omit input when undefined is valid |
+| Extras silently shadow built-in params | Shadowing fails types/runtime; `extrasByProcedure` scopes services by builder |
+| Completion precedes output validation | Completion observes auth/input/output failures and stream lifetime |
+| `context.timing.handler_ms` is overwritten | Library-owned request timing aggregates top-level calls; app timing is untouched |
+| Pub/sub subscribe bypasses fn execution policy | Builder middleware, guards, extras, metadata and completion apply |
+| Shared partial channel resolver is the only option | Prefer separate required-input subscription/event resolvers |
+| Unbounded parsing/replay and best-effort startup | Bounded queues and successful, timed, abortable readiness |
+| Raw streams silently continue after loss | Explicit unavailable error, or an app-provided recovery marker |
+| Reducer state is unvalidated | Supply `stateSchema`; patches also need `emitSchema` |
+| `rerun(nextInput)` changes input without validation/auth | `rerun()` reloads the current input through the procedure |
+| Drain is the only shutdown API | `await shutdown()` is terminal; drain remains nonterminal |
+| Better Auth headers are always added by Expo | Generic `createExpoLink`; named `createBetterAuthExpoLink` preset |
+| Custom Standard Schema registered through `McpServer.registerTool` | `registerMcpTools` installs supported SDK JSON Schema list/call handlers |
 
-## 3. The new `lib/fn/index.ts` (lullu)
+## Build a thin application wrapper
 
 ```ts
-import * as otel from '@opentelemetry/api'
-import { createFn } from 'orpc-fn'
-import { bunRedisTransport } from 'orpc-fn/live/redis-bun'
-import { isApiError } from 'hanzio/api-wrapper'
-import { isExpectedClientError } from 'orpc-fn'
-import { publicProcedure, protectedProcedure, supportProcedure } from './orpc'
-import { prisma, getPrismaPoolStats } from '../prisma'
-import { createJob } from '../queue/create-job'
-import { createMessage } from '../message/create-message'
-import { createT } from '../i18n'
-import { createLogger } from '../log'
-import { redisClient } from '../redis'
-import { pubsubQueueDropTotal } from '../observability/pubsub-metrics'
-import { assertNeededFeatureFlags } from './needed-feature-flags'
+import { ORPCError, os } from '@orpc/server'
+import { createFn, defineMeta } from 'orpc-fn'
+
+const publicProcedure = os.$context<AppContext>()
+const protectedProcedure = publicProcedure.use(({ context, next }) => {
+  if (!context.user) throw new ORPCError('UNAUTHORIZED')
+  return next({ context: { user: context.user } })
+})
 
 export const {
   fn, fnLive, createPubSub, createPublisher, createRouter,
-  readMeta, createCall: createBoundCall, drainPubSubSubscribers, activePubSubSubscriberCount
+  readMeta, createCall, shutdown, drainPubSubSubscribers,
+  activePubSubSubscriberCount
 } = createFn({
-  procedures: { public: publicProcedure, protected: protectedProcedure, support: supportProcedure },
+  procedures: { public: publicProcedure, protected: protectedProcedure },
   default: 'protected',
-  tags: ['internal'],
-  otel,
-  logger: (scope, span) => createLogger({ scope, span }),
-  extras: ({ context }) => ({
-    prisma,
-    createJob,
-    createMessage,
-    t: context.user ? createT(context.user.locale) : undefined
-  }),
+  meta: defineMeta<{ readOnly?: boolean; automationSafe?: boolean }>(),
+  extras: () => ({ db }),
+  extrasByProcedure: {
+    protected: ({ context }) => ({ t: translator(context.user.locale) })
+  },
   guards: {
-    neededFeatureFlags: (flags: FeatureFlag[], { context }) =>
-      flags.length ? assertNeededFeatureFlags(flags, context) : undefined
+    permission: (requirement: PermissionRequirement, { context }) =>
+      context.user?.can(requirement) ?? false
   },
-  meta: {} as {
-    requiresHumanApproval?: RequiresHumanApprovalFn
-    automationSafe?: boolean
-    renderKind?: SupportToolRender['kind']
-    readOnly?: boolean
-    supportTool?: SupportToolLifecycle
-    draftAction?: SupportDraftActionDefinition
-    channelSummary?: { chat?: string; voice?: string }
-  },
-  spanAttributes: ({ context }) => ({
-    'user.id': context.session?.user.id,
-    'support.organization_id': context.support?.organizationId
-  }),
-  onCompleted: ({ context }) => {
-    const pool = getPrismaPoolStats()
-    return {
-      organization_id: context.user?.activeOrganizationId ?? context.support?.organizationId,
-      ...(pool ? { db_pool_total: pool.total, db_pool_idle: pool.idle, db_pool_waiting: pool.waiting } : {})
+  onCompleted: (event) => {
+    if (event.handlerStarted && event.procedure === 'protected') {
+      return { user_id: event.context.user.id }
     }
-  },
-  isExpectedError: (error) => isExpectedClientError(error) || isApiError(error),
-  pubsub: {
-    transport: bunRedisTransport(redisClient.getClient()),
-    onDrop: (count) => pubsubQueueDropTotal.inc(count)
   }
 })
 ```
 
-gey-mono is the same with `ioredisTransport(redisClient.getClient())`, no `support` procedure, and a `permission` guard:
+Builder input/output schemas are rejected: place them on routes. Guard keys cannot reuse route option names. Metadata keys may overlap because they have a namespace. Scoped extras replace matching shared keys; handler types follow that precedence. Shared and scoped extras cannot use `input`, `context`, `call`, `signal`, `span`, `logger`, `errors` or `lastEventId`.
+
+Routes remain inferred:
 
 ```ts
-guards: {
-  permission: (requirement: PermissionRequirements, { context }) => {
-    if (!context.user) throw new ORPCError('UNAUTHORIZED', { message: 'Authentication required' })
-    context.user.canPermission(requirement)
+const getOrder = fn({
+  name: 'order.get',
+  meta: { readOnly: true },
+  input: z.object({ id: z.string() }),
+  guardResolvers: {
+    permission: ({ input }) => ({ resource: input.id, action: 'read' })
+  },
+  errors: { MISSING: { data: z.object({ orderId: z.string() }) } },
+  handler: async ({ input, db, errors }) => {
+    const order = await db.order.find(input.id)
+    if (!order) throw errors.MISSING({ data: { orderId: input.id } })
+    return order
   }
+})
+```
+
+Static guard checks run first in route declaration order, then resolved checks in resolver order. A route cannot supply both forms for one guard. Assertion guards may throw; predicate guards must explicitly return false when access is unavailable. A return of undefined means allow.
+
+## Reviewable AST migrations
+
+The codemods rewrite direct `fn`, `fnLive` and `createPubSub` call options. They leave unrelated objects, nested objects and routes with spreads untouched. Conflicting legacy access flags or an incompatible existing `procedure` throw so a migration cannot guess the access policy. Install the repository dev dependencies before running them; the AST parser is a pinned dev-only TypeScript alias separate from the current compiler.
+
+```sh
+bun ../orpc-fn/scripts/codemods/procedure-option.ts apps/backend/src --flag=isPublic:public --flag=isSupport:support
+# For string-valued builder selectors:
+bun ../orpc-fn/scripts/codemods/procedure-option.ts apps/backend/src --rename=auth
+
+# Move only explicitly named application metadata (explicit file arguments):
+bun ../orpc-fn/scripts/codemods/route-meta.ts features/order/get.ts --meta=readOnly,automationSafe
+```
+
+Review every diff. Routes with spreads, existing metadata or trailing metadata comments need manual merging. Replace object-valued summaries with a native string `summary` plus an app-specific field inside `meta`. Keep domain helpers in the app; do not fold tenant policy, transactions, feature flags or job orchestration into the library.
+
+## Streams and frontend batching
+
+```ts
+// Server/build step; serialize this result into a frontend module.
+const streamPaths = createStreamManifest(router)
+// Lazy routers: await createStreamManifestAsync(router).
+
+// Frontend: import only that serialized data, plus the router type.
+const link = createRpcLink({ url, streamPaths })
+```
+
+Router paths, including aliases, determine batching. Every custom stream must declare `stream: true` or use oRPC's `eventIterator` schema; inconsistent runtime results are rejected. Generated streams declare this automatically. `batch.exclude` can cover dynamic cases. The old `subscribe` name heuristic remains a fallback, but cannot identify a route named `watch` by itself.
+
+## Live queries, tenancy and lifecycle
+
+Prefer full-snapshot invalidation. Coalescing reruns once for a batch, while reducers process every event and emit the final full state. Ordered patch payloads are preserved. `previous` is initialized; `rerun()` invokes the current procedure again with its original raw input, repeating auth/guards/validation.
+
+Use separate channel resolvers:
+
+```ts
+channel: {
+  subscribe: ({ input, context }) => `${context.tenant}:${input.room}`,
+  publish: (event) => `${event.tenantId}:${event.roomId}`
 }
 ```
 
-## 4. Route files
+Publishing events must carry the channel's tenant keys. Subscription context must already be authorized. Configure `namespace` per application/environment. Inspect names through `getSubscriptionChannelName({ input, context })` and `getPublishChannelName(event)`; the partial-input `getChannelName` helper is deprecated.
 
-1. Run the codemod, then review its diff (it is a text rewrite):
-   - lullu: `bun ../orpc-fn/scripts/codemods/procedure-option.ts apps/backend/src --flag=isPublic:public --flag=isSupport:support`
-   - gey-mono: the same with `--flag=isPublic:public`
-   - an app with `auth: 'admin'`-style options: `--rename=auth`
+Set positive queue, backlog, TTL and initialization bounds. Override `maxQueueSize`, `maxIngressSize` and `maxReplaySize` per pub/sub definition or live config when event rates differ. `live.maxBatchSize` bounds coalescing (default 1000). `pubsub.onMetric` reports queue depths, drops, reconnects and parse failures through a typed synchronous callback whose failures are isolated. The default parsing, replay and subscriber bounds are 1000 items; initialization waits up to 10 seconds. Overflow/reconnect causes live queries to reload. Raw event streams throw `SERVICE_UNAVAILABLE`, unless an explicit recovery marker provides an application protocol. Transport implementations should report restored connections through the fourth subscribe argument's `onReconnect` callback.
 
-   Flags become `procedure: '<key>'` (`false` is dropped) and renamed options keep their value. This also covers `createPubSub` options.
-2. lullu only: five tools pass `summary: { base, chat, voice }`. Change them to `summary: base` and `channelSummary: { chat, voice }`, then read `readMeta(procedure).meta.channelSummary`.
-3. Everything else stays: `name`, route options, `neededFeatureFlags`, `permission`, `readOnly`, `supportTool` and the other meta keys, the handler params, and `call`.
+IDs deduplicate recent replay/live overlap and old wire payloads remain readable. IDs do not solve snapshot/delta overlap. Reducers must skip revisions already included in the snapshot and reload on revision gaps; [the revision example](../examples/adoption/revisions.ts) demonstrates both. Supply a schema for parsed reducer state, and a separate patch schema when using `fnLivePatch`. Keep these validators free from repeated transforms.
 
-## 5. Readers of the old symbols
+Authentication at open covers idle streams. `reauthorize` checks before updates; an app requiring immediate revocation must terminate affected streams. `safePublish` suppresses a broker error but offers no durability or retry. Use app-owned outbox logic for reliable notification.
 
-| Before | After |
-|---|---|
-| `readFnProcedureMeta(p).operationId` | `readMeta(p).name` |
-| `readFnProcedureMeta(p).isSupport` | `readMeta(p).procedure === 'support'` |
-| `readFnProcedureMeta(p).readOnly` (and the other support fields) | `readMeta(p).meta.readOnly` |
-| `readFnProcedureMeta(p).inputSchema`, `.outputSchema`, `.description`, `.summary` | same names on `readMeta(p)` |
-| `requireAgentToolMeta(p)` | `readMeta(p)`, then check `inputSchema` |
-| `FN_OPERATION_ID` symbol lookups | `readMeta(p).name` |
-| `createBoundCall(context)` in seeders and tests | `createCall(context)` from `createFn`, re-exported as `createBoundCall` if you want no diff |
-| `getOperationId(p)` (gey-mono) | `toToolName(readMeta(p).name)` from `orpc-fn/mcp` |
+Use `await shutdown()` at process shutdown. It rejects new live work, aborts initialization/retries, closes streams and awaits known cleanup. Set `ownsTransport: true` only when this factory owns disposal; otherwise close the shared transport in the app. Late results from noncancellable custom transport initialization are released when they arrive. `drainPubSubSubscribers()` remains useful for nonterminal draining. Redis Lua batching targets standalone Redis; Cluster support needs matching hash slots and integration coverage.
 
-## 6. Live
+## Tools, HTTP and Expo
 
-- **Shutdown:** `drainPubSubSubscribers()` and `activePubSubSubscriberCount()` now come from the `createFn` result, not a module. Call them in the SIGTERM handler and the OTel gauge.
-- **Redis connection:** the transport opens its own subscriber connection with `duplicate()`. The old managed client's subscriber half (leases, ref counts, mux handlers) is no longer used.
-- **Behaviour fixed:** `fnLive` now runs `authFn` before sending the initial snapshot, parses its input once, and sends snapshots through the output schema. `publish` takes the event schema's input type. A `filterFn` that throws no longer stops delivery to other subscribers. lullu's in-repo copy has all four bugs.
-- **Behaviour kept:** per-channel fan-out, backlog replay, the drop-oldest bounded queue with one overflow marker per episode, resubscribe backoff with jitter, `coalesceMs`, `shouldUpdate`, `transformerFn`, patch emits, `mirrorChannel` and `publishMany`.
+Use `registerMcpTools(server, router, { filter, context })` from `orpc-fn/mcp/sdk`. This owns the SDK's tool list/call handlers; register once per low-level `Server`, or `McpServer.server`, and connect its transport. Results default to protocol-compliant JSON/text; `formatResult` controls application presentation. `listTools` remains an inspection API, not SDK `registerTool` configs. Tool filters must explicitly exclude streaming routes. Resolve lazy routers with `unlazyRouter`. Distinct sanitized-name collisions throw; identical aliases deduplicate. Mastra accepts object unions. Transforms/refinements must be pure because validation and execution may run multiple passes over raw input.
 
-## 7. HTTP
+Use `mountOrpc` for Hono; reusable `formatServerTiming`/`finishOrpcHeaders` help compose another Fetch server. Its plugins and OpenAPI spec are checked against upstream types. Completion logs are per invocation; request timing sums top-level durations, excludes nested double-counting, and can exceed elapsed request time for overlapping batch work. For auth/context timing, record app metrics in the provided `base.timing` collector instead of expecting fn to mutate your context.
 
-```ts
-mountOrpc(app, {
-  router: orpcApiPublicRouter,
-  rpcPrefix: ORPC_API_RPC_PATH,
-  openapi: { prefix: ORPC_API_OPENAPI_PATH, info: { title: 'Platform API', version: '0.1.0' } },
-  plugins: [new CORSPlugin({ allowHeaders: ALLOW_HEADERS })],
-  normalizeHeaders: normalizeExpoOrigin,
-  queueMs: msSinceRequestArrival,
-  onError: (error, request) => captureException(error, 'api-orpc-error', request)
-})
-```
+Use `createExpoLink` for bearer or custom headers, including async/context-aware resolvers. Use `createBetterAuthExpoLink` for Better Auth cookies/origin headers. Pass `webFetch` for a browser override. The native bridge forwards both body and cancellation.
 
-gey-mono's external API is a second mount with `openapi: { prefix: EXTERNAL_API_PATH, filter: hasTag('external'), smartCoercion: true, spec: { components, security } }`. Its `context` runs `authenticateBasic` and returns a 401 `Response` on failure; the docs paths skip auth. The MCP endpoints keep their SDK server and register `listTools(router, { filter, readOnly })`.
+## Pilot checklist
 
-## 8. Frontends
+1. Run the app wrapper and a small router through types, tests and a packed-package install.
+2. Verify guard denials, public/protected context, native errors and metadata reads.
+3. Check a stream named `watch` beside parallel ordinary calls and confirm cancellation releases it.
+4. Exercise live startup failure, reconnect/overflow recovery and reducer revisions.
+5. Invoke tools through the actual SDK and run both mobile auth presets in the consuming app.
+6. Confirm terminal shutdown and transport ownership, then expand migration.
 
-The router type still comes from the backend package as a type-only import. Only the link changes:
-
-| App | Before | After |
-|---|---|---|
-| Platform (Vue) | `orpc-shared.ts` `createOrpcRpcLink`, `hasOrpcErrorCode` | `createRpcLink`, `hasOrpcErrorCode` from `orpc-fn/client` |
-| Expo | `utils/api.tsx` `RPCLink` with the hand-written headers and `expo/fetch` bridge | `createExpoLink({ url, fetch, native, getCookie, getExpoOrigin, headers })` from `orpc-fn/expo` |
-
-`createORPCClient` and `createTanstackQueryUtils` stay as they are. gey-mono's Expo app currently uses the global `fetch` on native, so `createExpoLink` is also what lets its subscriptions stream on native and close when cancelled. lullu's Vue-only helpers (`isOrpcDocumentVisible`, `resolveQueryEnabled`, `useLiveQuery`, `useOrpcSubscription`) stay in the app for now.
-
-## 9. Verify
-
-Run `bun run lint` and `bun test` in the app. The only expected route-file diff is the codemod's.
+[Runnable examples and peers](../examples/adoption/README.md) cover the representative contracts. Durable envelopes, outbox hooks, Redis Cluster adapters and framework composables remain separate additions driven by a consumer requirement.

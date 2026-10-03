@@ -147,3 +147,18 @@ describe('ioredis with a given subscriber', () => {
 		expect(subscriber.listenerCount('message')).toBe(1)
 	})
 })
+
+test('successful Redis restoration reports a possible event gap', async () => {
+	const { transport, connections } = fakeDriver()
+	let gaps = 0
+	const stop = await transport.subscribe('a', () => {}, undefined, {
+		onReconnect: () => {
+			gaps++
+		}
+	})
+	connections[0]?.handlers.onReconnect()
+	await Bun.sleep(0)
+	expect(gaps).toBe(1)
+	await stop()
+	transport.close()
+})

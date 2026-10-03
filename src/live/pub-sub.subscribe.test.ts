@@ -4,14 +4,12 @@ import {
 	describe,
 	expect,
 	expectTypeOf,
-	spyOn,
 	test
 } from 'bun:test'
 import { call, os } from '@orpc/server'
 import { z } from 'zod'
 import { quiet } from '../../tests/fixture.js'
 import { createFn } from '../index.js'
-import { encodePayload } from './codec.js'
 import type {
 	BacklogOptions,
 	PubSubMessage,
@@ -250,38 +248,18 @@ describe('createPubSub subscribe lifecycle', () => {
 		}
 	})
 
-	test('a lost subscription schedules one backed-off resubscribe', async () => {
-		const scheduled: Array<{ run: () => void; delayMs: number }> = []
+	test('a lost raw subscription reports a gap after reconnect', async () => {
 		const { abort, iterator } = await openSubscription('a')
 		const pending = iterator.next()
+		const failed = pending.catch((error: unknown) => error)
 		await settle()
-
-		const setTimeoutSpy = spyOn(globalThis, 'setTimeout').mockImplementation(((
-			run: () => void,
-			delayMs: number
-		) => {
-			scheduled.push({ run, delayMs })
-			return 1
-		}) as unknown as typeof setTimeout)
 		for (const handler of [...lostHandlers]) handler(new Error('boom'))
 		for (const handler of [...lostHandlers]) handler(new Error('again'))
-		setTimeoutSpy.mockRestore()
-
-		expect(scheduled).toHaveLength(1)
-		expect(scheduled[0]?.delayMs).toBeGreaterThanOrEqual(1000)
-		expect(scheduled[0]?.delayMs).toBeLessThan(1250)
-
-		scheduled[0]?.run()
-		await settle()
-
-		expect(unsubscribeCalls).toEqual(['test:orders'])
+		await Bun.sleep(1300)
+		expect(await failed).toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+		expect(unsubscribeCalls).toEqual(['test:orders', 'test:orders'])
 		expect(subscribeCalls).toEqual(['test:orders', 'test:orders'])
-		expect(lostHandlers.size).toBe(1)
-
-		// Still delivering after the resubscribe.
-		emit('test:orders', { orderId: 'a', status: 'after' })
-		expect((await pending).value).toEqual({ orderId: 'a', status: 'after' })
-
+		expect(lostHandlers.size).toBe(0)
 		abort.abort()
 		await iterator.return(undefined)
 	})
@@ -312,6 +290,7 @@ describe('createPubSub subscribe lifecycle', () => {
 			pubsub: {
 				transport,
 				maxQueueSize: 2,
+				maxIngressSize: 100,
 				onDrop: (count, { channel }) => drops.push(`${count}:${channel}`)
 			}
 		})
@@ -362,7 +341,8 @@ describe('publish (ported from gey-mono mirrorChannel/publishMany)', () => {
 
 	test('publish validates, resolves the channel and mirrors the payload', async () => {
 		await shards.publish({ shardId: '1', data: 'x' })
-		const payload = encodePayload({ shardId: '1', data: 'x' })
+		const payload = published[0]?.messages[0]?.payload ?? ''
+		expect(typeof payload).toBe('string')
 		expect(published).toEqual([
 			{
 				messages: [

@@ -1,4 +1,10 @@
-import type { AnyRouter } from '@orpc/server'
+import {
+	type AnyRouter,
+	type AnyProcedure,
+	resolveContractProcedures,
+	traverseContractProcedures
+} from '@orpc/server'
+import { readFnMeta } from './meta.js'
 
 /**
  * Creates a router object from routes or nested routers.
@@ -12,4 +18,36 @@ import type { AnyRouter } from '@orpc/server'
  */
 export function createRouter<T extends AnyRouter>(routes: T): Readonly<T> {
 	return routes
+}
+
+/** Serialize these paths to a frontend module; this helper belongs on the server. */
+export function createStreamManifest(
+	router: AnyRouter
+): readonly (readonly string[])[] {
+	const paths: string[][] = []
+	const unresolved = traverseContractProcedures(
+		{ router, path: [] },
+		({ contract, path }) => {
+			if (readFnMeta(contract as AnyProcedure).stream) paths.push([...path])
+		}
+	)
+	if (unresolved.length)
+		throw new TypeError(
+			'orpc-fn: lazy routers require createStreamManifestAsync'
+		)
+	return paths
+}
+
+/** Resolve lazy routers before generating the same serializable path manifest. */
+export async function createStreamManifestAsync(
+	router: AnyRouter
+): Promise<readonly (readonly string[])[]> {
+	const paths: string[][] = []
+	await resolveContractProcedures(
+		{ router, path: [] },
+		({ contract, path }) => {
+			if (readFnMeta(contract as AnyProcedure).stream) paths.push([...path])
+		}
+	)
+	return paths
 }

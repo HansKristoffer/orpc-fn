@@ -35,7 +35,7 @@ const inner = fn({ name: 'inner', input: z.object({ n: z.number() }), handler: (
 const outer = fn({
 	name: 'outer',
 	needsFlag: 'beta',
-	readOnly: true,
+	meta: { readOnly: true },
 	handler: async ({ call, answer, span }) => {
 		assert.equal(span, undefined)
 		return (await call(inner, { n: answer })) + 1
@@ -52,6 +52,7 @@ const counter = fnLive({
 	live: {
 		eventSchema: z.object({ id: z.string() }),
 		channel: ({ id }) => `counter:${id}`,
+		stateSchema: z.object({ count: z.number() }),
 		transformerFn: ({ previous }) => ({ count: (previous?.count ?? 0) + 1 })
 	}
 })
@@ -70,7 +71,7 @@ if (process.env.WITH_OPTIONAL_PEERS) {
 	const { createMastraTool } = await import('orpc-fn/mastra')
 	const { Hono } = await import('hono')
 	const { createRpcLink, hasOrpcErrorCode } = await import('orpc-fn/client')
-	const { createExpoLink } = await import('orpc-fn/expo')
+	const { createBetterAuthExpoLink } = await import('orpc-fn/expo')
 	const { createORPCClient } = await import('@orpc/client')
 	const tools = listTools({ inner, outer }, { filter: () => true })
 	assert.deepEqual(tools.map((tool) => tool.name), ['inner', 'outer'])
@@ -88,7 +89,7 @@ if (process.env.WITH_OPTIONAL_PEERS) {
 	const client = createORPCClient(createRpcLink({ url: 'http://localhost/rpc', fetch }))
 	assert.deepEqual(await Promise.all([client.inner({ n: 1 }), client.inner({ n: 2 })]), [2, 4])
 	assert.equal(hasOrpcErrorCode(new Error('x'), 'NOT_FOUND'), false)
-	const expo = createORPCClient(createExpoLink({
+	const expo = createORPCClient(createBetterAuthExpoLink({
 		url: 'http://localhost/rpc',
 		native: true,
 		fetch: (url, init) => app.fetch(new Request(url, init))

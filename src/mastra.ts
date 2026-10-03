@@ -2,6 +2,7 @@ import type { RequestContext } from '@mastra/core/request-context'
 import { createTool, type Tool } from '@mastra/core/tools'
 import { type AnyProcedure, call } from '@orpc/server'
 import {
+	isObjectJsonSchema,
 	passThroughOutputSchema,
 	rawInputSchema,
 	type ToolSchema
@@ -64,6 +65,8 @@ export function createMastraTool<TProc extends AnyProcedure>(
 	options: CreateMastraToolOptions = {}
 ): MastraTool<TProc> {
 	const meta = readFnMeta(procedure)
+	if (meta.stream)
+		throw new TypeError('orpc-fn: streaming procedures cannot be Mastra tools')
 	const name = options.id ?? meta.name
 	if (!name) {
 		throw new Error(
@@ -73,7 +76,7 @@ export function createMastraTool<TProc extends AnyProcedure>(
 	let inputSchema: ToolSchema | undefined
 	if (meta.inputSchema) {
 		inputSchema = rawInputSchema(meta.inputSchema)
-		if (inputSchema['~standard'].jsonSchema.input().type !== 'object') {
+		if (!isObjectJsonSchema(inputSchema['~standard'].jsonSchema.input())) {
 			throw new Error(`${name} must take an object input to be an agent tool`)
 		}
 	} else if (!options.allowMissingInputSchema) {
@@ -114,12 +117,17 @@ export function createMastraTool<TProc extends AnyProcedure>(
 				)
 			}
 			const startedAt = performance.now()
-			const finish = (outcome: 'success' | 'error') =>
-				options.onExecuteFinish?.({
-					toolId: id,
-					durationMs: performance.now() - startedAt,
-					outcome
-				})
+			const finish = (outcome: 'success' | 'error') => {
+				try {
+					options.onExecuteFinish?.({
+						toolId: id,
+						durationMs: performance.now() - startedAt,
+						outcome
+					})
+				} catch {
+					/* A telemetry hook cannot change tool execution. */
+				}
+			}
 			try {
 				const result = await call(
 					procedure,

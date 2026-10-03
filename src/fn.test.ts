@@ -349,6 +349,7 @@ const streamingProcedure = fn({
 		query: z.string(),
 		count: z.number()
 	}),
+	stream: true,
 	handler: async function* ({ input }) {
 		for (let i = 0; i < input.count; i++) {
 			yield { chunk: `${input.query}-${i}`, index: i }
@@ -364,6 +365,7 @@ const streamingNoInput = fn({
 	name: 'test.streamingNoInput',
 	method: 'GET',
 	procedure: 'public',
+	stream: true,
 	handler: async function* () {
 		yield { status: 'starting' }
 		yield { status: 'processing' }
@@ -382,6 +384,7 @@ const protectedStreaming = fn({
 	method: 'POST',
 	procedure: 'protected',
 	input: z.object({ threadId: z.string() }),
+	stream: true,
 	handler: async function* ({ input, context }) {
 		yield { threadId: input.threadId, userId: context.user.id }
 		yield { message: 'Hello from stream' }

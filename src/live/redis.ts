@@ -76,7 +76,7 @@ export type SubscriberConnection = {
 	 */
 	resubscribe?(channel: string): Promise<unknown>
 	/** Stop delivering and release the connection (if the driver created it). */
-	close(): void
+	close(): void | Promise<void>
 }
 
 /** Callbacks for one connection; they do nothing once it is replaced. */
@@ -91,6 +91,7 @@ export type SubscriberHandlers = {
 type Entry = {
 	listener: (payload: string) => void
 	onLost: ((error: Error) => void) | undefined
+	onReconnect: (() => void) | undefined
 }
 
 type ChannelState = {
@@ -114,27 +115,35 @@ export function createRedisTransport(driver: {
 	connectSubscriber: (
 		handlers: SubscriberHandlers
 	) => Promise<SubscriberConnection>
-}): PubSubTransport & { close(): void } {
+}): PubSubTransport & { close(): Promise<void> } {
 	const publishScript = createLuaScript(driver.send, PUBLISH_LUA)
 	const channels = new Map<string, ChannelState>()
 	// An UNSUBSCRIBE still in flight would cancel a SUBSCRIBE sent after it.
 	const unsubscribing = new Map<string, Promise<unknown>>()
 	let current: {
 		connection: Promise<SubscriberConnection>
-		retire: () => void
+		retire: () => Promise<void>
 	} | null = null
 
 	const connect = () => {
 		let retired = false
+		let closing: Promise<void> | undefined
 		const retire = (error?: Error) => {
-			if (retired) return
+			if (retired) return closing ?? Promise.resolve()
 			retired = true
 			if (current?.connection === connection) current = null
-			void connection.then((open) => open.close()).catch(() => {})
-			if (!error) return
+			closing = connection.then((open) => open.close()).catch(() => {})
+			if (!error) return closing
 			const lost = [...channels.values()].flatMap((state) => [...state.entries])
 			channels.clear()
-			for (const entry of lost) entry.onLost?.(error)
+			for (const entry of lost) {
+				try {
+					entry.onLost?.(error)
+				} catch {
+					/* One callback cannot interrupt retirement. */
+				}
+			}
+			return closing
 		}
 		const handlers: SubscriberHandlers = {
 			onMessage(channel, message) {
@@ -157,6 +166,17 @@ export function createRedisTransport(driver: {
 					.then((open) =>
 						Promise.all(settled.map((channel) => open.resubscribe?.(channel)))
 					)
+					.then(() => {
+						if (retired) return
+						for (const channel of settled)
+							for (const entry of [...(channels.get(channel)?.entries ?? [])]) {
+								try {
+									entry.onReconnect?.()
+								} catch {
+									/* Isolate subscriber callbacks. */
+								}
+							}
+					})
 					.catch((error) => retire(asError(error)))
 			},
 			onLost: (error) => retire(error)
@@ -202,9 +222,13 @@ export function createRedisTransport(driver: {
 			])
 			return Array.isArray(items) ? items.map(String) : []
 		},
-		async subscribe(channel, listener, onLost) {
+		async subscribe(channel, listener, onLost, options) {
 			const connection = await (current?.connection ?? connect())
-			const entry: Entry = { listener, onLost }
+			const entry: Entry = {
+				listener,
+				onLost,
+				onReconnect: options?.onReconnect
+			}
 			await unsubscribing.get(channel)
 			let state = channels.get(channel)
 			if (!state) {
@@ -244,9 +268,11 @@ export function createRedisTransport(driver: {
 				await done
 			}
 		},
-		close() {
-			current?.retire()
+		async close() {
+			const closing = current?.retire()
 			channels.clear()
+			await closing
+			await Promise.allSettled([...unsubscribing.values()])
 		}
 	}
 }

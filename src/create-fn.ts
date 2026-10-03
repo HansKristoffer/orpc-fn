@@ -1,5 +1,11 @@
-import type { AnySchema } from '@orpc/contract'
-import type { AnyProcedure } from '@orpc/server'
+import {
+	type BuilderChain,
+	createProcedureAssembler
+} from './assemble-procedure.js'
+import { isAsyncIteratorObject } from './stream.js'
+import { normalizeRoute } from './route-options.js'
+import { type AnyProcedure, ORPCError, os } from '@orpc/server'
+import { procedureDefinition } from './compatibility.js'
 import { type BoundCall, createBoundCall } from './bound-call.js'
 import { isExpectedClientError } from './expected-client-error.js'
 import { createFnLive, type FnLive } from './live/fn-live.js'
@@ -11,15 +17,11 @@ import {
 } from './live/pub-sub.js'
 import {
 	createDefaultLogger,
+	protectLogger,
 	type FnLogger,
 	type LogAttributes
 } from './logger.js'
-import {
-	FN_META_KEY,
-	type FnMeta,
-	readFnMeta,
-	type StoredFnMeta
-} from './meta.js'
+import { readFnMeta } from './meta.js'
 import {
 	type AttributeValue,
 	createTracing,
@@ -28,12 +30,15 @@ import {
 	type SpanLike,
 	type SpanOf
 } from './otel.js'
+import { RAW_INPUT, REQUEST_TIMING, type InvocationTiming } from './timing.js'
 import { createRouter } from './router.js'
 import {
-	type AnyFnContext,
+	type ProcedureHookParams,
+	type CompletedHookEvent,
+	type CurrentContextOf,
 	type BuilderLike,
-	type BuildProcedure,
 	type FiniteExtras,
+	type FiniteScopedExtras,
 	type Fn,
 	type FnCompletedEvent,
 	type FnDefinition,
@@ -42,24 +47,18 @@ import {
 	type MaybePromise,
 	type RejectKeys,
 	RESERVED_OPTION_KEYS,
-	ROUTE_OPTION_KEYS,
 	type ReservedOptionKey
 } from './types.js'
-
-/** Builder methods `createFn` calls; `BuilderLike` is the public constraint. */
-type BuilderChain = {
-	route(route: Record<string, unknown>): BuilderChain
-	meta(meta: Record<string, unknown>): BuilderChain
-	input(schema: AnySchema): BuilderChain
-	output(schema: AnySchema): BuilderChain
-	handler(handler: Parameters<BuildProcedure>[0]['handler']): AnyProcedure
-}
 
 /** `CreateFnOptions` with the generics erased: what the implementation reads. */
 type RuntimeOptions = {
 	procedures: Record<string, BuilderChain>
 	default?: string
 	extras?: (params: Record<string, unknown>) => unknown
+	extrasByProcedure?: Record<
+		string,
+		(params: Record<string, unknown>) => unknown
+	>
 	guards?: Record<
 		string,
 		(value: unknown, params: GuardParams<unknown, unknown>) => unknown
@@ -77,18 +76,6 @@ type RuntimeOptions = {
 	pubsub?: PubSubRuntimeOptions
 }
 
-type UnionContext<TProcedures extends Record<string, BuilderLike>> =
-	AnyFnContext<{
-		procedures: TProcedures
-		default: string
-		extras: object
-		guards: object
-		meta: object
-		tag: string
-		span: SpanLike
-		logger: FnLogger
-	}>
-
 export type CreateFnOptions<
 	TProcedures extends Record<string, BuilderLike>,
 	TDefault extends keyof TProcedures & string,
@@ -97,7 +84,11 @@ export type CreateFnOptions<
 	TMeta extends object,
 	TTag extends string,
 	TOtel extends OtelApiLike | undefined,
-	TLogger extends FnLogger
+	TLogger extends FnLogger,
+	TScoped extends Partial<Record<keyof TProcedures, object>> = Record<
+		never,
+		never
+	>
 > = {
 	/** Named oRPC builders, e.g. `{ public: os.$context<Ctx>(), protected: authed }`. */
 	procedures: TProcedures
@@ -107,52 +98,65 @@ export type CreateFnOptions<
 	 */
 	default?: TDefault
 	/** Per-call values merged into every handler's params; may be async. */
-	extras?: (params: {
-		context: UnionContext<TProcedures>
-		span: SpanOf<TOtel> | undefined
-		signal: AbortSignal | undefined
-		name: string
-		procedure: string
-	}) => MaybePromise<TExtras>
+	extras?: (
+		params: ProcedureHookParams<
+			TProcedures,
+			{
+				span: SpanOf<TOtel> | undefined
+				signal: AbortSignal | undefined
+				name: string
+			}
+		>
+	) => MaybePromise<TExtras>
+	extrasByProcedure?: {
+		[K in keyof TScoped & keyof TProcedures]: (params: {
+			context: CurrentContextOf<TProcedures[K]>
+			span: SpanOf<TOtel> | undefined
+			signal: AbortSignal | undefined
+			name: string
+			procedure: K
+		}) => MaybePromise<TScoped[K]>
+	}
 	/**
 	 * Checks run before the handler; each key becomes a typed `fn()` option.
-	 * Keys must not reuse route options or meta keys.
+	 * Keys must not reuse route options. False denies, true or void allows.
 	 */
 	guards?: TGuards &
 		Record<
 			string,
-			Guard<never, GuardParams<UnionContext<TProcedures>, TMeta>>
+			Guard<
+				never,
+				ProcedureHookParams<
+					TProcedures,
+					Omit<GuardParams<unknown, TMeta>, 'context' | 'procedure'>
+				>
+			>
 		> &
 		RejectKeys<
 			NoInfer<TGuards>,
-			ReservedOptionKey | keyof NoInfer<TMeta>,
-			'orpc-fn: this guard name is a route option or meta key'
+			ReservedOptionKey,
+			'orpc-fn: this guard name is a route option'
 		>
 	/**
-	 * Typed route metadata: `meta: {} as { readOnly?: boolean }`. Keys become
-	 * `fn()` options and must not reuse route options.
+	 * Typed route metadata contract: `meta: defineMeta<AppMeta>()`.
+	 * Route declarations place values inside their own `meta` object.
 	 */
-	meta?: TMeta &
-		RejectKeys<
-			NoInfer<TMeta>,
-			ReservedOptionKey,
-			'orpc-fn: this meta key is a route option'
-		>
+	meta?: TMeta
 	/** Allowed route tags: `tags: ['internal', 'external']`. */
 	tags?: readonly TTag[]
 	/** `import * as otel from '@opentelemetry/api'`. Omit for no tracing. */
 	otel?: TOtel
 	logger?: (scope: string, span: SpanOf<TOtel> | undefined) => TLogger
 	/** Extra span attributes per call; undefined values are skipped. */
-	spanAttributes?: (params: {
-		context: UnionContext<TProcedures>
-		name: string
-		procedure: string
-		meta: Partial<TMeta>
-	}) => Record<string, AttributeValue | undefined>
-	/** Called after every handler; returned attributes join the `fn.completed` log. */
+	spanAttributes?: (
+		params: ProcedureHookParams<
+			TProcedures,
+			{ name: string; meta: Partial<TMeta> }
+		>
+	) => Record<string, AttributeValue | undefined>
+	/** Called after the procedure (or stream) settles; returned attributes join the `fn.completed` log. */
 	onCompleted?: (
-		event: FnCompletedEvent<UnionContext<TProcedures>, SpanOf<TOtel>>
+		event: CompletedHookEvent<TProcedures, SpanOf<TOtel>>
 		// biome-ignore lint/suspicious/noConfusingVoidType: lets hooks that return nothing type-check
 	) => LogAttributes | undefined | void
 	/** Errors that are the caller's fault, logged at `warn`. Default: 4xx `ORPCError` or `AbortError`. */
@@ -169,11 +173,16 @@ type Definition<
 	TMeta extends object,
 	TTag extends string,
 	TOtel,
-	TLogger extends FnLogger
+	TLogger extends FnLogger,
+	TScoped extends Partial<Record<keyof TProcedures, object>> = Record<
+		never,
+		never
+	>
 > = {
 	procedures: TProcedures
 	default: TDefault
 	extras: TExtras
+	extrasByProcedure: TScoped
 	guards: TGuards
 	meta: TMeta
 	tag: TTag
@@ -187,7 +196,7 @@ export type FnFactory<TDef extends FnDefinition> = {
 	createPubSub: CreatePubSub<TDef>
 	createPublisher: CreatePublisher
 	createRouter: typeof createRouter
-	readMeta: (procedure: AnyProcedure) => FnMeta<TDef['meta']>
+	readMeta: typeof readFnMeta
 	/**
 	 * A `call` outside any handler (seeders, scripts, tests), traced with this
 	 * instance's OpenTelemetry.
@@ -196,7 +205,8 @@ export type FnFactory<TDef extends FnDefinition> = {
 		context: TContext,
 		signal?: AbortSignal
 	) => BoundCall<TContext>
-	/** End every open subscription of this instance; returns how many closed. */
+	/** Terminal, idempotent shutdown: close streams and await owned resources. */
+	shutdown: () => Promise<void>
 	drainPubSubSubscribers: () => number
 	activePubSubSubscriberCount: () => number
 }
@@ -213,7 +223,11 @@ export function createFn<
 	TMeta extends object = Record<never, never>,
 	const TTag extends string = string,
 	TOtel extends OtelApiLike | undefined = undefined,
-	TLogger extends FnLogger = FnLogger
+	TLogger extends FnLogger = FnLogger,
+	TScoped extends Partial<Record<keyof TProcedures, object>> = Record<
+		never,
+		never
+	>
 >(
 	options: CreateFnOptions<
 		TProcedures,
@@ -223,9 +237,11 @@ export function createFn<
 		TMeta,
 		TTag,
 		TOtel,
-		TLogger
+		TLogger,
+		TScoped
 	> &
-		FiniteExtras<NoInfer<TExtras>>
+		FiniteExtras<NoInfer<TExtras>> &
+		FiniteScopedExtras<NoInfer<TScoped>>
 ): FnFactory<
 	Definition<
 		TProcedures,
@@ -235,28 +251,42 @@ export function createFn<
 		TMeta,
 		TTag,
 		TOtel,
-		TLogger
+		TLogger,
+		TScoped
 	>
 > {
 	const runtime = options as unknown as RuntimeOptions
 	const tracing = createTracing(runtime.otel)
-	const defaultLogger = createDefaultLogger('fn')
-	const createLogger =
-		runtime.logger ??
-		((scope: string) =>
-			scope === 'fn' ? defaultLogger : createDefaultLogger(scope))
+	const defaultLogger = protectLogger(createDefaultLogger('fn'))
+	const createLogger = (
+		scope: string,
+		span: SpanLike | undefined
+	): FnLogger => {
+		try {
+			return protectLogger(
+				runtime.logger?.(scope, span) ??
+					(scope === 'fn' ? defaultLogger : createDefaultLogger(scope))
+			)
+		} catch {
+			return defaultLogger
+		}
+	}
 	const isExpectedError = runtime.isExpectedError ?? isExpectedClientError
 	const guards = runtime.guards ?? {}
 	const isGuard = (option: string) => Object.hasOwn(guards, option)
 	for (const guard of Object.keys(guards)) {
+		if (typeof guards[guard] !== 'function')
+			throw new TypeError(`orpc-fn: guard ${guard} must be a function`)
 		if ((RESERVED_OPTION_KEYS as readonly string[]).includes(guard)) {
 			throw new Error(
 				`orpc-fn: guard "${guard}" reuses a route option name; rename it`
 			)
 		}
 	}
+	if (runtime.default && !Object.hasOwn(runtime.procedures, runtime.default))
+		throw new TypeError(`orpc-fn: unknown default procedure ${runtime.default}`)
 	for (const [key, builder] of Object.entries(runtime.procedures)) {
-		const def = (builder as { '~orpc'?: Record<string, unknown> })['~orpc']
+		const def = procedureDefinition(builder)
 		if (def?.inputSchema !== undefined || def?.outputSchema !== undefined) {
 			throw new Error(
 				`orpc-fn: procedure "${key}" sets an input or output schema; set schemas on routes instead`
@@ -274,139 +304,204 @@ export function createFn<
 		return key
 	}
 
-	const buildProcedure: BuildProcedure = (route) => {
-		const key = resolveKey(route.procedure, route.name)
-		let builder = runtime.procedures[key]
-		if (!builder) throw new Error(`orpc-fn: unknown procedure "${key}"`)
-		const stored: StoredFnMeta = {
-			name: route.name,
-			procedure: key,
-			meta: route.meta
-		}
-		builder = builder
-			.route({
-				operationId: route.name,
-				...Object.fromEntries(
-					Object.entries(route.route).filter(([, value]) => value !== undefined)
-				)
-			})
-			.meta({ [FN_META_KEY]: stored })
-		if (route.input) builder = builder.input(route.input)
-		if (route.output) builder = builder.output(route.output)
-		return builder.handler(route.handler)
+	const buildProcedure = createProcedureAssembler(
+		runtime.procedures,
+		resolveKey
+	)
+
+	const invocation = Symbol('orpc-fn.invocation')
+	type Invocation = {
+		span: SpanLike | undefined
+		logger: FnLogger
+		input: unknown
+		context: unknown
+		handlerStarted: boolean
+		rawInput: unknown
 	}
-
-	// biome-ignore lint/suspicious/noExplicitAny: the overloads in `Fn` carry the types
-	const fn = (routeOptions: any): AnyProcedure => {
-		const { handler, input, output, name, procedure, ...rest } = routeOptions
+	// The overload-to-runtime boundary is adapted once at the returned factory.
+	const fn = (routeOptions: Record<string, unknown>): AnyProcedure => {
+		const {
+			handler,
+			input,
+			output,
+			name,
+			procedure,
+			meta,
+			stream,
+			errors,
+			guardResolvers,
+			route,
+			guardChecks
+		} = normalizeRoute(routeOptions, isGuard)
 		const key = resolveKey(procedure, name)
-		const route: Record<string, unknown> = {}
-		const guardChecks: Array<[string, unknown]> = []
-		const meta: Record<string, unknown> = {}
-		for (const [option, value] of Object.entries(rest)) {
-			if (value === undefined) continue
-			if ((ROUTE_OPTION_KEYS as readonly string[]).includes(option))
-				route[option] = value
-			else if (isGuard(option)) guardChecks.push([option, value])
-			else meta[option] = value
-		}
-
-		return buildProcedure({
+		const built = buildProcedure({
 			name,
 			procedure: key,
 			route,
 			meta,
 			input,
 			output,
-			handler: (params) => {
+			stream,
+			...(errors ? { errors } : {}),
+			handler: async (params) => {
 				const { context, signal } = params
-				const startTime = performance.now()
-				const elapsedMs = () =>
-					Math.round((performance.now() - startTime) * 100) / 100
-				let logger: FnLogger = defaultLogger
-				return tracing.inSpan(
+				const state = context[invocation] as Invocation
+				const { [invocation]: _invocation, ...observedContext } = context
+				state.context = observedContext
+				state.input = params.input
+				state.handlerStarted = true
+				try {
+					const attributes = runtime.spanAttributes?.({
+						context,
+						name,
+						procedure: key,
+						meta
+					})
+					for (const [attribute, value] of Object.entries(attributes ?? {}))
+						if (value !== undefined) state.span?.setAttribute(attribute, value)
+				} catch (error) {
+					state.logger.warn('spanAttributes hook failed', {
+						error: errorMessageOf(error)
+					})
+				}
+				const resolvedChecks = [...guardChecks]
+				for (const [guard, resolver] of Object.entries(guardResolvers)) {
+					const value = await resolver({ input: params.input, context, signal })
+					if (value !== undefined) resolvedChecks.push([guard, value])
+				}
+				for (const [guard, value] of resolvedChecks) {
+					const result = await guards[guard]?.(value, {
+						context,
+						input: params.input,
+						name,
+						procedure: key,
+						meta,
+						signal
+					})
+					if (result === false)
+						throw new ORPCError('FORBIDDEN', {
+							message: `Guard "${guard}" denied this call`
+						})
+					if (result !== undefined && result !== true)
+						throw new TypeError(
+							`orpc-fn: guard "${guard}" must return void or boolean`
+						)
+				}
+				const extraParams = {
+					context,
+					span: state.span,
+					signal,
+					name,
+					procedure: key
+				}
+				const shared = await runtime.extras?.(extraParams)
+				const scoped = await runtime.extrasByProcedure?.[key]?.(extraParams)
+				const extras = {
+					...(shared as object | undefined),
+					...(scoped as object | undefined)
+				}
+				if (extras && typeof extras === 'object') {
+					for (const reserved of [
+						'input',
+						'context',
+						'call',
+						'signal',
+						'span',
+						'logger',
+						'errors',
+						'lastEventId'
+					]) {
+						if (Object.hasOwn(extras, reserved))
+							throw new TypeError(
+								`orpc-fn: extra "${reserved}" shadows a handler parameter`
+							)
+					}
+				}
+				return handler({
+					...(extras as object | undefined),
+					input: params.input,
+					context,
+					call: createBoundCall(context, signal, tracing),
+					signal,
+					span: state.span,
+					logger: state.logger,
+					errors: params.errors,
+					lastEventId: params.lastEventId,
+					[RAW_INPUT]: state.rawInput
+				})
+			}
+		})
+		// Prepending middleware shifts oRPC's validation indexes, covering auth,
+		// input validation, output validation, and the final stream lifetime.
+		return os
+			.use(async ({ context, next }, rawInput) => {
+				const started = performance.now()
+				const state: Invocation = {
+					span: undefined,
+					logger: defaultLogger,
+					input: undefined,
+					context,
+					handlerStarted: false,
+					rawInput
+				}
+				const result = await tracing.inSpan(
 					name,
 					'SERVER',
 					async (span) => {
-						logger = createLogger('fn', span)
+						state.span = span
+						state.logger = createLogger('fn', span)
 						span?.setAttribute('fn.operation', name)
 						span?.setAttribute('fn.procedure', key)
-						const attributes = runtime.spanAttributes?.({
-							context,
-							name,
-							procedure: key,
-							meta
-						})
-						for (const [attribute, value] of Object.entries(attributes ?? {})) {
-							if (value !== undefined) span?.setAttribute(attribute, value)
-						}
 						try {
-							for (const [guard, value] of guardChecks) {
-								await guards[guard]?.(value, {
-									context,
-									input: params.input,
-									name,
-									procedure: key,
-									meta,
-									signal
-								})
+							const result = await next({ context: { [invocation]: state } })
+							if (isAsyncIteratorObject(result.output) !== stream) {
+								if (isAsyncIteratorObject(result.output)) {
+									try {
+										await result.output.return?.()
+									} catch {
+										/* Release the unexpected stream. */
+									}
+								}
+								throw new TypeError(
+									`orpc-fn: ${name} returned a result inconsistent with stream; declare stream: true for iterators`
+								)
 							}
-							const extras = await runtime.extras?.({
-								context,
-								span,
-								signal,
-								name,
-								procedure: key
-							})
-							return await handler({
-								...(extras as object | undefined),
-								input: params.input,
-								context,
-								call: createBoundCall(context, signal, tracing),
-								signal,
-								span,
-								logger
-							})
+							return result.output
 						} finally {
-							// Server-Timing reports the time until the result (or stream) exists.
-							const timing = context.timing
-							if (typeof timing === 'object' && timing !== null) {
-								;(timing as Record<string, unknown>).handler_ms = elapsedMs()
+							const timing = (context as Record<symbol, unknown>)[
+								REQUEST_TIMING
+							] as InvocationTiming | undefined
+							if (timing && !(context as Record<symbol, unknown>)[invocation]) {
+								timing.procedureMs += performance.now() - started
+								timing.calls++
 							}
 						}
 					},
-					// After the result, or after a returned stream ends; before the span ends.
 					(span, ...error) => {
-						const durationMs = elapsedMs()
+						const durationMs =
+							Math.round((performance.now() - started) * 100) / 100
 						span?.setAttribute('fn.duration_ms', durationMs)
-						logCompleted(logger, {
+						logCompleted(state.logger, {
 							name,
 							procedure: key,
 							durationMs,
 							success: error.length === 0,
 							error: error[0],
-							input: params.input,
-							context,
+							input: state.input,
+							context: state.context,
 							span,
-							meta
+							meta,
+							handlerStarted: state.handlerStarted
 						})
 					}
 				)
-			}
-		})
+				return { output: result, context }
+			})
+			.router({ route: built }).route
 	}
 
 	const logCompleted = (logger: FnLogger, event: FnCompletedEvent) => {
 		const { error, success } = event
-		const timing = (event.context as { timing?: unknown }).timing
-		const timingFields: LogAttributes = {}
-		if (typeof timing === 'object' && timing !== null) {
-			for (const [field, value] of Object.entries(timing)) {
-				if (field !== 'handler_ms' && typeof value === 'number') {
-					timingFields[field] = value
-				}
-			}
-		}
 		let extra: LogAttributes | undefined
 		try {
 			extra = runtime.onCompleted?.(event)
@@ -415,26 +510,31 @@ export function createFn<
 				error: errorMessageOf(hookError)
 			})
 		}
-		const level = success ? 'info' : isExpectedError(error) ? 'warn' : 'error'
+		let expected = false
+		try {
+			expected = isExpectedError(error)
+		} catch {
+			expected = isExpectedClientError(error)
+		}
+		const level = success ? 'info' : expected ? 'warn' : 'error'
 		logger[level]('fn.completed', {
+			...extra,
 			event: 'fn.completed',
 			operation: event.name,
 			procedure: event.procedure,
 			duration_ms: event.durationMs,
 			status: success ? 'success' : 'failed',
-			...timingFields,
 			...(error === undefined
 				? {}
 				: {
 						error_type: error instanceof Error ? error.name : typeof error,
 						error_message: errorMessageOf(error)
-					}),
-			...extra
+					})
 		})
 	}
 
 	const live = createLiveRuntime({
-		buildProcedure,
+		fn,
 		tracing,
 		createLogger,
 		pubsub: runtime.pubsub
@@ -443,19 +543,33 @@ export function createFn<
 	// The runtimes are untyped; `Fn`, `FnLive`, `CreatePubSub` and
 	// `CreatePublisher` are their typed surface.
 	return {
-		fn: fn as never,
+		fn,
 		fnLive: createFnLive({
 			fn,
 			createChannel: live.createChannel,
 			createLogger,
 			isGuard
-		}) as never,
-		createPubSub: live.createPubSub as never,
-		createPublisher: live.createPublisher as never,
+		}),
+		createPubSub: live.createPubSub,
+		createPublisher: live.createPublisher,
 		createRouter,
-		readMeta: (procedure) => readFnMeta(procedure),
-		createCall: (context, signal) => createBoundCall(context, signal, tracing),
+		readMeta: readFnMeta,
+		createCall: <TContext>(context: TContext, signal?: AbortSignal) =>
+			createBoundCall(context, signal, tracing),
+		shutdown: live.shutdown,
 		drainPubSubSubscribers: live.drainPubSubSubscribers,
 		activePubSubSubscriberCount: live.activePubSubSubscriberCount
-	}
+	} as unknown as FnFactory<
+		Definition<
+			TProcedures,
+			TDefault,
+			TExtras,
+			TGuards,
+			TMeta,
+			TTag,
+			TOtel,
+			TLogger,
+			TScoped
+		>
+	>
 }

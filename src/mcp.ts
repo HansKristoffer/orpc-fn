@@ -4,6 +4,7 @@ import {
 	type TraverseContractProcedureCallbackOptions,
 	traverseContractProcedures
 } from '@orpc/server'
+import { procedureDefinition } from './compatibility.js'
 import { rawInputSchema, type ToolSchema } from './json-schema.js'
 import { readFnMeta, toToolName } from './meta.js'
 
@@ -35,39 +36,66 @@ export type McpTool = {
 export const hasTag =
 	(tag: string): ProcedureFilter =>
 	({ contract }) =>
-		contract['~orpc'].route.tags?.includes(tag) ?? false
+		procedureDefinition(contract).route?.tags?.includes(tag) ?? false
 
 const isGet: ProcedureFilter = ({ contract }) =>
-	contract['~orpc'].route.method === 'GET'
+	procedureDefinition(contract).route?.method === 'GET'
 
 /**
  * MCP tool definitions for the procedures in `router` matching `filter`
- * (default: all). Register them with any MCP server:
- * `server.registerTool(tool.name, tool.config, run)`.
+ * (default: all). These are inspection definitions, not McpServer.registerTool configs.
+ * Use registerMcpTools from orpc-fn/mcp/sdk for executable registration.
  *
  * `readOnly` sets `readOnlyHint`; it defaults to GET routes, since an MCP
  * client treats anything else as a mutation and may ask for approval.
  */
 export function listTools(
 	router: AnyRouter,
-	options: { filter?: ProcedureFilter; readOnly?: ProcedureFilter } = {}
+	options: {
+		filter?: ProcedureFilter
+		readOnly?: ProcedureFilter
+		name?: (options: TraverseContractProcedureCallbackOptions) => string
+	} = {}
 ): McpTool[] {
 	const { filter, readOnly = isGet } = options
 	const tools: McpTool[] = []
-	traverseContractProcedures({ router, path: [] }, (traversed) => {
-		if (filter && !filter(traversed)) return
-		const procedure = traversed.contract as AnyProcedure
-		const { inputSchema, route } = procedure['~orpc']
-		const description = route.description ?? route.summary
-		tools.push({
-			name: toToolName(readFnMeta(procedure).name ?? traversed.path.join('.')),
-			procedure,
-			config: {
-				...(description === undefined ? {} : { description }),
-				...(inputSchema ? { inputSchema: rawInputSchema(inputSchema) } : {}),
-				annotations: { readOnlyHint: readOnly(traversed) }
-			}
-		})
-	})
+	const names = new Map<string, AnyProcedure>()
+	const unresolved = traverseContractProcedures(
+		{ router, path: [] },
+		(traversed) => {
+			if (filter && !filter(traversed)) return
+			const procedure = traversed.contract as AnyProcedure
+			const meta = readFnMeta(procedure)
+			if (meta.stream)
+				throw new TypeError(
+					`orpc-fn: streaming procedure ${meta.name ?? traversed.path.join('.')} cannot be an MCP tool`
+				)
+			const name =
+				options.name?.(traversed) ??
+				toToolName(meta.name ?? traversed.path.join('.'))
+			const previous = names.get(name)
+			if (previous === procedure) return
+			if (previous)
+				throw new TypeError(
+					`orpc-fn: MCP tool name collision: ${name}; provide a name override`
+				)
+			names.set(name, procedure)
+			const { inputSchema, route = {} } = procedureDefinition(procedure)
+			const description = route.description ?? route.summary
+			tools.push({
+				name,
+				procedure,
+				config: {
+					...(description === undefined ? {} : { description }),
+					...(inputSchema ? { inputSchema: rawInputSchema(inputSchema) } : {}),
+					annotations: { readOnlyHint: readOnly(traversed) }
+				}
+			})
+		}
+	)
+	if (unresolved.length)
+		throw new TypeError(
+			'orpc-fn: resolve lazy routers with unlazyRouter before listing MCP tools'
+		)
 	return tools
 }

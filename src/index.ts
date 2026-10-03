@@ -11,7 +11,7 @@ export {
 	type FnLogger,
 	type LogAttributes
 } from './logger.js'
-export { FN_META_KEY, type FnMeta, readFnMeta } from './meta.js'
+export { defineMeta, FN_META_KEY, type FnMeta, readFnMeta } from './meta.js'
 export type {
 	AttributeValue,
 	OtelApiLike,
@@ -19,7 +19,11 @@ export type {
 	SpanOf,
 	Tracing
 } from './otel.js'
-export { createRouter } from './router.js'
+export {
+	createRouter,
+	createStreamManifest,
+	createStreamManifestAsync
+} from './router.js'
 export type {
 	AnyFnContext,
 	BuilderLike,
