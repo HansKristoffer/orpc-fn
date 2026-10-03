@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/HansKristoffer/orpc-fn/compare/v0.2.0...v0.2.1) (2026-10-03)
+
+
+### Bug Fixes
+
+* **ci:** build release artifacts before checking examples ([f88e980](https://github.com/HansKristoffer/orpc-fn/commit/f88e9806114c81ce12d0b7b3d6398d574f884ce6))
+* **ci:** build release artifacts before checking examples ([0b02a6a](https://github.com/HansKristoffer/orpc-fn/commit/0b02a6a0596e158b7f8511cf951bdea2af767f22))
+
 ## [0.2.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.1.0...v0.2.0) (2026-10-03)
 
 
