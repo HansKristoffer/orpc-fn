@@ -1,4 +1,5 @@
 import { SmartCoercionPlugin } from '@orpc/json-schema'
+import type { OpenAPIGeneratorGenerateOptions } from '@orpc/openapi'
 import { OpenAPIHandler } from '@orpc/openapi/fetch'
 import { OpenAPIReferencePlugin } from '@orpc/openapi/plugins'
 import {
@@ -12,6 +13,7 @@ import type { StandardHandlerPlugin } from '@orpc/server/standard'
 import { ZodToJsonSchemaConverter } from '@orpc/zod/zod4'
 import type { Context as HonoContext, Env, Hono } from 'hono'
 import type { StatusCode } from 'hono/utils/http-status'
+import { REQUEST_TIMING, type InvocationTiming } from './timing.js'
 import { isExpectedClientError } from './expected-client-error.js'
 import type { ProcedureFilter } from './mcp.js'
 
@@ -40,8 +42,7 @@ type ContextOption<E extends Env, R extends AnyRouter> =
 		: { context: ContextFactory<E, R> }
 
 type Path = `/${string}`
-// biome-ignore lint/suspicious/noExplicitAny: plugins are context-agnostic here
-type Plugin = StandardHandlerPlugin<any>
+type Plugin<T extends object> = StandardHandlerPlugin<T>
 
 export type MountOrpcOptions<
 	E extends Env,
@@ -61,8 +62,8 @@ export type MountOrpcOptions<
 		/** Turn JSON strings back into `Date`s etc. for `z.date()` inputs. */
 		smartCoercion?: boolean
 		/** Extra spec fields, e.g. `components.securitySchemes` and `security`. */
-		spec?: Record<string, unknown>
-		plugins?: Plugin[]
+		spec?: Omit<OpenAPIGeneratorGenerateOptions, 'filter'>
+		plugins?: Plugin<InferRouterInitialContext<R>>[]
 	}
 	/** Collapse parallel RPC calls into one HTTP request. Default: true (25 calls). */
 	batch?: boolean | { maxSize: number }
@@ -71,7 +72,7 @@ export type MountOrpcOptions<
 	/** SSE keep-alive comments every N ms (default 15000), or false. */
 	sseKeepAlive?: boolean | number
 	/** Extra RPC plugins (e.g. `CORSPlugin`). */
-	plugins?: Plugin[]
+	plugins?: Plugin<InferRouterInitialContext<R>>[]
 	/** Rewrite request headers before they reach the context (see `normalizeExpoOrigin`). */
 	normalizeHeaders?: (headers: Headers) => Headers
 	/** Time spent before the handler ran, reported as `queue`. */
@@ -116,7 +117,7 @@ export function formatServerTiming(
  * for nginx/Fastly to hold until an idle kill). A copy: some responses (e.g.
  * redirects) have immutable headers.
  */
-function finishHeaders(
+export function finishOrpcHeaders(
 	response: Response,
 	serverTiming: string | undefined
 ): Headers {
@@ -157,14 +158,21 @@ export function mountOrpc<E extends Env, R extends AnyRouter>(
 		error: unknown,
 		{ request }: { request: { url: URL; method: string } }
 	) => {
-		if (isExpectedError(error)) return
-		options.onError?.(error, {
-			url: request.url.pathname,
-			method: request.method
-		})
+		try {
+			if (isExpectedError(error)) return
+			options.onError?.(error, {
+				url: request.url.pathname,
+				method: request.method
+			})
+		} catch {
+			/* Error reporting cannot replace transport outcomes. */
+		}
 	}
 
-	const mount = (prefix: Path, handler: Pick<RPCHandler<object>, 'handle'>) => {
+	const mount = (
+		prefix: Path,
+		handler: Pick<RPCHandler<InferRouterInitialContext<R>>, 'handle'>
+	) => {
 		app.use(`${prefix}/*`, async (c, next) => {
 			const timing: RequestTiming = {}
 			const queueMs = options.queueMs?.(c.req.raw)
@@ -178,24 +186,33 @@ export function mountOrpc<E extends Env, R extends AnyRouter>(
 				? await options.context(c, { headers, timing })
 				: { headers, timing }
 			if (context instanceof Response) return context
+			const invocationTiming: InvocationTiming = { procedureMs: 0, calls: 0 }
 			const { matched, response } = await handler.handle(c.req.raw, {
 				prefix,
-				context: context as object
+				context: {
+					...context,
+					[REQUEST_TIMING]: invocationTiming
+				} as InferRouterInitialContext<R>
 			})
 			if (!matched) return next()
 			const timed = serverTiming
-				? formatServerTiming(performance.now() - started, timing)
+				? formatServerTiming(performance.now() - started, {
+						...timing,
+						handler_ms: invocationTiming.procedureMs
+					})
 				: undefined
 			return c.newResponse(response.body, {
 				// oRPC only produces valid HTTP status codes.
 				status: response.status as StatusCode,
-				headers: finishHeaders(response, timed)
+				headers: finishOrpcHeaders(response, timed)
 			})
 		})
 	}
 
 	if (options.rpcPrefix) {
-		const plugins: Plugin[] = [...(options.plugins ?? [])]
+		const plugins: Plugin<InferRouterInitialContext<R>>[] = [
+			...(options.plugins ?? [])
+		]
 		if (batch) {
 			plugins.push(
 				new BatchHandlerPlugin({
@@ -217,7 +234,9 @@ export function mountOrpc<E extends Env, R extends AnyRouter>(
 		const { openapi } = options
 		const filter = openapi.filter ? { filter: openapi.filter } : {}
 		const converters = [new ZodToJsonSchemaConverter()]
-		const plugins: Plugin[] = [...(openapi.plugins ?? [])]
+		const plugins: Plugin<InferRouterInitialContext<R>>[] = [
+			...(openapi.plugins ?? [])
+		]
 		if (openapi.smartCoercion) {
 			plugins.push(new SmartCoercionPlugin({ schemaConverters: converters }))
 		}

@@ -71,7 +71,8 @@ try {
 		'@orpc/json-schema',
 		'hono',
 		'@mastra/core',
-		'@opentelemetry/api'
+		'@opentelemetry/api',
+		'@modelcontextprotocol/sdk'
 	]
 	const versions = (names: string[]) =>
 		names.map((name) => {
@@ -80,7 +81,8 @@ try {
 					zod: '4.0.0',
 					hono: '4.0.0',
 					'@mastra/core': '1.51.0',
-					'@opentelemetry/api': '1.9.0'
+					'@opentelemetry/api': '1.9.0',
+					'@modelcontextprotocol/sdk': '1.32.0'
 				}
 				return `${name}@${minimum[name] ?? '1.14.0'}`
 			}
@@ -104,6 +106,15 @@ try {
 	])
 	await run([...node, 'smoke.mjs'], fixture, { WITH_OPTIONAL_PEERS: '1' })
 	await cp(join(root, 'tests/consumers/types.ts'), join(fixture, 'types.ts'))
+	await cp(join(root, 'examples/adoption'), join(fixture, 'examples'), {
+		recursive: true,
+		filter: (path) => !path.endsWith('.test.ts')
+	})
+	await cp(
+		join(root, 'tests/consumers/mcp-smoke.mjs'),
+		join(fixture, 'mcp-smoke.mjs')
+	)
+	await run([...node, 'mcp-smoke.mjs'])
 	for (const resolution of ['NodeNext', 'Bundler']) {
 		await writeFile(
 			join(fixture, 'tsconfig.json'),
@@ -115,11 +126,12 @@ try {
 					strict: true,
 					exactOptionalPropertyTypes: true,
 					noUncheckedIndexedAccess: true,
+					types: ['node'],
 					// Third-party declarations are not ours to check.
 					skipLibCheck: true,
 					noEmit: true
 				},
-				include: ['types.ts']
+				include: ['types.ts', 'examples/*.ts']
 			})
 		)
 		await run([

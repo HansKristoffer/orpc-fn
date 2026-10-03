@@ -36,7 +36,7 @@ afterAll(() => {
 
 describe.skipIf(!url).each(adapters)('$name transport', (adapter) => {
 	const prefix = `orpc-fn-test:${adapter.name}:${process.pid}`
-	let transport: PubSubTransport & { close(): void }
+	let transport: PubSubTransport & { close(): Promise<void> }
 
 	const received = (channel: string) => {
 		const payloads: string[] = []

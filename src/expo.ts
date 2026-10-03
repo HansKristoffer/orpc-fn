@@ -41,13 +41,17 @@ export function createExpoFetch(options: {
 	fetch: ExpoFetch
 	/** `Platform.OS !== 'web'`. */
 	native: boolean
+	webFetch?: (request: Request, init?: RequestInit) => Promise<Response>
 }) {
 	return async (
 		request: Request,
 		init?: { redirect?: NonNullable<RequestInit['redirect']> }
 	): Promise<Response> => {
 		if (!options.native) {
-			return globalThis.fetch(request, { ...init, credentials: 'include' })
+			return (options.webFetch ?? globalThis.fetch)(request, {
+				...init,
+				credentials: 'include'
+			})
 		}
 		const hasBody = request.method !== 'GET' && request.method !== 'HEAD'
 		const body = hasBody ? await request.arrayBuffer() : undefined
@@ -67,59 +71,60 @@ export function createExpoFetch(options: {
 
 export type CreateExpoLinkOptions<T extends ClientContext> = Omit<
 	CreateRpcLinkOptions<T>,
-	'fetch' | 'headers'
+	'fetch'
 > & {
 	fetch: ExpoFetch
 	native: boolean
-	/** Session cookie, e.g. Better Auth's `authClient.getCookie()`. */
-	getCookie?: () => string | null | undefined
-	/** `expo-origin` header; the server copies it to `origin` (`normalizeExpoOrigin`). */
-	getExpoOrigin?: () => string | null | undefined
-	/** Extra headers on every request. */
-	headers?: () => Record<string, string>
+	/** Explicit browser fetch override; native always uses expo/fetch. */
+	webFetch?: (request: Request, init?: RequestInit) => Promise<Response>
 }
 
-/**
- * `createRpcLink` for Expo: batching, the `expo/fetch` bridge and the headers
- * a Better Auth Expo client sends, so the API sees the same session and
- * origin as `/api/auth` requests.
- *
- * ```ts
- * import { fetch } from 'expo/fetch'
- * import { Platform } from 'react-native'
- *
- * const link = createExpoLink({
- *   url: `${baseUrl}/api/rpc`,
- *   fetch,
- *   native: Platform.OS !== 'web',
- *   getCookie: () => authClient.getCookie(),
- *   getExpoOrigin
- * })
- * ```
- */
+/** Generic streaming bridge with upstream async/context-aware headers. */
 export function createExpoLink<T extends ClientContext = ClientContext>(
 	options: CreateExpoLinkOptions<T>
 ): RPCLink<T> {
-	const {
-		fetch,
-		native,
-		getCookie,
-		getExpoOrigin,
-		headers: extraHeaders,
-		...rest
-	} = options
+	const { fetch, native, webFetch, ...rest } = options
 	return createRpcLink<T>({
 		...rest,
-		fetch: createExpoFetch({ fetch, native }),
-		headers: () => {
-			const headers: Record<string, string> = { ...extraHeaders?.() }
-			const cookie = getCookie?.()
-			if (cookie) headers.Cookie = cookie
-			if (native) {
-				// What @better-auth/expo sends from native, for session and CORS parity.
-				headers['x-skip-oauth-proxy'] = 'true'
-				const origin = getExpoOrigin?.()
-				if (origin) headers['expo-origin'] = origin
+		fetch: createExpoFetch({ fetch, native, ...(webFetch ? { webFetch } : {}) })
+	})
+}
+
+export type CreateBetterAuthExpoLinkOptions<T extends ClientContext> =
+	CreateExpoLinkOptions<T> & {
+		getCookie?: () =>
+			| string
+			| null
+			| undefined
+			| Promise<string | null | undefined>
+		getExpoOrigin?: () =>
+			| string
+			| null
+			| undefined
+			| Promise<string | null | undefined>
+	}
+
+/** Better Auth's native cookie/origin headers, kept behind an explicit preset. */
+export function createBetterAuthExpoLink<
+	T extends ClientContext = ClientContext
+>(options: CreateBetterAuthExpoLinkOptions<T>): RPCLink<T> {
+	const { getCookie, getExpoOrigin, headers: extraHeaders, ...rest } = options
+	return createExpoLink<T>({
+		...rest,
+		headers: async (...args) => {
+			const supplied =
+				typeof extraHeaders === 'function'
+					? await extraHeaders(...args)
+					: await extraHeaders
+			const headers = new Headers(
+				supplied as ConstructorParameters<typeof Headers>[0]
+			)
+			const cookie = await getCookie?.()
+			if (cookie) headers.set('Cookie', cookie)
+			if (options.native) {
+				headers.set('x-skip-oauth-proxy', 'true')
+				const origin = await getExpoOrigin?.()
+				if (origin) headers.set('expo-origin', origin)
 			}
 			return headers
 		}

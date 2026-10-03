@@ -1,4 +1,5 @@
-import type { AnySchema } from '@orpc/contract'
+import { getEventIteratorSchemaDetails, type AnySchema } from '@orpc/contract'
+import { type LibraryMeta, procedureDefinition } from './compatibility.js'
 import type { AnyProcedure } from '@orpc/server'
 
 /**
@@ -9,17 +10,24 @@ import type { AnyProcedure } from '@orpc/server'
  */
 export const FN_META_KEY = 'orpc-fn'
 
-export type StoredFnMeta = {
+export type StoredFnMeta<
+	TMeta extends object = Record<string, unknown>,
+	TKey extends string = string
+> = {
 	name: string
-	procedure: string
-	meta: Record<string, unknown>
+	procedure: TKey
+	meta: TMeta
+	stream: boolean
 }
 
-export type FnMeta<TMeta extends object = Record<string, unknown>> = {
+export type FnMeta<
+	TMeta extends object = Record<string, unknown>,
+	TKey extends string = string
+> = {
 	/** `fn({ name })`, also the OpenAPI operationId; undefined if not made by `fn()`. */
 	name: string | undefined
 	/** The `procedures` key the route was built from. */
-	procedure: string | undefined
+	procedure: TKey | undefined
 	/** The app's typed meta (`createFn({ meta })`) declared on this route. */
 	meta: Partial<TMeta>
 	/** Route summary, falling back to description, falling back to ''. */
@@ -27,40 +35,48 @@ export type FnMeta<TMeta extends object = Record<string, unknown>> = {
 	summary: string | undefined
 	method: string | undefined
 	path: string | undefined
+	stream: boolean
 	tags: readonly string[]
 	inputSchema: AnySchema | undefined
 	outputSchema: AnySchema | undefined
 }
 
-type ProcedureDefinition = {
-	meta?: Record<string, unknown>
-	route?: {
-		summary?: string
-		description?: string
-		method?: string
-		path?: string
-		tags?: readonly string[]
-	}
-	inputSchema?: AnySchema
-	outputSchema?: AnySchema
+/** Read what `fn()` (and oRPC) recorded on a procedure. */
+type MetaFrom<T> = [LibraryMeta<T>] extends [never]
+	? Record<string, unknown>
+	: LibraryMeta<T> extends StoredFnMeta<infer M, string>
+		? M
+		: Record<string, unknown>
+
+type KeyFrom<T> = [LibraryMeta<T>] extends [never]
+	? string
+	: LibraryMeta<T> extends StoredFnMeta<object, infer K>
+		? K
+		: string
+
+/** Declares the route metadata contract; it does not provide defaults. */
+export function defineMeta<T extends object>(): T {
+	return {} as T
 }
 
-/** Read what `fn()` (and oRPC) recorded on a procedure. */
-export function readFnMeta<TMeta extends object = Record<string, unknown>>(
-	procedure: AnyProcedure
-): FnMeta<TMeta> {
-	const def = (procedure as { '~orpc'?: ProcedureDefinition })['~orpc'] ?? {}
+export function readFnMeta<T extends AnyProcedure>(
+	procedure: T
+): FnMeta<MetaFrom<T>, KeyFrom<T>> {
+	const def = procedureDefinition(procedure)
 	const stored = def.meta?.[FN_META_KEY] as StoredFnMeta | undefined
 	const route = def.route ?? {}
 	return {
 		name: stored?.name,
-		procedure: stored?.procedure,
-		meta: (stored?.meta ?? {}) as Partial<TMeta>,
+		procedure: stored?.procedure as KeyFrom<T> | undefined,
+		meta: (stored?.meta ?? {}) as Partial<MetaFrom<T>>,
 		description: route.summary ?? route.description ?? '',
 		summary: route.summary,
 		method: route.method,
 		path: route.path,
 		tags: route.tags ?? [],
+		stream:
+			stored?.stream === true ||
+			getEventIteratorSchemaDetails(def.outputSchema) !== undefined,
 		inputSchema: def.inputSchema,
 		outputSchema: def.outputSchema
 	}

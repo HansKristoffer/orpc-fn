@@ -68,6 +68,7 @@ const ticks = fn({
 	procedure: 'public',
 	method: 'GET',
 	path: '/ticks',
+	stream: true,
 	handler: async function* () {
 		yield 1
 	}

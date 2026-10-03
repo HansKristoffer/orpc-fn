@@ -70,6 +70,10 @@
 		"./expo": {
 			"types": "./dist/expo.d.ts",
 			"import": "./dist/expo.js"
+		},
+		"./mcp/sdk": {
+			"types": "./dist/mcp/sdk.d.ts",
+			"import": "./dist/mcp/sdk.js"
 		}
 	},
 	"types": "./dist/index.d.ts",
@@ -93,7 +97,9 @@
 		"attw": "attw --pack . --profile esm-only",
 		"publint": "publint",
 		"test:consumers": "bun scripts/check-consumers.ts",
-		"verify:package": "node scripts/verify-package.mjs"
+		"verify:package": "node scripts/verify-package.mjs",
+		"test:types-performance": "bun scripts/check-types-performance.ts",
+		"test:client-bundle": "bun scripts/check-client-bundle.ts"
 	},
 	"peerDependencies": {
 		"@mastra/core": "^1.51.0",
@@ -106,7 +112,8 @@
 		"@orpc/zod": "^1.14.0",
 		"hono": "^4.0.0",
 		"ioredis": "^5.0.0",
-		"zod": "^4.0.0"
+		"zod": "^4.0.0",
+		"@modelcontextprotocol/sdk": "^1.32.0"
 	},
 	"peerDependenciesMeta": {
 		"@mastra/core": {
@@ -129,12 +136,16 @@
 		},
 		"ioredis": {
 			"optional": true
+		},
+		"@modelcontextprotocol/sdk": {
+			"optional": true
 		}
 	},
 	"devDependencies": {
 		"@arethetypeswrong/cli": "^0.18.2",
 		"@biomejs/biome": "^2.2.4",
 		"@mastra/core": "1.51.0",
+		"@modelcontextprotocol/sdk": "1.32.0",
 		"@opentelemetry/api": "^1.9.0",
 		"@orpc/client": "1.14.8",
 		"@orpc/contract": "1.14.8",
@@ -148,6 +159,7 @@
 		"ioredis": "5.8.2",
 		"publint": "^0.3.12",
 		"typescript": "^7.0.2",
+		"typescript-ast": "npm:typescript@5.7.3",
 		"zod": "4.4.3"
 	},
 	"bugs": {

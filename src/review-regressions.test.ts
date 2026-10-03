@@ -27,7 +27,7 @@ describe('#1 guard and meta keys cannot shadow route options', () => {
 		createFn({
 			procedures: { public: os },
 			default: 'public',
-			// @ts-expect-error `summary` is a route option
+			// Metadata may share names with route options inside its namespace.
 			meta: {} as { summary?: string }
 		})
 	})
@@ -37,7 +37,7 @@ describe('#1 guard and meta keys cannot shadow route options', () => {
 			procedures: { public: os },
 			default: 'public',
 			meta: {} as { readOnly?: boolean },
-			// @ts-expect-error `readOnly` is already a meta key
+			// Guards and namespaced metadata may share a name.
 			guards: { readOnly: (_value: boolean) => {} }
 		})
 	})
@@ -106,6 +106,7 @@ describe('#3 fnLive authorizes before sending the snapshot', () => {
 			live: {
 				channel: 'review:counter',
 				eventSchema: z.object({}),
+				stateSchema: z.object({ count: z.number() }),
 				transformerFn: ({ previous }) => ({ count: (previous?.count ?? 0) + 1 })
 			}
 		})

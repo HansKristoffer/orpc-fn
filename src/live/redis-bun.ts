@@ -64,11 +64,13 @@ export function bunRedisTransport(
 					subscriber.onclose = () => {}
 					if (owned) return subscriber.close()
 					// A given subscriber stays open: remove only this transport's listeners.
-					for (const channel of ours) {
-						void Promise.resolve()
-							.then(() => subscriber.unsubscribe(channel, dispatch))
-							.catch(() => {})
-					}
+					return Promise.all(
+						[...ours].map((channel) =>
+							Promise.resolve()
+								.then(() => subscriber.unsubscribe(channel, dispatch))
+								.catch(() => {})
+						)
+					).then(() => {})
 				}
 			}
 		}

@@ -53,6 +53,8 @@ jobs:
       - run: bun run lint
       - run: bun test
       - run: bun run build
+      - run: bun run test:client-bundle
+      - run: bun run test:types-performance
       - run: bun run attw
       - run: bun run publint
       - run: bun run test:consumers

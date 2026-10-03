@@ -15,6 +15,8 @@ export type BacklogOptions = {
  * The backlog of a channel lives at `${channel}:backlog` (see {@link backlogKey}).
  */
 export interface PubSubTransport {
+	/** Optional disposal, used only with ownsTransport: true. */
+	close?: () => void | Promise<void>
 	/**
 	 * Publish every message, in order. With `backlog`, also append each payload
 	 * to its channel's backlog, trim and refresh its TTL - atomically, so a
@@ -34,7 +36,8 @@ export interface PubSubTransport {
 	subscribe(
 		channel: string,
 		listener: (payload: string) => void,
-		onLost?: (error: Error) => void
+		onLost?: (error: Error) => void,
+		options?: { onReconnect?: () => void }
 	): Promise<() => Promise<void>>
 }
 

@@ -179,11 +179,11 @@ describe('handler params', () => {
 		).rejects.toThrow()
 	})
 
-	test('handler_ms is written back to context.timing', async () => {
+	test('application context timing is not mutated', async () => {
 		const timed = fn({ name: 'test.timed', handler: () => 'ok' })
 		const context: PublicContext = { user: user(), timing: { queue_ms: 1 } }
 		await call(timed, undefined, { context })
-		expect(context.timing?.handler_ms).toBeNumber()
+		expect(context.timing).toEqual({ queue_ms: 1 })
 	})
 })
 
@@ -193,7 +193,7 @@ describe('meta', () => {
 			name: 'test.tool',
 			summary: 'A tool',
 			tags: ['external'],
-			readOnly: true,
+			meta: { readOnly: true },
 			handler: () => null
 		})
 		const meta = readMeta(tool)
@@ -208,7 +208,7 @@ describe('meta', () => {
 		fn({
 			name: 'test.badMeta',
 			// @ts-expect-error readOnly is a boolean
-			readOnly: 'yes',
+			meta: { readOnly: 'yes' },
 			handler: () => null
 		})
 		fn({
@@ -220,7 +220,11 @@ describe('meta', () => {
 	})
 
 	test('meta survives procedures rebuilt by os.router()', () => {
-		const tool = fn({ name: 'test.rebuilt', readOnly: true, handler: () => 1 })
+		const tool = fn({
+			name: 'test.rebuilt',
+			meta: { readOnly: true },
+			handler: () => 1
+		})
 		const rebuilt = os.prefix('/v1').router({ tool }).tool
 		expect(rebuilt).not.toBe(tool)
 		expect(readFnMeta(rebuilt).name).toBe('test.rebuilt')
@@ -268,7 +272,10 @@ describe('fn.completed', () => {
 				warn: log('warn'),
 				error: log('error')
 			}),
-			onCompleted: () => ({ pool_waiting: 0 })
+			onCompleted: ({ context }) => ({
+				pool_waiting: 0,
+				auth_ms: context.timing?.auth_ms
+			})
 		})
 		const notFound = fn({
 			name: 'test.notFound',
@@ -441,6 +448,7 @@ describe('streaming routes', () => {
 	})
 	const ticks = fn({
 		name: 'test.ticks',
+		stream: true,
 		handler: async function* () {
 			yield 1
 			await Bun.sleep(30)
@@ -449,6 +457,7 @@ describe('streaming routes', () => {
 	})
 	const broken = fn({
 		name: 'test.broken',
+		stream: true,
 		handler: async function* () {
 			yield 1
 			throw new Error('mid-stream')
@@ -533,6 +542,7 @@ describe('stream steps run inside their span', async () => {
 		const inner = fn({ name: 'inner', handler: () => 1 })
 		const outer = fn({
 			name: 'outer',
+			stream: true,
 			handler: async function* ({ call }) {
 				yield 0
 				await Bun.sleep(1)

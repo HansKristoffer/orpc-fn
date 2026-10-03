@@ -44,3 +44,18 @@ test('renames an option whose value is the procedure key', () => {
 		'const x = { auth: token }'
 	)
 })
+
+test('only rewrites route options and preserves comments and existing procedure', () => {
+	const source =
+		"const unrelated = { isPublic: true }; fn({ isPublic /* policy */: true, procedure: 'public', handler }); fn({ nested: { isPublic: true }, handler }); fn({ ...config, isPublic: true, handler })"
+	const result = rewrite(source, { flags: { isPublic: 'public' } })
+	expect(result).toContain('const unrelated = { isPublic: true }')
+	expect(result).toContain("procedure: 'public'")
+	expect(result).toContain('nested: { isPublic: true }')
+	expect(result).toContain('...config, isPublic: true')
+	expect(() =>
+		rewrite("fn({ isPublic: true, procedure: 'protected', handler })", {
+			flags: { isPublic: 'public' }
+		})
+	).toThrow('conflicts')
+})

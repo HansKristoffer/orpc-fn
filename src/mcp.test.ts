@@ -120,7 +120,6 @@ describe('listExternalTools', () => {
 			'thing-get',
 			'thing-support',
 			'thing-report',
-			'thing-secret',
 			'thing-secret'
 		])
 		expect(

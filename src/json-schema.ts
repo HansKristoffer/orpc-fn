@@ -80,3 +80,19 @@ export function passThroughOutputSchema<TOut>(
 		}
 	}
 }
+
+/** Tool protocols permit unions only when every branch accepts an object. */
+export function isObjectJsonSchema(schema: JsonSchema): boolean {
+	if (schema.type === 'object') return true
+	const union = schema.anyOf ?? schema.oneOf
+	return (
+		Array.isArray(union) &&
+		union.length > 0 &&
+		union.every(
+			(branch) =>
+				typeof branch === 'object' &&
+				branch !== null &&
+				isObjectJsonSchema(branch)
+		)
+	)
+}

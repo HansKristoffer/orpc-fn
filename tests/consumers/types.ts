@@ -23,7 +23,7 @@ import { createMastraTool } from 'orpc-fn/mastra'
 import { hasTag, listTools } from 'orpc-fn/mcp'
 import { mountOrpc } from 'orpc-fn/hono'
 import { createRpcLink, hasOrpcErrorCode } from 'orpc-fn/client'
-import { createExpoLink } from 'orpc-fn/expo'
+import { createBetterAuthExpoLink } from 'orpc-fn/expo'
 import { createORPCClient } from '@orpc/client'
 import type { RouterClient } from '@orpc/server'
 import { ioredisTransport } from 'orpc-fn/live/ioredis'
@@ -114,8 +114,7 @@ fn({
 	name: 'guarded',
 	neededFeatureFlags: ['beta'],
 	permission: { resource: 'orders', action: 'write' },
-	readOnly: true,
-	risk: 'high',
+	meta: { readOnly: true, risk: 'high' },
 	tags: ['external'],
 	handler: () => null
 })
@@ -125,7 +124,7 @@ fn({ name: 'badFlags', neededFeatureFlags: [1], handler: () => null })
 // @ts-expect-error action is 'read' | 'write'
 fn({ name: 'badPermission', permission: { resource: 'x', action: 'delete' }, handler: () => null })
 // @ts-expect-error risk is 'low' | 'high'
-fn({ name: 'badMeta', risk: 'medium', handler: () => null })
+fn({ name: 'badMeta', meta: { risk: 'medium' }, handler: () => null })
 // @ts-expect-error tags come from createFn({ tags })
 fn({ name: 'badTag', tags: ['public'], handler: () => null })
 // @ts-expect-error name is required
@@ -164,6 +163,7 @@ const outOnly = fn({
 const neither = fn({ name: 'neither', handler: async () => ({ value: 42 }) })
 const streaming = fn({
 	name: 'streaming',
+	stream: true,
 	handler: async function* () {
 		yield { tick: 1 }
 	}
@@ -239,6 +239,8 @@ const list = fnLive({
 	live: {
 		eventSchema: z.object({ org: z.string() }),
 		channel: ({ org }) => `org:${org}`,
+		stateSchema: z.object({ org: z.string(), by: z.string() }),
+		emitSchema: z.object({ touched: z.string() }),
 		transformerFn: ({ previous, event }) =>
 			previous ? fnLivePatch(previous, { touched: event.org }) : undefined
 	}
@@ -330,13 +332,13 @@ declare const expoFetch: (
 		redirect?: RequestInit['redirect']
 	}
 ) => Promise<Response>
-createExpoLink<{ keepalive?: boolean }>({
+createBetterAuthExpoLink<{ keepalive?: boolean }>({
 	url: 'http://localhost/rpc',
 	fetch: expoFetch,
 	native: true,
 	getCookie: () => null
 })
-createExpoLink({
+createBetterAuthExpoLink({
 	url: 'http://localhost/rpc',
 	// @ts-expect-error a fetch must resolve to a response oRPC can read
 	fetch: async () => ({ status: 200 }),
@@ -399,7 +401,7 @@ createFn({
 createFn({
 	procedures: { public: os },
 	default: 'public',
-	// @ts-expect-error `path` is a route option
+	// Namespaced metadata may use native option names.
 	meta: {} as { path?: string }
 })
 
@@ -434,3 +436,131 @@ explicit.fn({
 })
 // @ts-expect-error `procedure` is required without a default
 explicit.fn({ name: 'missingProcedure', handler: () => 1 })
+
+// Adoption contracts: no assertions at the common route/handler boundary.
+import { eventIterator } from '@orpc/server'
+import { defineMeta, createStreamManifest } from 'orpc-fn'
+import { registerMcpTools } from 'orpc-fn/mcp/sdk'
+import { Server } from '@modelcontextprotocol/sdk/server/index.js'
+const native = fn({
+	name: 'nativeIterator',
+	output: eventIterator(z.number()),
+	stream: true,
+	handler: async function* () {
+		yield 1
+	}
+})
+createStreamManifest({ watch: native })
+const typedErrors = fn({
+	name: 'typedErrors',
+	input: z.object({ id: z.string() }),
+	errors: { DOMAIN: { data: z.object({ id: z.string() }) } },
+	guardResolvers: {
+		permission: ({ input }) => ({ resource: input.id, action: 'read' })
+	},
+	handler: ({ errors, lastEventId }) => {
+		const cursor: string | undefined = lastEventId
+		void cursor
+		// @ts-expect-error declared error data is checked
+		errors.DOMAIN({ data: { id: 1 } })
+		throw errors.DOMAIN({ data: { id: 'correct' } })
+	}
+})
+void typedErrors
+const foreignFactory = createFn({
+	procedures: { public: os },
+	default: 'public',
+	meta: defineMeta<{ risk?: number }>()
+})
+const foreign = foreignFactory.fn({
+	name: 'foreign',
+	meta: { risk: 123 },
+	handler: () => 1
+})
+const honest: number | undefined = readMeta(foreign).meta.risk
+void honest
+// @ts-expect-error metadata follows the foreign procedure
+const dishonest: 'low' | 'high' | undefined = readMeta(foreign).meta.risk
+void dishonest
+const scoped = createFn({
+	procedures: { public: base, protected: authed },
+	default: 'protected',
+	extrasByProcedure: {
+		protected: ({ context }) => ({
+			t: (key: string) => `${context.user.id}:${key}`
+		})
+	},
+	extras: ({ procedure, context }) => {
+		if (procedure === 'protected') {
+			const id: string = context.user.id
+			void id
+		}
+		return {}
+	},
+	onCompleted: (event) => {
+		if (event.handlerStarted && event.procedure === 'protected') {
+			const id: string = event.context.user.id
+			void id
+		}
+	}
+})
+scoped.fn({ name: 'protectedExtras', handler: ({ t }) => t('hello') })
+scoped.fn({
+	name: 'publicExtras',
+	procedure: 'public',
+	handler: (params) => {
+		// @ts-expect-error protected extras are absent on a public route
+		return params.t('hello')
+	}
+})
+createFn({
+	procedures: { public: os },
+	default: 'public',
+	// @ts-expect-error inferred guard return values cannot be numbers
+	guards: { permission: () => 123 }
+})
+createFn({
+	procedures: { public: os },
+	default: 'public',
+	// @ts-expect-error extras cannot shadow built-in fields
+	extras: () => ({ input: 'shadow' })
+})
+createFn({
+	procedures: { public: os },
+	default: 'public',
+	// @ts-expect-error scoped extras cannot shadow built-in fields
+	extrasByProcedure: { public: () => ({ logger: 'shadow' }) }
+})
+const mcpServer = new Server(
+	{ name: 'consumer', version: '1' },
+	{ capabilities: { tools: {} } }
+)
+registerMcpTools(
+	mcpServer,
+	{ foreign },
+	{ filter: () => true, context: () => ({}) }
+)
+registerMcpTools(
+	mcpServer,
+	{ tenantOnly },
+	{
+		filter: () => true,
+		// @ts-expect-error the router requires tenant in its initial context
+		context: () => ({})
+	}
+)
+const unknownError: unknown = new Error()
+if (hasOrpcErrorCode(unknownError, 'NOT_FOUND')) {
+	const code: 'NOT_FOUND' = unknownError.code
+	const data: unknown = unknownError.data
+	void code
+	void data
+}
+
+// State and wire schemas must be declared for reducers/patches.
+// biome-ignore format: keep the overload error on the expected line
+// @ts-expect-error transformer state needs a parsed-state schema
+fnLive({ name: 'missingStateSchema', input: z.object({}), handler: () => 1, live: { channel: 'x', eventSchema: z.object({}), transformerFn: () => 2 } })
+// biome-ignore format: keep the overload error on the expected line
+// @ts-expect-error patch output needs a separate wire schema
+fnLive({ name: 'missingPatchSchema', input: z.object({}), handler: () => 1, live: { channel: 'x', eventSchema: z.object({}), stateSchema: z.number(), transformerFn: () => fnLivePatch(2, { delta: 1 }) } })

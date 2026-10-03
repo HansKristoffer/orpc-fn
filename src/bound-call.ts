@@ -18,10 +18,11 @@ type ContextCheck<TContext, T> = [TContext] extends [ProcedureContext<T>]
  * Calls another procedure with the caller's context and signal. `TContext` is
  * the caller's context; the callee must accept it.
  */
-// biome-ignore lint/suspicious/noExplicitAny: an unbound call accepts any procedure
-export type BoundCall<TContext = any> = <T extends AnyProcedure>(
+export type BoundCall<TContext> = <T extends AnyProcedure>(
 	procedure: T & ContextCheck<TContext, T>,
-	input: ProcedureInput<T>
+	...args: undefined extends ProcedureInput<T>
+		? [input?: ProcedureInput<T>]
+		: [input: ProcedureInput<T>]
 ) => Promise<ProcedureOutput<T>>
 
 const noTracing = createTracing(undefined)
