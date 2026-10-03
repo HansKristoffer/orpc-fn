@@ -61,3 +61,7 @@ lullu passes `summary: { base, chat, voice }` in five files. The library keeps `
 ## Mastra version
 
 `createMastraTool` returns `Tool<InputSchema, OutputSchema>`, which is how `@mastra/core` 1.51 (lullu) types tools. Mastra 1.0.x typed `Tool<>` with values instead, so the optional peer is `^1.51.0`. gey-mono bumps Mastra during its migration.
+
+## Client helpers
+
+`orpc-fn/client` and `orpc-fn/expo` hold only what the apps wrote by hand: a batching link that sends subscriptions on their own, and the `expo/fetch` bridge with the Better Auth headers. `createORPCClient` and `createTanstackQueryUtils` are already one line each in `@orpc/client` and `@orpc/tanstack-query`, so they are not wrapped. Expo and React Native are passed in (`fetch`, `native`) rather than imported, so the package has no Expo dependency. The Vue live-query composables stay in lullu until a second app needs them.

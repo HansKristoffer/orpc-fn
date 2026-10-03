@@ -1,6 +1,6 @@
 # orpc-fn
 
-Define a backend function once. You get a typed [oRPC](https://orpc.dev) procedure with tracing, structured logging, guards, handler extras from your app, nested calls that keep the context, and optional live queries over Redis. Adapters expose the same procedure as a Mastra tool, an MCP tool, or a route on Hono.
+Define a backend function once. You get a typed [oRPC](https://orpc.dev) procedure with tracing, structured logging, guards, handler extras from your app, nested calls that keep the context, and optional live queries over Redis. Adapters expose the same procedure as a Mastra tool, an MCP tool, or a route on Hono, and the client helpers call it from Vue, React or Expo.
 
 Your app keeps everything app-specific: auth and session, context shape, database, queues, i18n, feature flags and permissions. You inject them once with `createFn`.
 
@@ -189,6 +189,50 @@ Behaviour:
 - `onError` sees only unexpected errors.
 - `openapi.filter`, `openapi.smartCoercion` and `openapi.spec` (for security schemes) cover an external API with its own auth.
 - `context` may return a `Response`, for example a 401.
+
+## `orpc-fn/client`
+
+Optional peer: `@orpc/client`. Has no server code, so it is safe in frontends (Vue, React, Expo).
+
+```ts
+import { createORPCClient } from '@orpc/client'
+import { createTanstackQueryUtils } from '@orpc/tanstack-query'
+import { createRpcLink, hasOrpcErrorCode } from 'orpc-fn/client'
+import type { RouterClient } from '@orpc/server'
+import type { router } from '@app/backend' // type-only import
+
+const link = createRpcLink({
+  url: `${apiOrigin}/rpc`,
+  fetch: (request, init) => fetch(request, { ...init, credentials: 'include', cache: 'no-store' })
+})
+export const client: RouterClient<typeof router> = createORPCClient(link)
+export const orpc = createTanstackQueryUtils(client) // Vue Query or React Query
+
+if (hasOrpcErrorCode(error, 'NOT_FOUND')) { /* … */ }
+```
+
+`createRpcLink` takes every `RPCLink` option. It also batches parallel calls into one request, matching `mountOrpc`'s server-side batching (`batch: { maxSize, exclude }`, or `false` to turn it off). A streaming response cannot be batched, and the request doesn't say whether the response will stream, so streaming routes are recognised by name: any path segment containing `subscribe` is sent on its own (`isSubscriptionPath`).
+
+## `orpc-fn/expo`
+
+Optional peer: `@orpc/client`. Expo itself is passed in, not imported.
+
+```ts
+import { fetch } from 'expo/fetch'
+import { Platform } from 'react-native'
+import { createExpoLink } from 'orpc-fn/expo'
+
+const link = createExpoLink({
+  url: `${baseUrl}/api/rpc`,
+  fetch,
+  native: Platform.OS !== 'web',
+  getCookie: () => authClient.getCookie(), // Better Auth Expo
+  getExpoOrigin,
+  headers: () => ({ 'x-orpc-source': 'expo-react' })
+})
+```
+
+On native, calls go through `expo/fetch`, the only fetch that streams there. The bridge forwards the request body and the abort signal. Without the signal, cancelled subscriptions keep their sockets open, the device's HTTP pool runs out, and later requests hang. Cookies are sent in a header (`credentials: 'omit'`), together with `expo-origin` and `x-skip-oauth-proxy`, the same headers `@better-auth/expo` sends. On the server, `mountOrpc({ normalizeHeaders: normalizeExpoOrigin })` copies `expo-origin` to `origin`. On web, the link uses the platform fetch with cookies. `createExpoFetch` is exported for a custom link.
 
 ## Docs
 

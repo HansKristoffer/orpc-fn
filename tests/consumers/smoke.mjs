@@ -69,17 +69,30 @@ if (process.env.WITH_OPTIONAL_PEERS) {
 	const { mountOrpc } = await import('orpc-fn/hono')
 	const { createMastraTool } = await import('orpc-fn/mastra')
 	const { Hono } = await import('hono')
+	const { createRpcLink, hasOrpcErrorCode } = await import('orpc-fn/client')
+	const { createExpoLink } = await import('orpc-fn/expo')
+	const { createORPCClient } = await import('@orpc/client')
 	const tools = listTools({ inner, outer }, { filter: () => true })
 	assert.deepEqual(tools.map((tool) => tool.name), ['inner', 'outer'])
 	assert.equal(typeof hasTag('x'), 'function')
 	assert.equal(createMastraTool(inner).id, 'inner')
 	const app = new Hono()
-	mountOrpc(app, { router: { inner }, openapi: { prefix: '/api' } })
+	mountOrpc(app, { router: { inner }, rpcPrefix: '/rpc', openapi: { prefix: '/api' } })
 	const response = await app.request('/api/inner', {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify({ n: 2 })
 	})
 	assert.equal(await response.json(), 4)
+	const fetch = (request) => Promise.resolve(app.fetch(request))
+	const client = createORPCClient(createRpcLink({ url: 'http://localhost/rpc', fetch }))
+	assert.deepEqual(await Promise.all([client.inner({ n: 1 }), client.inner({ n: 2 })]), [2, 4])
+	assert.equal(hasOrpcErrorCode(new Error('x'), 'NOT_FOUND'), false)
+	const expo = createORPCClient(createExpoLink({
+		url: 'http://localhost/rpc',
+		native: true,
+		fetch: (url, init) => app.fetch(new Request(url, init))
+	}))
+	assert.equal(await expo.inner({ n: 5 }), 10)
 }
 console.log(`Packed Node ${process.version} entry points passed${process.env.WITH_OPTIONAL_PEERS ? ' with optional peers' : ' without optional peers'}`)

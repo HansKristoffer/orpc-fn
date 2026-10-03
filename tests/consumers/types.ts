@@ -22,6 +22,10 @@ import {
 import { createMastraTool } from 'orpc-fn/mastra'
 import { hasTag, listTools } from 'orpc-fn/mcp'
 import { mountOrpc } from 'orpc-fn/hono'
+import { createRpcLink, hasOrpcErrorCode } from 'orpc-fn/client'
+import { createExpoLink } from 'orpc-fn/expo'
+import { createORPCClient } from '@orpc/client'
+import type { RouterClient } from '@orpc/server'
 import { ioredisTransport } from 'orpc-fn/live/ioredis'
 import { bunRedisTransport } from 'orpc-fn/live/redis-bun'
 import { memoryTransport } from 'orpc-fn/live/memory'
@@ -117,12 +121,9 @@ fn({
 })
 // @ts-expect-error flags are strings
 fn({ name: 'badFlags', neededFeatureFlags: [1], handler: () => null })
+// biome-ignore format: the expected error must stay on one line
 // @ts-expect-error action is 'read' | 'write'
-fn({
-	name: 'badPermission',
-	permission: { resource: 'x', action: 'delete' },
-	handler: () => null
-})
+fn({ name: 'badPermission', permission: { resource: 'x', action: 'delete' }, handler: () => null })
 // @ts-expect-error risk is 'low' | 'high'
 fn({ name: 'badMeta', risk: 'medium', handler: () => null })
 // @ts-expect-error tags come from createFn({ tags })
@@ -279,4 +280,35 @@ mountOrpc(new Hono(), {
 		timing,
 		ip: c.req.header('x-ip')
 	})
+})
+
+// ── Client ──────────────────────────────────────────────────────────────────
+const client: RouterClient<typeof router> = createORPCClient(
+	createRpcLink({ url: 'http://localhost/rpc', batch: { maxSize: 10 } })
+)
+client.inOnly({ n: 1 }).then((result) => {
+	const doubled: number = result.doubled
+	void doubled
+})
+// @ts-expect-error input is typed from the server
+client.inOnly({ n: '1' })
+const isMissing: boolean = hasOrpcErrorCode(new Error('x'), 'NOT_FOUND')
+void isMissing
+// `expo/fetch`'s signature, so passing it type-checks.
+declare const expoFetch: (
+	input: string | URL | Request,
+	init?: {
+		body?: BodyInit | null
+		headers?: HeadersInit
+		method?: string
+		signal?: AbortSignal | null
+		credentials?: RequestCredentials
+		redirect?: RequestRedirect
+	}
+) => Promise<{ status: number }>
+createExpoLink<{ keepalive?: boolean }>({
+	url: 'http://localhost/rpc',
+	fetch: expoFetch,
+	native: true,
+	getCookie: () => null
 })

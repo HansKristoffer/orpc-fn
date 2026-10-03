@@ -62,6 +62,7 @@ try {
 	const profile = process.env.PEER_PROFILE ?? 'locked'
 	const required = ['@orpc/server', '@orpc/contract', 'zod']
 	const optional = [
+		'@orpc/client',
 		'@orpc/openapi',
 		'@orpc/zod',
 		'@orpc/json-schema',

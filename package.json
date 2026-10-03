@@ -21,7 +21,10 @@
 		"mastra",
 		"mcp",
 		"hono",
-		"typescript"
+		"typescript",
+		"tanstack-query",
+		"expo",
+		"react-native"
 	],
 	"engines": {
 		"node": ">=20"
@@ -58,6 +61,14 @@
 		"./hono": {
 			"types": "./dist/hono.d.ts",
 			"import": "./dist/hono.js"
+		},
+		"./client": {
+			"types": "./dist/client.d.ts",
+			"import": "./dist/client.js"
+		},
+		"./expo": {
+			"types": "./dist/expo.d.ts",
+			"import": "./dist/expo.js"
 		}
 	},
 	"types": "./dist/index.d.ts",
@@ -85,6 +96,7 @@
 	"peerDependencies": {
 		"@mastra/core": "^1.51.0",
 		"@opentelemetry/api": "^1.9.0",
+		"@orpc/client": "^1.14.0",
 		"@orpc/contract": "^1.14.0",
 		"@orpc/json-schema": "^1.14.0",
 		"@orpc/openapi": "^1.14.0",
@@ -99,6 +111,9 @@
 			"optional": true
 		},
 		"@opentelemetry/api": {
+			"optional": true
+		},
+		"@orpc/client": {
 			"optional": true
 		},
 		"@orpc/json-schema": {
@@ -122,6 +137,7 @@
 		"@biomejs/biome": "^2.2.4",
 		"@mastra/core": "1.51.0",
 		"@opentelemetry/api": "^1.9.0",
+		"@orpc/client": "1.14.8",
 		"@orpc/contract": "1.14.8",
 		"@orpc/json-schema": "1.14.8",
 		"@orpc/openapi": "1.14.8",

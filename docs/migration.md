@@ -144,6 +144,17 @@ mountOrpc(app, {
 
 gey-mono's external API is a second mount with `openapi: { prefix: EXTERNAL_API_PATH, filter: hasTag('external'), smartCoercion: true, spec: { components, security } }`. Its `context` runs `authenticateBasic` and returns a 401 `Response` on failure; the docs paths skip auth. The MCP endpoints keep their SDK server and register `listTools(router, { filter, readOnly })`.
 
-## 8. Verify
+## 8. Frontends
+
+The router type still comes from the backend package as a type-only import. Only the link changes:
+
+| App | Before | After |
+|---|---|---|
+| Platform (Vue) | `orpc-shared.ts` `createOrpcRpcLink`, `hasOrpcErrorCode` | `createRpcLink`, `hasOrpcErrorCode` from `orpc-fn/client` |
+| Expo | `utils/api.tsx` `RPCLink` with the hand-written headers and `expo/fetch` bridge | `createExpoLink({ url, fetch, native, getCookie, getExpoOrigin, headers })` from `orpc-fn/expo` |
+
+`createORPCClient` and `createTanstackQueryUtils` stay as they are. gey-mono's Expo app currently uses the global `fetch` on native, so `createExpoLink` is also what lets its subscriptions stream on native and close when cancelled. lullu's Vue-only helpers (`isOrpcDocumentVisible`, `resolveQueryEnabled`, `useLiveQuery`, `useOrpcSubscription`) stay in the app for now.
+
+## 9. Verify
 
 Run `bun run lint` and `bun test` in the app. The only expected route-file diff is the codemod's.
