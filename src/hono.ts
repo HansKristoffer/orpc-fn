@@ -11,6 +11,7 @@ import { BatchHandlerPlugin } from '@orpc/server/plugins'
 import type { StandardHandlerPlugin } from '@orpc/server/standard'
 import { ZodToJsonSchemaConverter } from '@orpc/zod/zod4'
 import type { Context as HonoContext, Env, Hono } from 'hono'
+import type { StatusCode } from 'hono/utils/http-status'
 import { isExpectedClientError } from './expected-client-error.js'
 import type { ProcedureFilter } from './mcp.js'
 
@@ -89,9 +90,10 @@ export type MountOrpcOptions<
  * auth (e.g. Better Auth) sees the origin.
  */
 export function normalizeExpoOrigin(raw: Headers): Headers {
+	const expo = raw.get('expo-origin')
+	if (!expo || raw.get('origin')) return raw
 	const headers = new Headers(raw)
-	const expo = headers.get('expo-origin')
-	if (expo && !headers.get('origin')) headers.set('origin', expo)
+	headers.set('origin', expo)
 	return headers
 }
 
@@ -109,14 +111,15 @@ export function formatServerTiming(
 }
 
 /**
- * Rebuild the response with Server-Timing. For SSE, also disable proxy
- * buffering so keep-alive comments reach the edge (empty `:` lines are
- * otherwise easy for nginx/Fastly to hold until an idle kill).
+ * Response headers plus Server-Timing. For SSE, also disable proxy buffering
+ * so keep-alive comments reach the edge (empty `:` lines are otherwise easy
+ * for nginx/Fastly to hold until an idle kill). A copy: some responses (e.g.
+ * redirects) have immutable headers.
  */
-function finishResponse(
+function finishHeaders(
 	response: Response,
 	serverTiming: string | undefined
-): Response {
+): Headers {
 	const headers = new Headers(response.headers)
 	if (serverTiming) {
 		headers.set('Server-Timing', serverTiming)
@@ -126,11 +129,7 @@ function finishResponse(
 		headers.set('Cache-Control', 'no-cache')
 		headers.set('X-Accel-Buffering', 'no')
 	}
-	return new Response(response.body, {
-		status: response.status,
-		statusText: response.statusText,
-		headers
-	})
+	return headers
 }
 
 /** Mount oRPC's RPC and OpenAPI handlers on a Hono app. */
@@ -187,8 +186,11 @@ export function mountOrpc<E extends Env, R extends AnyRouter>(
 			const timed = serverTiming
 				? formatServerTiming(performance.now() - started, timing)
 				: undefined
-			const finished = finishResponse(response, timed)
-			return c.newResponse(finished.body, finished)
+			return c.newResponse(response.body, {
+				// oRPC only produces valid HTTP status codes.
+				status: response.status as StatusCode,
+				headers: finishHeaders(response, timed)
+			})
 		})
 	}
 
@@ -213,6 +215,7 @@ export function mountOrpc<E extends Env, R extends AnyRouter>(
 
 	if (options.openapi) {
 		const { openapi } = options
+		const filter = openapi.filter ? { filter: openapi.filter } : {}
 		const converters = [new ZodToJsonSchemaConverter()]
 		const plugins: Plugin[] = [...(openapi.plugins ?? [])]
 		if (openapi.smartCoercion) {
@@ -226,7 +229,7 @@ export function mountOrpc<E extends Env, R extends AnyRouter>(
 				specGenerateOptions: {
 					info: openapi.info ?? { title: 'API', version: '0.0.0' },
 					servers: [{ url: openapi.prefix }],
-					...(openapi.filter ? { filter: openapi.filter } : {}),
+					...filter,
 					...openapi.spec
 				}
 			})
@@ -235,7 +238,7 @@ export function mountOrpc<E extends Env, R extends AnyRouter>(
 			openapi.prefix,
 			new OpenAPIHandler(router, {
 				...keepAlive,
-				...(openapi.filter ? { filter: openapi.filter } : {}),
+				...filter,
 				plugins,
 				interceptors: options.onError ? [orpcOnError(report)] : []
 			})

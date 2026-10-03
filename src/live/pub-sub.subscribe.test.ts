@@ -9,6 +9,7 @@ import {
 } from 'bun:test'
 import { call, os } from '@orpc/server'
 import { z } from 'zod'
+import { quiet } from '../../tests/fixture.js'
 import { createFn } from '../index.js'
 import { encodePayload } from './codec.js'
 import type {
@@ -55,7 +56,6 @@ const transport: PubSubTransport = {
 	}
 }
 
-const quiet = { debug() {}, info() {}, warn() {}, error() {} }
 const { createPubSub, drainPubSubSubscribers, activePubSubSubscriberCount } =
 	createFn({
 		procedures: { public: os },
@@ -81,7 +81,7 @@ function emit(channel: string, data: unknown) {
 
 /** Let oRPC's async input handling and the generator run to their next wait. */
 async function settle() {
-	await new Promise((resolve) => setTimeout(resolve, 0))
+	await Bun.sleep(0)
 }
 
 async function openSubscription(orderId: string) {

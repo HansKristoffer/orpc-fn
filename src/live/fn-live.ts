@@ -17,8 +17,12 @@ import type {
 	Channel,
 	ChannelDefinition,
 	ChannelOptions,
-	ObjectSchema
+	ObjectSchema,
+	PublisherConfig
 } from './pub-sub.js'
+
+/** Marks a coalesce window that ended before the next event arrived. */
+const TIMEOUT = Symbol('timeout')
 
 const fnLivePatchMarker = Symbol('fnLive.patch')
 
@@ -47,12 +51,6 @@ function isFnLivePatch(value: unknown): value is FnLivePatch<unknown, unknown> {
 	)
 }
 
-type LiveParams<
-	TDef extends FnDefinition,
-	TInput,
-	TKey extends ProcedureKey<TDef>
-> = HandlerParams<TDef, TInput, TKey>
-
 export type FnLiveConfig<
 	TDef extends FnDefinition,
 	TInput,
@@ -60,7 +58,7 @@ export type FnLiveConfig<
 	TOutput,
 	TKey extends ProcedureKey<TDef>,
 	TEmit = never
-> = {
+> = Omit<PublisherConfig, 'name'> & {
 	/** Subscribe route name; default `${name}.live`. */
 	name?: string
 	eventSchema: TEventSchema
@@ -71,7 +69,7 @@ export type FnLiveConfig<
 	>
 	/** Fold an event into the snapshot; without it every event re-runs the handler. */
 	transformerFn?: (
-		params: LiveParams<TDef, TInput, TKey> & {
+		params: HandlerParams<TDef, TInput, TKey> & {
 			event: z.output<TEventSchema>
 			previous: TOutput | undefined
 			rerun: (input?: TInput) => Promise<TOutput>
@@ -79,7 +77,7 @@ export type FnLiveConfig<
 	) => MaybePromise<TOutput | FnLivePatch<TOutput, TEmit> | undefined>
 	/** Return false to skip an event. */
 	shouldUpdate?: (
-		params: LiveParams<TDef, TInput, TKey> & {
+		params: HandlerParams<TDef, TInput, TKey> & {
 			event: z.output<TEventSchema>
 			previous: TOutput | undefined
 		}
@@ -89,10 +87,6 @@ export type FnLiveConfig<
 	safePublish?: boolean
 	/** Batch events arriving within this window into one snapshot update. */
 	coalesceMs?: number
-	useBacklog?: boolean
-	backlogSize?: number
-	backlogTtl?: number
-	mirrorChannel?: string
 	/**
 	 * When a slow subscriber's queue overflows (drop-oldest), this marker is
 	 * enqueued INSTEAD of the dropped event so the client resyncs. Return
@@ -142,7 +136,7 @@ export interface FnLive<TDef extends FnDefinition> {
 			input: TInput
 			output: TOutputSchema
 			handler: (
-				params: LiveParams<TDef, z.output<TInput>, NoInfer<TKey>> & {
+				params: HandlerParams<TDef, z.output<TInput>, NoInfer<TKey>> & {
 					publish: (event: z.input<TEventSchema>) => Promise<void>
 				}
 				// The output schema parses what the handler returns: its input type.
@@ -177,7 +171,7 @@ export interface FnLive<TDef extends FnDefinition> {
 			input: TInput
 			output?: undefined
 			handler: (
-				params: LiveParams<TDef, z.output<TInput>, NoInfer<TKey>> & {
+				params: HandlerParams<TDef, z.output<TInput>, NoInfer<TKey>> & {
 					publish: (event: z.input<TEventSchema>) => Promise<void>
 				}
 			) => MaybePromise<TOutput>
@@ -213,10 +207,12 @@ export interface FnLive<TDef extends FnDefinition> {
 export function throwInitialSnapshotError(
 	err: unknown,
 	liveName: string,
-	logger: Pick<FnLogger, 'error'>
+	logger: Pick<FnLogger, 'error'>,
+	/** `createFn`'s `isExpectedError`; default: a 4xx `ORPCError`. */
+	isExpected: (error: unknown) => boolean = (error) =>
+		error instanceof ORPCError && error.status < 500
 ): never {
-	const isExpectedClientError = err instanceof ORPCError && err.status < 500
-	if (!isExpectedClientError) {
+	if (!isExpected(err)) {
 		logger.error('fnLive initial snapshot failed', {
 			name: liveName,
 			err: errorMessageOf(err)
@@ -281,25 +277,21 @@ export async function* streamLiveSnapshots<
 				const remainingMs = endAt - Date.now()
 				const read = readNext()
 				let timer: ReturnType<typeof setTimeout> | undefined
-				let timedOut = false
 				const result = await Promise.race([
 					read,
-					new Promise<IteratorResult<TEvent>>((resolve) => {
-						timer = setTimeout(() => {
-							timedOut = true
-							resolve({ done: true, value: undefined })
-						}, remainingMs)
+					new Promise<typeof TIMEOUT>((resolve) => {
+						timer = setTimeout(resolve, remainingMs, TIMEOUT)
 					})
 				])
+				clearTimeout(timer)
 
-				if (timedOut) {
+				if (result === TIMEOUT) {
 					// Reuse the SAME in-flight read next iteration instead of starting
 					// a new one - this is what prevents the "one behind" stranding.
 					pending = read
 					break
 				}
 
-				if (timer !== undefined) clearTimeout(timer)
 				if (result.done) {
 					pending = Promise.resolve(result)
 					break
@@ -329,27 +321,31 @@ type RuntimeParams = Record<string, unknown> & {
 	logger: FnLogger
 }
 
-type RuntimeLiveConfig = FnLiveConfig<
-	FnDefinition,
-	Record<string, unknown>,
-	ZodType,
-	unknown,
-	string,
-	unknown
->
+/** `FnLiveConfig` with the generics erased: what the implementation reads. */
+type RuntimeLiveConfig = Omit<ChannelOptions, 'name'> & {
+	name?: string
+	transformerFn?: (params: RuntimeParams & Record<string, unknown>) => unknown
+	shouldUpdate?: (params: RuntimeParams & Record<string, unknown>) => unknown
+	safePublish?: boolean
+	coalesceMs?: number
+	summary?: string
+	description?: string
+}
 
 /**
  * @internal Wires `fnLive` onto an `fn` and channel runtime of the same
  * instance. `createFn` returns it typed as {@link FnLive}.
  */
-export function createFnLive(
+export function createFnLive(runtime: {
 	// biome-ignore lint/suspicious/noExplicitAny: runtime half of the typed `Fn`
-	fn: (options: any) => AnyProcedure,
-	createChannel: (options: ChannelOptions) => Channel,
-	createLogger: (scope: string, span: SpanLike | undefined) => FnLogger,
+	fn: (options: any) => AnyProcedure
+	createChannel: (options: ChannelOptions) => Channel
+	createLogger: (scope: string, span: SpanLike | undefined) => FnLogger
 	isGuard: (option: string) => boolean
-) {
-	const liveLogger = createLogger('fn-live', undefined)
+	isExpectedError: (error: unknown) => boolean
+}) {
+	const { fn, createChannel, isGuard, isExpectedError } = runtime
+	const liveLogger = runtime.createLogger('fn-live', undefined)
 
 	return (
 		options: {
@@ -370,23 +366,8 @@ export function createFnLive(
 			live.summary ?? `Live updates of ${routeConfig.summary ?? name}`
 		const liveDescription = live.description ?? routeConfig.description
 
-		const channel = createChannel({
-			name: liveName,
-			channel: live.channel,
-			eventSchema: live.eventSchema,
-			...(live.authFn === undefined ? {} : { authFn: live.authFn }),
-			...(live.overflowMarker === undefined
-				? {}
-				: { overflowMarker: live.overflowMarker }),
-			...(live.useBacklog === undefined ? {} : { useBacklog: live.useBacklog }),
-			...(live.backlogSize === undefined
-				? {}
-				: { backlogSize: live.backlogSize }),
-			...(live.backlogTtl === undefined ? {} : { backlogTtl: live.backlogTtl }),
-			...(live.mirrorChannel === undefined
-				? {}
-				: { mirrorChannel: live.mirrorChannel })
-		})
+		// `createChannel` reads only the channel keys of the live config.
+		const channel = createChannel({ ...live, name: liveName })
 
 		const publish = async (event: unknown) => {
 			if (!live.safePublish) return channel.publish(event)
@@ -444,24 +425,25 @@ export function createFnLive(
 					try {
 						initial = await runSnapshot(params)
 					} catch (err) {
-						throwInitialSnapshotError(err, liveName, params.logger)
+						throwInitialSnapshotError(
+							err,
+							liveName,
+							params.logger,
+							isExpectedError
+						)
 					}
 
+					const rerun = (nextInput?: Record<string, unknown>) =>
+						runSnapshot({ ...params, input: nextInput ?? params.input })
 					const apply = async (event: unknown, previous: unknown) => {
-						const shouldUpdate = await (live.shouldUpdate?.({
-							...params,
-							event,
-							previous
-						} as never) ?? true)
-						if (!shouldUpdate) return undefined
+						if (
+							live.shouldUpdate &&
+							!(await live.shouldUpdate({ ...params, event, previous }))
+						) {
+							return undefined
+						}
 						if (!live.transformerFn) return runSnapshot(params)
-						return live.transformerFn({
-							...params,
-							event,
-							previous,
-							rerun: (nextInput?: Record<string, unknown>) =>
-								runSnapshot({ ...params, input: nextInput ?? params.input })
-						} as never)
+						return live.transformerFn({ ...params, event, previous, rerun })
 					}
 
 					yield* streamLiveSnapshots({

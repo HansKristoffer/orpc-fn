@@ -6,7 +6,12 @@ import type {
 	Meta,
 	Schema
 } from '@orpc/contract'
-import type { DecoratedProcedure, Procedure, Route } from '@orpc/server'
+import type {
+	AnyProcedure,
+	DecoratedProcedure,
+	Procedure,
+	Route
+} from '@orpc/server'
 import type { ZodType, z } from 'zod'
 import type { BoundCall } from './bound-call.js'
 import type { FnLogger } from './logger.js'
@@ -73,19 +78,52 @@ export type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
 	? Omit<T, K>
 	: never
 
+/** `fn()` options passed to oRPC's `.route()`; `RouteConfig` is derived from it. */
+export const ROUTE_OPTION_KEYS = [
+	'path',
+	'method',
+	'summary',
+	'description',
+	'deprecated',
+	'successStatus',
+	'successDescription',
+	'inputStructure',
+	'outputStructure',
+	'tags'
+] as const satisfies readonly (keyof Route)[]
+
 /**
  * `fn()` option names owned by the route itself. Guard and meta keys must not
  * reuse them: such an option would be read as the route option and the guard
  * would never run.
  */
-export type ReservedOptionKey =
-	| keyof RouteConfig
-	| 'procedure'
-	| 'input'
-	| 'output'
-	| 'handler'
-	| 'live'
-	| 'operationId'
+export const RESERVED_OPTION_KEYS = [
+	...ROUTE_OPTION_KEYS,
+	'name',
+	'procedure',
+	'input',
+	'output',
+	'handler',
+	'live',
+	'operationId'
+] as const
+
+export type ReservedOptionKey = (typeof RESERVED_OPTION_KEYS)[number]
+
+/** @internal Builds one route from a `procedures` builder; shared by `fn` and `createPubSub`. */
+export type BuildProcedure = (options: {
+	name: string
+	procedure: string | undefined
+	route: Record<string, unknown>
+	meta: Record<string, unknown>
+	input?: AnySchema | undefined
+	output?: AnySchema | undefined
+	handler: (options: {
+		input: unknown
+		context: Record<string, unknown>
+		signal?: AbortSignal
+	}) => unknown
+}) => AnyProcedure
 
 /** Turns every key of `T` found in `K` into a readable type error. */
 export type RejectKeys<T, K extends PropertyKey, TMessage extends string> = {
@@ -109,17 +147,7 @@ type ProcedureOf<TBuilder> = TBuilder extends {
 	: never
 
 /** Context a route built from this builder is called with. */
-export type InitialContextOf<TBuilder> =
-	ProcedureOf<TBuilder> extends Procedure<
-		infer TContext,
-		infer _TCurrent,
-		infer _TIn,
-		infer _TOut,
-		infer _TErrors,
-		infer _TMeta
-	>
-		? TContext
-		: never
+export type InitialContextOf<TBuilder> = ProcedureContext<ProcedureOf<TBuilder>>
 
 /** Context the handler sees, after the builder's middleware. */
 export type CurrentContextOf<TBuilder> =
@@ -135,27 +163,14 @@ export type CurrentContextOf<TBuilder> =
 		: never
 
 type ErrorMapOf<TBuilder> =
-	ProcedureOf<TBuilder> extends Procedure<
-		infer _TInitial,
-		infer _TCurrent,
-		infer _TIn,
-		infer _TOut,
-		infer TErrors extends ErrorMap,
-		infer _TMeta
-	>
-		? TErrors
+	ProcedureOf<TBuilder> extends {
+		'~orpc': { errorMap: infer T extends ErrorMap }
+	}
+		? T
 		: ErrorMap
-
 type MetaOf<TBuilder> =
-	ProcedureOf<TBuilder> extends Procedure<
-		infer _TInitial,
-		infer _TCurrent,
-		infer _TIn,
-		infer _TOut,
-		infer _TErrors,
-		infer TMeta extends Meta
-	>
-		? TMeta
+	ProcedureOf<TBuilder> extends { '~orpc': { meta: infer T extends Meta } }
+		? T
 		: Meta
 
 /**
@@ -236,15 +251,7 @@ export type HandlerParams<
 /** Route options shared by every `fn()` overload. */
 export type RouteConfig<TTag extends string = string> = Pick<
 	Route,
-	| 'path'
-	| 'method'
-	| 'summary'
-	| 'description'
-	| 'deprecated'
-	| 'successStatus'
-	| 'successDescription'
-	| 'inputStructure'
-	| 'outputStructure'
+	Exclude<(typeof ROUTE_OPTION_KEYS)[number], 'tags'>
 > & {
 	/** Required. Becomes the OpenAPI operationId and the span name (e.g. 'user.create'). */
 	name: string

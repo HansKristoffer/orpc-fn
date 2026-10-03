@@ -1,10 +1,10 @@
+import { errorMessageOf } from '../otel.js'
 import { backlogKey, type PubSubTransport } from './transport.js'
 
 export type RedisSend = (command: string, args: string[]) => Promise<unknown>
 
 function isNoScriptError(error: unknown) {
-	const message = error instanceof Error ? error.message : String(error)
-	return message.includes('NOSCRIPT')
+	return errorMessageOf(error).includes('NOSCRIPT')
 }
 
 /**

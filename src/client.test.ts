@@ -62,7 +62,6 @@ mountOrpc(app, {
 })
 const serve = (request: Request) => Promise.resolve(app.fetch(request))
 const url = 'http://localhost/rpc'
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 describe('createRpcLink', () => {
 	const client: RouterClient<typeof router> = createORPCClient(
@@ -90,7 +89,7 @@ describe('createRpcLink', () => {
 		)
 		expect((await stream.next()).value).toEqual({ count: 0 })
 		const next = stream.next()
-		await sleep(20)
+		await Bun.sleep(20)
 		await counter.publish({ id: 'batched' })
 		expect((await next).value).toEqual({ count: 1 })
 		abort.abort()
@@ -193,7 +192,7 @@ describe('Expo', () => {
 		await stream.return(undefined).catch(() => {})
 		for (let attempt = 0; attempt < 50; attempt++) {
 			if (transport.listenerCount('client-counter:expo') === 0) break
-			await sleep(10)
+			await Bun.sleep(10)
 		}
 		expect(transport.listenerCount('client-counter:expo')).toBe(0)
 	})

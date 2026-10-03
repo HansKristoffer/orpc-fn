@@ -32,7 +32,7 @@ export type ToolSchema<TIn = unknown, TOut = TIn> = {
 const converter = new ZodToJsonSchemaConverter()
 const coercer = new JsonSchemaCoercer()
 
-export function toJsonSchema(
+function toJsonSchema(
 	schema: AnySchema,
 	strategy: 'input' | 'output'
 ): JsonSchema {

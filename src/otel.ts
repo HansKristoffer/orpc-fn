@@ -43,31 +43,39 @@ export type SpanOf<TOtel> =
 	TOtel extends OtelApiLike<infer TSpan> ? TSpan : SpanLike
 
 export type Tracing = {
-	/** Run `fn` inside an active span; without OpenTelemetry `span` is undefined. */
+	/**
+	 * Run `fn` inside an active span: OK when it resolves, ERROR when it throws,
+	 * ended either way. Without OpenTelemetry `span` is undefined.
+	 */
 	inSpan<T>(
 		name: string,
 		kind: 'INTERNAL' | 'SERVER' | 'PRODUCER',
 		fn: (span: SpanLike | undefined) => Promise<T>
 	): Promise<T>
-	/** Start a span that the caller ends (long-lived streams). */
+	/** Start a span that the caller ends with `end` (long-lived streams). */
 	startSpan(
 		name: string,
 		kind: 'SERVER',
 		attributes: Record<string, AttributeValue>
 	): SpanLike | undefined
-	ok(span: SpanLike | undefined): void
-	fail(span: SpanLike | undefined, error: unknown): void
+	/** Set OK, or ERROR with `error`, and end the span. */
+	end(span: SpanLike | undefined, error?: unknown): void
 }
 
 export function createTracing(otel: OtelApiLike | undefined): Tracing {
 	const tracer = otel?.trace.getTracer('orpc-fn')
-	const fail = (span: SpanLike | undefined, error: unknown) => {
+	const end: Tracing['end'] = (span, ...error) => {
 		if (!span || !otel) return
-		span.setStatus({
-			code: otel.SpanStatusCode.ERROR,
-			message: error instanceof Error ? error.message : String(error)
-		})
-		if (error instanceof Error) span.recordException(error)
+		if (error.length === 0) {
+			span.setStatus({ code: otel.SpanStatusCode.OK })
+		} else {
+			span.setStatus({
+				code: otel.SpanStatusCode.ERROR,
+				message: errorMessageOf(error[0])
+			})
+			if (error[0] instanceof Error) span.recordException(error[0])
+		}
+		span.end()
 	}
 	return {
 		inSpan(name, kind, fn) {
@@ -75,17 +83,23 @@ export function createTracing(otel: OtelApiLike | undefined): Tracing {
 			return tracer.startActiveSpan(
 				name,
 				{ kind: otel.SpanKind[kind] },
-				async (span) => fn(span)
+				async (span) => {
+					try {
+						const result = await fn(span)
+						end(span)
+						return result
+					} catch (error) {
+						end(span, error)
+						throw error
+					}
+				}
 			)
 		},
 		startSpan(name, kind, attributes) {
 			if (!tracer || !otel) return undefined
 			return tracer.startSpan(name, { kind: otel.SpanKind[kind], attributes })
 		},
-		ok(span) {
-			if (span && otel) span.setStatus({ code: otel.SpanStatusCode.OK })
-		},
-		fail
+		end
 	}
 }
 

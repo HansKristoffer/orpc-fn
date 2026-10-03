@@ -7,12 +7,9 @@ import {
 	os
 } from '@orpc/server'
 import { z } from 'zod'
-import { fn, fnLive, user, createPubSub } from '../tests/fixture.js'
+import { createPubSub, fn, fnLive, quiet } from '../tests/fixture.js'
 import { createFn } from './index.js'
 import { memoryTransport } from './live/memory.js'
-
-const quiet = { debug() {}, info() {}, warn() {}, error() {} }
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 describe('#1 guard and meta keys cannot shadow route options', () => {
 	test('a reserved guard name is a type error and throws', () => {
@@ -114,7 +111,7 @@ describe('#3 fnLive authorizes before sending the snapshot', () => {
 		})
 		const stream = await call(counter.subscribe, {}, { context: {} })
 		const first = stream.next()
-		await sleep(10)
+		await Bun.sleep(10)
 		await counter.publish({})
 		release()
 		expect((await first).value).toEqual({ count: 0 })
@@ -183,7 +180,7 @@ describe('#7 pub/sub publishes schema input and keeps non-JSON values', () => {
 		}>()
 		const stream = await call(events.subscribe, {}, { context: {} })
 		const next = stream.next()
-		await sleep(10)
+		await Bun.sleep(10)
 		await events.publish({ n: '2', at: new Date(0) })
 		expect((await next).value).toEqual({ n: 2, at: new Date(0) })
 		await stream.return(undefined)
@@ -286,7 +283,7 @@ describe('#16 a throwing filter does not starve other subscribers', () => {
 		const good = await call(feed.subscribe, { bad: false }, { context: {} })
 		const badNext = bad.next()
 		const goodNext = good.next()
-		await sleep(10)
+		await Bun.sleep(10)
 		await feed.publish({ n: 1 })
 		expect((await goodNext).value).toEqual({ n: 1 })
 		expect(errors).toContain('Error processing message')
@@ -298,12 +295,7 @@ describe('#16 a throwing filter does not starve other subscribers', () => {
 
 describe('createCall', () => {
 	test('calls procedures outside a handler with a given context', async () => {
-		const { createCall } = createFn({
-			procedures: { public: os.$context<{ userId: string }>() },
-			default: 'public',
-			logger: () => quiet
-		})
-		const { fn: appFn } = createFn({
+		const { createCall, fn: appFn } = createFn({
 			procedures: { public: os.$context<{ userId: string }>() },
 			default: 'public',
 			logger: () => quiet
@@ -316,10 +308,6 @@ describe('createCall', () => {
 		// @ts-expect-error the context lacks userId
 		createCall({})(me, undefined)
 	})
-})
-
-test('fixture user helper still works', () => {
-	expect(user().id).toBe('user-1')
 })
 
 describe('#6 #13 Mastra tools parse once and are typed by the procedure', async () => {

@@ -1,8 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { fnLivePatch, streamLiveSnapshots } from './fn-live.js'
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-
 /** Coalesce window used in tests - comfortably small but not flaky. */
 const COALESCE_MS = 30
 /** Gap between human-paced pushes; safely larger than the coalesce window. */
@@ -74,7 +72,7 @@ describe('streamLiveSnapshots', () => {
 		)
 
 		// The initial snapshot is yielded immediately.
-		await sleep(GAP_MS)
+		await Bun.sleep(GAP_MS)
 		expect(snapshots.at(-1)).toEqual([])
 
 		// Each event arrives more than a coalesce window apart. Before the fix,
@@ -82,7 +80,7 @@ describe('streamLiveSnapshots', () => {
 		// only flushed on the following odd arrival. They must now apply on time.
 		for (let event = 1; event <= 5; event++) {
 			channel.push(event)
-			await sleep(GAP_MS)
+			await Bun.sleep(GAP_MS)
 			expect(snapshots.at(-1)).toEqual(
 				Array.from({ length: event }, (_, index) => index + 1)
 			)
@@ -111,7 +109,7 @@ describe('streamLiveSnapshots', () => {
 		channel.push(1)
 		channel.push(2)
 		channel.push(3)
-		await sleep(GAP_MS)
+		await Bun.sleep(GAP_MS)
 
 		expect(applied).toEqual([1, 2, 3])
 		expect(snapshots.at(-1)).toEqual([1, 2, 3])
@@ -133,16 +131,16 @@ describe('streamLiveSnapshots', () => {
 		)
 
 		channel.push(1)
-		await sleep(GAP_MS)
+		await Bun.sleep(GAP_MS)
 		expect(snapshots.at(-1)).toEqual([1])
 
 		channel.push(2)
-		await sleep(GAP_MS)
+		await Bun.sleep(GAP_MS)
 		// Skipped: no new snapshot, previous unchanged.
 		expect(snapshots.at(-1)).toEqual([1])
 
 		channel.push(3)
-		await sleep(GAP_MS)
+		await Bun.sleep(GAP_MS)
 		expect(snapshots.at(-1)).toEqual([1, 3])
 
 		channel.close()
@@ -164,17 +162,17 @@ describe('streamLiveSnapshots', () => {
 		)
 
 		channel.push(1)
-		await sleep(GAP_MS)
+		await Bun.sleep(GAP_MS)
 		expect(snapshots.at(-1)).toEqual([1])
 
 		// Patch result: the wire sees only the emit payload...
 		channel.push(2)
-		await sleep(GAP_MS)
+		await Bun.sleep(GAP_MS)
 		expect(snapshots.at(-1)).toEqual({ latest: 2 })
 
 		// ...but the internal accumulator advanced with the patched state.
 		channel.push(3)
-		await sleep(GAP_MS)
+		await Bun.sleep(GAP_MS)
 		expect(snapshots.at(-1)).toEqual([1, 2, 3])
 
 		channel.close()
@@ -192,11 +190,11 @@ describe('streamLiveSnapshots', () => {
 		)
 
 		channel.push(1)
-		await sleep(10)
+		await Bun.sleep(10)
 		expect(snapshots.at(-1)).toEqual([1])
 
 		channel.push(2)
-		await sleep(10)
+		await Bun.sleep(10)
 		expect(snapshots.at(-1)).toEqual([1, 2])
 
 		channel.close()

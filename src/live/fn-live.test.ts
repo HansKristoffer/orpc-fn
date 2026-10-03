@@ -166,7 +166,7 @@ describe('fnLive runtime (memory transport)', () => {
 			count: 0
 		})
 		const next = stream.next()
-		await new Promise((resolve) => setTimeout(resolve, 5))
+		await Bun.sleep(5)
 		await live.publish({
 			organizationId: 'org_1',
 			itemId: 'a',
@@ -190,7 +190,7 @@ describe('fnLive runtime (memory transport)', () => {
 		})
 		const stream = await call(failing.subscribe, { id: 'x' }, { context: {} })
 		await expect(stream.next()).rejects.toThrow(ORPCError)
-		await new Promise((resolve) => setTimeout(resolve, 5))
+		await Bun.sleep(5)
 		expect(transport.listenerCount('failing')).toBe(0)
 	})
 })

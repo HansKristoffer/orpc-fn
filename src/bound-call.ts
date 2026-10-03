@@ -42,22 +42,9 @@ export function createBoundCall<TContext>(
 	return ((procedure: AnyProcedure, input: unknown) => {
 		const name = readFnMeta(procedure).name ?? 'unknown_procedure'
 		return tracing.inSpan(`call: ${name}`, 'INTERNAL', async (span) => {
-			try {
-				signal?.throwIfAborted()
-				span?.setAttribute('rpc.method', name)
-				const result = await call(
-					procedure,
-					input,
-					signal ? { context, signal } : { context }
-				)
-				tracing.ok(span)
-				return result
-			} catch (error) {
-				tracing.fail(span, error)
-				throw error
-			} finally {
-				span?.end()
-			}
+			signal?.throwIfAborted()
+			span?.setAttribute('rpc.method', name)
+			return call(procedure, input, signal ? { context, signal } : { context })
 		})
 	}) as BoundCall<TContext>
 }

@@ -3,6 +3,7 @@ import { call, os } from '@orpc/server'
 import { RedisClient } from 'bun'
 import Redis from 'ioredis'
 import { z } from 'zod'
+import { quiet } from '../../tests/fixture.js'
 import { createFn } from '../index.js'
 import { ioredisTransport } from './ioredis.js'
 import { bunRedisTransport } from './redis-bun.js'
@@ -11,8 +12,6 @@ import type { PubSubTransport } from './transport.js'
 // Runs against a real Redis when REDIS_URL is set (CI starts one), once per
 // adapter, so both clients' subscriber, NOSCRIPT and Lua semantics are covered.
 const url = process.env.REDIS_URL
-const quiet = { debug() {}, info() {}, warn() {}, error() {} }
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const bunClient = url ? new RedisClient(url) : undefined
 const ioClient = url ? new Redis(url) : undefined
@@ -57,13 +56,13 @@ describe.skipIf(!url).each(adapters)('$name transport', (adapter) => {
 		const unsubscribeSecond = await second.subscribe()
 
 		await transport.publish([{ channel, payload: 'hello' }])
-		await sleep(50)
+		await Bun.sleep(50)
 		expect(first.payloads).toEqual(['hello'])
 		expect(second.payloads).toEqual(['hello'])
 
 		await unsubscribeFirst()
 		await transport.publish([{ channel, payload: 'again' }])
-		await sleep(50)
+		await Bun.sleep(50)
 		expect(first.payloads).toEqual(['hello'])
 		expect(second.payloads).toEqual(['hello', 'again'])
 		await unsubscribeSecond()
@@ -110,12 +109,12 @@ describe.skipIf(!url).each(adapters)('$name transport', (adapter) => {
 			attempt++
 		) {
 			await transport.publish([{ channel, payload: 'after kill' }])
-			await sleep(100)
+			await Bun.sleep(100)
 		}
 		expect(sub.payloads[0]).toBe('after kill')
 		// Restored exactly once: no duplicate listener after the reconnect.
 		await transport.publish([{ channel, payload: 'once' }])
-		await sleep(100)
+		await Bun.sleep(100)
 		expect(sub.payloads.filter((payload) => payload === 'once')).toHaveLength(1)
 		await unsubscribe()
 	})
@@ -138,7 +137,7 @@ describe.skipIf(!url).each(adapters)('$name transport', (adapter) => {
 		const stream = await call(feed.subscribe, { room: 'r1' }, { context: {} })
 		expect((await stream.next()).value).toEqual({ room: 'r1', text: 'before' })
 		const next = stream.next()
-		await sleep(50)
+		await Bun.sleep(50)
 		await feed.publishMany([
 			{ room: 'r1', text: 'live' },
 			{ room: 'r2', text: 'elsewhere' }

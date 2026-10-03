@@ -49,6 +49,14 @@ export function user(overrides: Partial<User> = {}): User {
 	}
 }
 
+/** A logger that drops everything. */
+export const quiet: FnLogger = {
+	debug() {},
+	info() {},
+	warn() {},
+	error() {}
+}
+
 export const transport = memoryTransport()
 export const completed: Array<Record<string, unknown>> = []
 
@@ -95,6 +103,6 @@ export const {
 		completed.push({ name: event.name, success: event.success })
 		return { organization_id: event.context.support?.organizationId }
 	},
-	logger: (): FnLogger => ({ debug() {}, info() {}, warn() {}, error() {} }),
+	logger: () => quiet,
 	pubsub: { transport }
 })

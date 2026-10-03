@@ -1,11 +1,10 @@
 import type { Schema } from '@orpc/contract'
-import { type AnyProcedure, ORPCError } from '@orpc/server'
+import { ORPCError } from '@orpc/server'
 import type { ZodObject, ZodRawShape, ZodType, z } from 'zod'
 import type { FnLogger } from '../logger.js'
-import { FN_META_KEY, type StoredFnMeta } from '../meta.js'
 import { errorMessageOf, type SpanLike, type Tracing } from '../otel.js'
 import type {
-	BuilderLike,
+	BuildProcedure,
 	FnContext,
 	FnDefinition,
 	FnProcedure,
@@ -172,11 +171,10 @@ export type PubSubRuntimeOptions = {
 
 /** @internal */
 export type LiveRuntimeOptions = {
-	procedures: Record<string, BuilderLike>
-	default: string
+	buildProcedure: BuildProcedure
 	tracing: Tracing
 	createLogger: (scope: string, span: SpanLike | undefined) => FnLogger
-	pubsub?: PubSubRuntimeOptions
+	pubsub?: PubSubRuntimeOptions | undefined
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -291,13 +289,6 @@ type Hub = {
 	close: () => void
 }
 
-type BuilderChain = {
-	route(route: Record<string, unknown>): BuilderChain
-	meta(meta: Record<string, unknown>): BuilderChain
-	input(schema: unknown): BuilderChain
-	handler(handler: unknown): AnyProcedure
-}
-
 /** An open subscription: registered, authorized and subscribed. */
 export type LiveSubscription = {
 	/** Live events, after the backlog replay. Ends when closed or aborted. */
@@ -328,8 +319,11 @@ export type Channel = {
 	getChannelName: (params: Input, context?: unknown) => string
 }
 
-const compact = (value: Record<string, unknown>) =>
-	Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined))
+const resolveChannel = (
+	channel: string | ((params: Input, context?: unknown) => string),
+	params: Input,
+	context?: unknown
+) => (typeof channel === 'string' ? channel : channel(params, context))
 
 /** @internal */
 export function createLiveRuntime(options: LiveRuntimeOptions) {
@@ -397,16 +391,11 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 						span?.setAttribute('pubsub.payload_size', first.payload.length)
 					}
 					await requireTransport().publish(messages, backlog)
-					tracing.ok(span)
-				} catch (error) {
-					tracing.fail(span, error)
-					throw error
 				} finally {
 					span?.setAttribute(
 						'pubsub.duration_ms',
 						performance.now() - startTime
 					)
-					span?.end()
 				}
 			})
 
@@ -427,7 +416,7 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 	 */
 	function createChannelHubs(config: {
 		eventSchema: ZodType
-		filterFn: FilterFn<Input, unknown>
+		filterFn: FilterFn<Input, unknown> | undefined
 	}) {
 		const { eventSchema, filterFn } = config
 		const hubs = new Map<string, Hub>()
@@ -458,6 +447,10 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 				}
 				for (const sub of [...subscribers]) {
 					if (!sub.isActive()) continue
+					if (!filterFn) {
+						sub.deliver(parsed)
+						continue
+					}
 					// `then` also catches a filter that throws synchronously, so one
 					// subscriber's filter cannot starve the others.
 					Promise.resolve()
@@ -571,14 +564,14 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			name,
 			channel,
 			eventSchema,
-			filterFn = () => true,
+			filterFn,
 			authFn,
 			overflowMarker,
 			useBacklog = false
 		} = channelOptions
 
-		const getChannelName = (params: Input, context?: unknown): string =>
-			typeof channel === 'string' ? channel : channel(params, context)
+		const getChannelName = (params: Input, context?: unknown) =>
+			resolveChannel(channel, params, context)
 		const addLocalSubscriber = createChannelHubs({ eventSchema, filterFn })
 
 		const open: Channel['open'] = async ({ input, context, signal }) => {
@@ -603,8 +596,7 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 					})
 				}
 			} catch (error) {
-				tracing.fail(span, error)
-				span?.end()
+				tracing.end(span, error)
 				throw error
 			}
 
@@ -655,6 +647,7 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			})
 			activeSubscriberCleanups.add(wake)
 			signal?.addEventListener('abort', wake)
+			if (signal?.aborted) wake()
 
 			const finish = (error?: unknown) => {
 				if (finished) return
@@ -663,13 +656,12 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 				activeSubscriberCleanups.delete(wake)
 				signal?.removeEventListener('abort', wake)
 				local.remove()
-				if (error === undefined) tracing.ok(span)
-				else tracing.fail(span, error)
 				const durationMs = performance.now() - startTime
 				span?.setAttribute('pubsub.duration_ms', durationMs)
 				span?.setAttribute('pubsub.message_count', messageCount)
 				span?.setAttribute('pubsub.dropped_count', droppedCount)
-				span?.end()
+				if (error === undefined) tracing.end(span)
+				else tracing.end(span, error)
 				subscriberLogger.info(`Unsubscribed from ${channelName}`, {
 					messageCount,
 					droppedCount,
@@ -688,7 +680,8 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 						if (closed) break
 						try {
 							const data = await eventSchema.parseAsync(decodePayload(raw))
-							if ((await filterFn({ input, data })) && !closed) enqueue(data)
+							if ((!filterFn || (await filterFn({ input, data }))) && !closed)
+								enqueue(data)
 						} catch {
 							// Ignore malformed backlog entries
 						}
@@ -703,7 +696,7 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 
 			async function* events() {
 				try {
-					while (!closed && !signal?.aborted) {
+					while (!closed) {
 						const message = await next()
 						if (message === CLOSED) break
 						yield message
@@ -718,7 +711,7 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 
 		const { publish, publishMany } = createChannelPublisher({
 			...channelOptions,
-			getChannelName: (data) => getChannelName(data)
+			getChannelName
 		})
 
 		return { open, publish, publishMany, getChannelName }
@@ -733,52 +726,33 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			description?: string
 		}
 	) {
-		const { name, inputSchema } = pubsubOptions
-		const key = pubsubOptions.procedure ?? options.default
-		const builder = options.procedures[key] as unknown as
-			| BuilderChain
-			| undefined
-		if (!builder) throw new Error(`orpc-fn: unknown procedure "${key}"`)
+		const { name } = pubsubOptions
 		const channel = createChannel(pubsubOptions)
-
-		const stored: StoredFnMeta = { name, procedure: key, meta: {} }
-		const subscribe = builder
-			.route(
-				compact({
-					method: 'GET',
-					operationId: name,
-					tags: pubsubOptions.tags,
-					summary: pubsubOptions.summary ?? `Subscribe to ${name}`,
-					description: pubsubOptions.description
-				})
-			)
-			.meta({ [FN_META_KEY]: stored })
-			.input(inputSchema)
-			.handler(async function* (params: {
-				input: Input
-				context: unknown
-				signal?: AbortSignal
-			}) {
-				const subscription = await channel.open({
-					input: params.input,
-					context: params.context,
-					signal: params.signal
-				})
-				try {
-					yield* subscription.events
-				} finally {
-					subscription.close()
-				}
-			})
+		const subscribe = options.buildProcedure({
+			name,
+			procedure: pubsubOptions.procedure,
+			meta: {},
+			route: {
+				method: 'GET',
+				tags: pubsubOptions.tags,
+				summary: pubsubOptions.summary ?? `Subscribe to ${name}`,
+				description: pubsubOptions.description
+			},
+			input: pubsubOptions.inputSchema,
+			handler: async function* ({ input, context, signal }) {
+				// The generator from `events()` releases everything when it ends.
+				yield* (await channel.open({ input: input as Input, context, signal }))
+					.events
+			}
+		})
 
 		const { publish, publishMany, getChannelName } = channel
 		return { subscribe, publish, publishMany, getChannelName }
 	}
 
 	function createPublisher(publisherOptions: PublisherOptions<ZodType>) {
-		const { channel } = publisherOptions
 		const getChannelName = (params: Input) =>
-			typeof channel === 'string' ? channel : channel(params)
+			resolveChannel(publisherOptions.channel, params)
 		const { publish, publishMany } = createChannelPublisher({
 			...publisherOptions,
 			getChannelName
