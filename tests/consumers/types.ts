@@ -513,6 +513,61 @@ scoped.fn({
 		return params.t('hello')
 	}
 })
+// Regression: zero-argument and context-reading scoped extras mixed, no explicit generics.
+type ShopAdmin = { surface: 'admin'; shop: string }
+type ShopFront = { surface: 'storefront'; shop: string }
+const shopPublic = os.$context<{ shopify?: ShopAdmin | ShopFront }>()
+const shopAdmin = shopPublic.use(({ next }) =>
+	next({ context: { shopify: { surface: 'admin', shop: 'a' } as ShopAdmin } })
+)
+const shopFront = shopPublic.use(({ next }) =>
+	next({
+		context: { shopify: { surface: 'storefront', shop: 'f' } as ShopFront }
+	})
+)
+const shop = createFn({
+	procedures: { public: shopPublic, admin: shopAdmin, storefront: shopFront },
+	extras: () => ({ db: 1 }),
+	extrasByProcedure: {
+		public: () => ({ shopify: undefined }),
+		admin: ({ context }) => ({ shopify: context.shopify }),
+		storefront: ({ context }) => ({ shopify: context.shopify })
+	},
+	onCompleted: (event) => {
+		if (event.handlerStarted && event.procedure !== 'public')
+			return { shop: event.context.shopify.shop }
+	}
+})
+shop.fn({
+	name: 'adminShop',
+	procedure: 'admin',
+	handler: ({ shopify, db }) => {
+		const surface: 'admin' = shopify.surface
+		return `${surface}${db}`
+	}
+})
+shop.fn({
+	name: 'publicShop',
+	procedure: 'public',
+	handler: ({ shopify }) => {
+		const none: undefined = shopify
+		return none
+	}
+})
+createFn({
+	procedures: { public: shopPublic, admin: shopAdmin },
+	extrasByProcedure: {
+		public: () => ({ ok: 1 }),
+		// @ts-expect-error mixed scoped extras still cannot shadow handler parameters
+		admin: ({ context }) => ({ input: context.shopify })
+	}
+})
+createFn({
+	procedures: { public: os },
+	default: 'public',
+	// @ts-expect-error scoped extras need finite keys
+	extrasByProcedure: { public: () => ({}) as Record<string, number> }
+})
 createFn({
 	procedures: { public: os },
 	default: 'public',

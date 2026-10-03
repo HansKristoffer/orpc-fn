@@ -140,6 +140,17 @@ export type RejectKeys<T, K extends PropertyKey, TMessage extends string> = {
 	[P in Extract<keyof T, K>]: TMessage
 }
 
+/** Params every handler receives; extras may not reuse these names. */
+type HandlerParamKey =
+	| 'input'
+	| 'context'
+	| 'call'
+	| 'signal'
+	| 'span'
+	| 'logger'
+	| 'errors'
+	| 'lastEventId'
+
 /**
  * Handler extras must have known keys: an index signature would claim every
  * handler param. Intersected into `createFn`'s options to reject it.
@@ -149,17 +160,7 @@ export type FiniteExtras<T> = T extends unknown
 		? { extras: 'orpc-fn: extras need known keys, not an index signature' }
 		: number extends keyof T
 			? { extras: 'orpc-fn: extras need known keys, not an index signature' }
-			: Extract<
-						keyof T,
-						| 'input'
-						| 'context'
-						| 'call'
-						| 'signal'
-						| 'span'
-						| 'logger'
-						| 'errors'
-						| 'lastEventId'
-					> extends never
+			: Extract<keyof T, HandlerParamKey> extends never
 				? unknown
 				: { extras: 'orpc-fn: extras cannot shadow handler parameters' }
 	: never
@@ -272,14 +273,7 @@ export type HandlerParams<
 				: object
 			: object
 	>,
-	| 'input'
-	| 'context'
-	| 'call'
-	| 'signal'
-	| 'span'
-	| 'logger'
-	| 'errors'
-	| 'lastEventId'
+	HandlerParamKey
 > & {
 	input: TInput
 	context: FnContext<TDef, TKey>
@@ -506,26 +500,14 @@ export type CompletedHookEvent<
 		)
 }[keyof TProcedures & string]
 
-export type FiniteScopedExtras<T> = {
-	[K in keyof T]: string extends keyof T[K]
-		? K
-		: number extends keyof T[K]
-			? K
-			: Extract<
-						keyof T[K],
-						| 'input'
-						| 'context'
-						| 'call'
-						| 'signal'
-						| 'span'
-						| 'logger'
-						| 'errors'
-						| 'lastEventId'
-					> extends never
-				? never
-				: K
-}[keyof T] extends never
-	? unknown
-	: {
-			extrasByProcedure: 'orpc-fn: scoped extras need finite keys and cannot shadow handler parameters'
-		}
+/**
+ * Intersected into each scoped extras function's return type: rejects index
+ * signatures and handler-parameter names at the offending property. A
+ * top-level conditional over the whole map broke inference when zero-argument
+ * and context-reading functions were mixed.
+ */
+export type ScopedExtrasGuard<T> = (string extends keyof T
+	? { 'orpc-fn: scoped extras need finite keys': never }
+	: number extends keyof T
+		? { 'orpc-fn: scoped extras need finite keys': never }
+		: unknown) & { [K in HandlerParamKey]?: never }
