@@ -259,6 +259,34 @@ export type LiveStream = Assert<
 	Equal<LiveItem, { org: string; by: string } | { touched: string }>
 >
 list.publish({ org: 'a' })
+// Reducer schemas may transform, e.g. brand IDs: input string, output branded.
+const ArtifactId = z.string().brand<'ArtifactId'>()
+type ArtifactId = z.output<typeof ArtifactId>
+const branded = fnLive({
+	name: 'branded',
+	input: z.object({}),
+	output: z.object({ id: ArtifactId }),
+	handler: () => ({ id: ArtifactId.parse('a') }),
+	live: {
+		eventSchema: z.object({ id: z.string() }),
+		channel: 'artifacts',
+		stateSchema: z.object({ id: ArtifactId }),
+		emitSchema: z.object({ latest: ArtifactId }),
+		transformerFn: ({ previous, event }) => {
+			const id = ArtifactId.parse(event.id)
+			return fnLivePatch({ ...previous, id }, { latest: id })
+		}
+	}
+})
+type BrandedItem =
+	InferRouterOutputs<{
+		s: typeof branded.subscribe
+	}>['s'] extends AsyncIterable<infer U>
+		? U
+		: never
+export type BrandedStream = Assert<
+	Equal<BrandedItem, { id: ArtifactId } | { latest: ArtifactId }>
+>
 const patch: FnLivePatch<number, string> = fnLivePatch(1, 'x')
 void [patch, streamLiveSnapshots]
 
@@ -616,6 +644,9 @@ if (hasOrpcErrorCode(unknownError, 'NOT_FOUND')) {
 // biome-ignore format: keep the overload error on the expected line
 // @ts-expect-error transformer state needs a parsed-state schema
 fnLive({ name: 'missingStateSchema', input: z.object({}), handler: () => 1, live: { channel: 'x', eventSchema: z.object({}), transformerFn: () => 2 } })
+// biome-ignore format: keep the overload error on the expected line
+// @ts-expect-error the state schema's output must match the route output
+fnLive({ name: 'wrongStateSchema', input: z.object({}), output: z.object({ n: z.number() }), handler: () => ({ n: 1 }), live: { channel: 'x', eventSchema: z.object({}), stateSchema: z.object({ n: z.string() }), transformerFn: ({ previous }) => previous } })
 // biome-ignore format: keep the overload error on the expected line
 // @ts-expect-error patch output needs a separate wire schema
 fnLive({ name: 'missingPatchSchema', input: z.object({}), handler: () => 1, live: { channel: 'x', eventSchema: z.object({}), stateSchema: z.number(), transformerFn: () => fnLivePatch(2, { delta: 1 }) } })

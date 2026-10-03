@@ -66,10 +66,14 @@ export type FnLiveConfig<
 	ChannelQueueOptions & {
 		/** Subscribe route name; default `${name}.live`. */
 		name?: string
-		/** Validates parsed reducer state without reapplying an output transform. Required with a transformer. */
-		stateSchema?: Schema<TOutput, TOutput>
+		/**
+		 * Validates reducer state without reapplying an output transform. Required with a
+		 * transformer. Its input may be looser than its output (e.g. branded IDs); it is
+		 * checked at runtime.
+		 */
+		stateSchema?: Schema<unknown, TOutput>
 		/** Validates patch payloads. Required when a transformer returns fnLivePatch. */
-		emitSchema?: Schema<TEmit, TEmit>
+		emitSchema?: Schema<unknown, TEmit>
 		/** Optional access check before each update; idle streams keep their initial authorization. */
 		reauthorize?: AuthFn<TInput, FnContext<TDef, TKey>>
 		eventSchema: TEventSchema
@@ -122,10 +126,10 @@ export type FnLiveConfig<
 					TEmit,
 					TErrors
 				>
-				stateSchema: Schema<TOutput, TOutput>
+				stateSchema: Schema<unknown, TOutput>
 		  }
 	) &
-	([TEmit] extends [never] ? object : { emitSchema: Schema<TEmit, TEmit> })
+	([TEmit] extends [never] ? object : { emitSchema: Schema<unknown, TEmit> })
 
 type FnLiveConfigTransformer<
 	TDef extends FnDefinition,
