@@ -1,0 +1,221 @@
+import { SmartCoercionPlugin } from '@orpc/json-schema'
+import { OpenAPIHandler } from '@orpc/openapi/fetch'
+import { OpenAPIReferencePlugin } from '@orpc/openapi/plugins'
+import { type AnyRouter, onError as orpcOnError } from '@orpc/server'
+import { RPCHandler } from '@orpc/server/fetch'
+import { BatchHandlerPlugin } from '@orpc/server/plugins'
+import type { StandardHandlerPlugin } from '@orpc/server/standard'
+import { ZodToJsonSchemaConverter } from '@orpc/zod/zod4'
+import type { Context as HonoContext, Env, Hono } from 'hono'
+import { isExpectedClientError } from './expected-client-error.js'
+import type { ProcedureFilter } from './mcp.js'
+
+/** Per-request timings in ms; `fn()` adds `handler_ms`. Sent as Server-Timing. */
+export type RequestTiming = Record<string, number | undefined>
+
+type Path = `/${string}`
+// biome-ignore lint/suspicious/noExplicitAny: plugins are context-agnostic here
+type Plugin = StandardHandlerPlugin<any>
+
+export type MountOrpcOptions<E extends Env> = {
+	router: AnyRouter
+	/** Mount the RPC handler (oRPC's `RPCLink`) here. Omit to skip it. */
+	rpcPrefix?: Path
+	/** Mount the OpenAPI (REST) handler and its Scalar docs here. */
+	openapi?: {
+		prefix: Path
+		info?: { title: string; version: string; description?: string }
+		/** Docs page, relative to `prefix` (default '/'); the spec is at `/spec.json`. */
+		docsPath?: Path
+		/** Only expose matching procedures (also filters the spec). */
+		filter?: ProcedureFilter
+		/** Turn JSON strings back into `Date`s etc. for `z.date()` inputs. */
+		smartCoercion?: boolean
+		/** Extra spec fields, e.g. `components.securitySchemes` and `security`. */
+		spec?: Record<string, unknown>
+		plugins?: Plugin[]
+	}
+	/** Collapse parallel RPC calls into one HTTP request. Default: true (25 calls). */
+	batch?: boolean | { maxSize: number }
+	/** Add a Server-Timing header from the request timing. Default: true */
+	serverTiming?: boolean
+	/** SSE keep-alive comments every N ms (default 15000), or false. */
+	sseKeepAlive?: boolean | number
+	/** Extra RPC plugins (e.g. `CORSPlugin`). */
+	plugins?: Plugin[]
+	/** Build the oRPC context. Return a `Response` to answer (e.g. 401) instead. */
+	context?: (
+		c: HonoContext<E>,
+		base: { headers: Headers; timing: RequestTiming }
+	) => unknown | Promise<unknown>
+	/** Rewrite request headers before they reach the context (see `normalizeExpoOrigin`). */
+	normalizeHeaders?: (headers: Headers) => Headers
+	/** Time spent before the handler ran, reported as `queue`. */
+	queueMs?: (request: Request) => number | undefined
+	/**
+	 * Unexpected procedure errors (oRPC turns thrown errors into responses, so
+	 * Hono's `onError` never sees them). Expected client errors are skipped.
+	 */
+	onError?: (error: unknown, request: { url: string; method: string }) => void
+	/** Default: 4xx `ORPCError` or `AbortError`. */
+	isExpectedError?: (error: unknown) => boolean
+}
+
+/**
+ * Expo native sends `expo-origin` but not `origin`; copy it so cookie-based
+ * auth (e.g. Better Auth) sees the origin.
+ */
+export function normalizeExpoOrigin(raw: Headers): Headers {
+	const headers = new Headers(raw)
+	const expo = headers.get('expo-origin')
+	if (expo && !headers.get('origin')) headers.set('origin', expo)
+	return headers
+}
+
+export function formatServerTiming(
+	totalMs: number,
+	timing: RequestTiming
+): string {
+	const parts = [`total;dur=${totalMs.toFixed(2)}`]
+	for (const [key, value] of Object.entries(timing)) {
+		if (value !== undefined) {
+			parts.push(`${key.replace(/_ms$/, '')};dur=${value.toFixed(2)}`)
+		}
+	}
+	return parts.join(', ')
+}
+
+/**
+ * Rebuild the response with Server-Timing. For SSE, also disable proxy
+ * buffering so keep-alive comments reach the edge (empty `:` lines are
+ * otherwise easy for nginx/Fastly to hold until an idle kill).
+ */
+function finishResponse(
+	response: Response,
+	serverTiming: string | undefined
+): Response {
+	const headers = new Headers(response.headers)
+	if (serverTiming) {
+		headers.set('Server-Timing', serverTiming)
+		headers.append('Access-Control-Expose-Headers', 'Server-Timing')
+	}
+	if ((headers.get('content-type') ?? '').includes('text/event-stream')) {
+		headers.set('Cache-Control', 'no-cache')
+		headers.set('X-Accel-Buffering', 'no')
+	}
+	return new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers
+	})
+}
+
+/** Mount oRPC's RPC and OpenAPI handlers on a Hono app. */
+export function mountOrpc<E extends Env>(
+	app: Hono<E>,
+	options: MountOrpcOptions<E>
+): void {
+	const {
+		router,
+		batch = true,
+		serverTiming = true,
+		sseKeepAlive = true
+	} = options
+	const isExpectedError = options.isExpectedError ?? isExpectedClientError
+	const keepAlive =
+		sseKeepAlive === false
+			? { eventIteratorKeepAliveEnabled: false }
+			: {
+					eventIteratorKeepAliveEnabled: true,
+					// Explicit keep-alive under proxy idle timers (~30s); oRPC's default is 5s.
+					eventIteratorKeepAliveInterval:
+						sseKeepAlive === true ? 15_000 : sseKeepAlive
+				}
+	const report = (
+		error: unknown,
+		{ request }: { request: { url: URL; method: string } }
+	) => {
+		if (isExpectedError(error)) return
+		options.onError?.(error, {
+			url: request.url.pathname,
+			method: request.method
+		})
+	}
+
+	const mount = (prefix: Path, handler: Pick<RPCHandler<object>, 'handle'>) => {
+		app.use(`${prefix}/*`, async (c, next) => {
+			const timing: RequestTiming = {}
+			const queueMs = options.queueMs?.(c.req.raw)
+			if (queueMs !== undefined)
+				timing.queue_ms = Math.round(queueMs * 100) / 100
+			const started = performance.now()
+			const headers = options.normalizeHeaders
+				? options.normalizeHeaders(c.req.raw.headers)
+				: c.req.raw.headers
+			const context = options.context
+				? await options.context(c, { headers, timing })
+				: { headers, timing }
+			if (context instanceof Response) return context
+			const { matched, response } = await handler.handle(c.req.raw, {
+				prefix,
+				context: context as object
+			})
+			if (!matched) return next()
+			const timed = serverTiming
+				? formatServerTiming(performance.now() - started, timing)
+				: undefined
+			const finished = finishResponse(response, timed)
+			return c.newResponse(finished.body, finished)
+		})
+	}
+
+	if (options.rpcPrefix) {
+		const plugins: Plugin[] = [...(options.plugins ?? [])]
+		if (batch) {
+			plugins.push(
+				new BatchHandlerPlugin({
+					maxSize: batch === true ? 25 : batch.maxSize
+				})
+			)
+		}
+		mount(
+			options.rpcPrefix,
+			new RPCHandler(router, {
+				...keepAlive,
+				plugins,
+				interceptors: options.onError ? [orpcOnError(report)] : []
+			})
+		)
+	}
+
+	if (options.openapi) {
+		const { openapi } = options
+		const converters = [new ZodToJsonSchemaConverter()]
+		const plugins: Plugin[] = [...(openapi.plugins ?? [])]
+		if (openapi.smartCoercion) {
+			plugins.push(new SmartCoercionPlugin({ schemaConverters: converters }))
+		}
+		plugins.push(
+			new OpenAPIReferencePlugin({
+				docsProvider: 'scalar',
+				...(openapi.docsPath ? { docsPath: openapi.docsPath } : {}),
+				schemaConverters: converters,
+				specGenerateOptions: {
+					info: openapi.info ?? { title: 'API', version: '0.0.0' },
+					servers: [{ url: openapi.prefix }],
+					...(openapi.filter ? { filter: openapi.filter } : {}),
+					...openapi.spec
+				}
+			})
+		)
+		mount(
+			openapi.prefix,
+			new OpenAPIHandler(router, {
+				...keepAlive,
+				...(openapi.filter ? { filter: openapi.filter } : {}),
+				plugins,
+				interceptors: options.onError ? [orpcOnError(report)] : []
+			})
+		)
+	}
+}
