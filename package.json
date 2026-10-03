@@ -1,6 +1,6 @@
 {
 	"name": "orpc-fn",
-	"version": "0.2.1",
+	"version": "0.3.0",
 	"description": "Define a backend function once: a typed oRPC procedure with tracing, logging, guards, injected handler extras, nested calls and live queries over Redis.",
 	"type": "module",
 	"license": "MIT",
