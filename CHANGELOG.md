@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.2.1...v0.3.0) (2026-10-03)
+
+
+### Features
+
+* **cli:** add orpc-fn stream-manifest generator with --check ([109072a](https://github.com/HansKristoffer/orpc-fn/commit/109072a0c1cc2bc85710bf96e9fe00ff572822ea))
+* **cli:** add stream manifest CLI and MCP SDK v2 adapter ([560660f](https://github.com/HansKristoffer/orpc-fn/commit/560660f7a2850d9513c25d27164fc61a7987fc62))
+* **live:** accept a lazy pubsub transport factory ([1f79354](https://github.com/HansKristoffer/orpc-fn/commit/1f793543876a00a3776bbdc77777a2b03f8a71f9))
+* **live:** let stateSchema and emitSchema transform their input ([6b80b69](https://github.com/HansKristoffer/orpc-fn/commit/6b80b692ea2a0725690aa335dd47302e233b57dc))
+* **mcp:** add orpc-fn/mcp/server adapter for MCP SDK v2 ([2134b32](https://github.com/HansKristoffer/orpc-fn/commit/2134b32d173fe3bd483c4f5444d2387fc2e9a478))
+
+
+### Bug Fixes
+
+* **types:** infer mixed zero-argument and context-reading scoped extras ([d464855](https://github.com/HansKristoffer/orpc-fn/commit/d46485554e99596b7e00e0b89e413af694155ffc))
+
 ## [0.2.1](https://github.com/HansKristoffer/orpc-fn/compare/v0.2.0...v0.2.1) (2026-10-03)
 
 
