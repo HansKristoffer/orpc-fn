@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.1.0...v0.2.0) (2026-10-03)
+
+
+### Features
+
+* strengthen adapters, live queries, and route contracts ([8efa9ab](https://github.com/HansKristoffer/orpc-fn/commit/8efa9ab0454ce704b39e6bacdb172f503dde014e))
+* strengthen adapters, live queries, and route contracts ([96a09db](https://github.com/HansKristoffer/orpc-fn/commit/96a09dba03cc6f728c2f934c449fc318760392b9))
+
+
+### Bug Fixes
+
+* **ci:** build package before checking adoption examples ([33e174f](https://github.com/HansKristoffer/orpc-fn/commit/33e174f1f38767f2721b1f9a176abf4cd06db12b))
+
 ## 0.1.0 (2026-10-03)
 
 
