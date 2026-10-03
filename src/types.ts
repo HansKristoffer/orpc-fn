@@ -291,6 +291,11 @@ export type FnProcedure<
 	MetaOf<TDef['procedures'][TKey]>
 >
 
+type InputOf<T> = [T] extends [ZodType] ? z.output<T> : unknown
+type ReturnOf<TOut, TReturn> = [TOut] extends [ZodType]
+	? z.input<TOut>
+	: TReturn
+
 /** `fn()`: four overloads for input/output schema × inferred. */
 export interface Fn<TDef extends FnDefinition> {
 	// 1. With input + output schema
@@ -345,6 +350,29 @@ export interface Fn<TDef extends FnDefinition> {
 			) => MaybePromise<TReturn>
 		} & FnRouteOptions<TDef, TKey>
 	): FnProcedure<TDef, TKey, Schema<unknown, unknown>, Schema<TReturn, TReturn>>
+
+	// 5. Never matches valid code first; it only words the type errors, which
+	// TypeScript reports against the last overload.
+	<
+		TReturn,
+		TInput extends ZodType | undefined = undefined,
+		TOut extends ZodType | undefined = undefined,
+		TKey extends ProcedureKey<TDef> = TDef['default']
+	>(
+		options: {
+			input?: TInput
+			output?: TOut
+			// The output schema parses what the handler returns: its input type.
+			handler: (
+				params: HandlerParams<TDef, InputOf<TInput>, NoInfer<TKey>>
+			) => MaybePromise<ReturnOf<TOut, TReturn>>
+		} & FnRouteOptions<TDef, TKey>
+	): FnProcedure<
+		TDef,
+		TKey,
+		[TInput] extends [ZodType] ? TInput : Schema<unknown, unknown>,
+		[TOut] extends [ZodType] ? TOut : Schema<TReturn, TReturn>
+	>
 }
 
 /** What `fn.completed` reports, and what `onCompleted` receives. */
