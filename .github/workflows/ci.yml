@@ -50,9 +50,10 @@ jobs:
         with:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
+      # Adoption examples import the package's public exports from dist.
+      - run: bun run build
       - run: bun run lint
       - run: bun test
-      - run: bun run build
       - run: bun run test:client-bundle
       - run: bun run test:types-performance
       - run: bun run attw
