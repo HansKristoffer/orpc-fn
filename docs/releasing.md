@@ -10,7 +10,25 @@ CI checks the PR title, lint/types, tests (including the Redis tests against a R
 2. Review its release notes and any breaking-change migration instructions.
 3. Merge the passing release PR when ready. The workflow creates the version tag and GitHub release, checks out that tag, validates the package, and publishes the exact verified tarball with provenance.
 
-Publication uses npm trusted publishing. Its package configuration is GitHub Actions, owner `HansKristoffer`, repository `orpc-fn`, workflow `release.yml`, no environment, and permission to publish. Node 24 supplies a compatible npm CLI. Do not add `NPM_TOKEN` or `NODE_AUTH_TOKEN` to this workflow.
+Publication uses npm trusted publishing. Its package configuration is GitHub Actions, owner `HansKristoffer`, repository `orpc-fn`, workflow `release.yml`, no environment, and **npm publish** ticked (configurations made after 2026-09-03 otherwise allow only staged publishing). The workflow installs npm 11.5.1+. Do not add `NPM_TOKEN`, `NODE_AUTH_TOKEN` or setup-node's `registry-url` to this workflow: a token in the environment stops npm from using OIDC.
+
+## First release (once)
+
+npm attaches a trusted publisher only to a package that already exists, so `0.1.0` is published by hand:
+
+1. Create the public GitHub repository `HansKristoffer/orpc-fn`, push, and under **Settings → Actions → General** allow GitHub Actions to create and approve pull requests (Release Please needs it).
+2. Merge the first development PR, then the `0.1.0` release PR. The publish job fails at the OIDC exchange (`404 ... package not found`); that is expected.
+3. Publish that tag's verified tarball from a clean checkout, signing in with 2FA in the browser:
+
+   ```sh
+   git fetch --tags && git checkout v0.1.0
+   bun install --frozen-lockfile && bun run build && bun run verify:package
+   npm login --auth-type=web
+   npm publish .artifacts/package.tgz --access public --ignore-scripts
+   ```
+
+4. On npmjs.com, add the trusted publisher above (package **Settings → Trusted Publisher**), then set publishing access to **Require two-factor authentication and disallow tokens**.
+5. Run the Release workflow for `v0.1.0` (below): it sees the published version and skips it. Every later release publishes from CI with provenance.
 
 ## Recover a failed publication
 

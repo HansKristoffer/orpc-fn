@@ -4,6 +4,7 @@
 	"description": "Define a backend function once: a typed oRPC procedure with tracing, logging, guards, injected handler extras, nested calls and live queries over Redis.",
 	"type": "module",
 	"license": "MIT",
+	"author": "Hans Kristoffer Hansen",
 	"sideEffects": false,
 	"repository": {
 		"type": "git",
@@ -84,6 +85,7 @@
 	},
 	"scripts": {
 		"build": "bun scripts/build.ts",
+		"prepublishOnly": "bun run build",
 		"test": "bun test",
 		"typecheck": "tsc --noEmit && tsc --noEmit -p tests/consumers/tsconfig.json",
 		"lint": "bun run typecheck && biome check",
