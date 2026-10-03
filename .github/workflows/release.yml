@@ -75,9 +75,10 @@ jobs:
       - name: Check package and tag versions agree
         run: node -e 'if (require("./package.json").version !== process.env.TAG.slice(1)) process.exit(1)'
       - run: bun install --frozen-lockfile
+      # Adoption examples import the package's public exports from dist.
+      - run: bun run build
       - run: bun run lint
       - run: bun test
-      - run: bun run build
       - run: node "$RUNNER_TEMP/verify-package.mjs"
       - name: Publish the verified tarball
         run: node "$RUNNER_TEMP/publish-package.mjs"
