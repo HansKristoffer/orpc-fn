@@ -1,0 +1,157 @@
+{
+	"name": "orpc-fn",
+	"version": "0.0.0",
+	"description": "Define a backend function once: a typed oRPC procedure with tracing, logging, guards, injected handler extras, nested calls and live queries over Redis.",
+	"type": "module",
+	"license": "MIT",
+	"author": "Hans Kristoffer Hansen",
+	"sideEffects": false,
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/HansKristoffer/orpc-fn.git"
+	},
+	"homepage": "https://github.com/HansKristoffer/orpc-fn#readme",
+	"keywords": [
+		"orpc",
+		"rpc",
+		"zod",
+		"opentelemetry",
+		"pubsub",
+		"redis",
+		"live-query",
+		"mastra",
+		"mcp",
+		"hono",
+		"typescript",
+		"tanstack-query",
+		"expo",
+		"react-native"
+	],
+	"engines": {
+		"node": ">=20"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./live": {
+			"types": "./dist/live/index.d.ts",
+			"import": "./dist/live/index.js"
+		},
+		"./live/memory": {
+			"types": "./dist/live/memory.d.ts",
+			"import": "./dist/live/memory.js"
+		},
+		"./live/redis-bun": {
+			"types": "./dist/live/redis-bun.d.ts",
+			"import": "./dist/live/redis-bun.js"
+		},
+		"./live/ioredis": {
+			"types": "./dist/live/ioredis.d.ts",
+			"import": "./dist/live/ioredis.js"
+		},
+		"./mastra": {
+			"types": "./dist/mastra.d.ts",
+			"import": "./dist/mastra.js"
+		},
+		"./mcp": {
+			"types": "./dist/mcp.d.ts",
+			"import": "./dist/mcp.js"
+		},
+		"./hono": {
+			"types": "./dist/hono.d.ts",
+			"import": "./dist/hono.js"
+		},
+		"./client": {
+			"types": "./dist/client.d.ts",
+			"import": "./dist/client.js"
+		},
+		"./expo": {
+			"types": "./dist/expo.d.ts",
+			"import": "./dist/expo.js"
+		}
+	},
+	"types": "./dist/index.d.ts",
+	"files": [
+		"dist",
+		"LICENSE",
+		"README.md",
+		"src/**/*.ts",
+		"!src/**/*.test.ts"
+	],
+	"publishConfig": {
+		"access": "public"
+	},
+	"scripts": {
+		"build": "bun scripts/build.ts",
+		"prepublishOnly": "bun run build",
+		"test": "bun test",
+		"typecheck": "tsc --noEmit && tsc --noEmit -p tests/consumers/tsconfig.json",
+		"lint": "bun run typecheck && biome check",
+		"lint:write": "bun run typecheck && biome check --write",
+		"attw": "attw --pack . --profile esm-only",
+		"publint": "publint",
+		"test:consumers": "bun scripts/check-consumers.ts",
+		"verify:package": "node scripts/verify-package.mjs"
+	},
+	"peerDependencies": {
+		"@mastra/core": "^1.51.0",
+		"@opentelemetry/api": "^1.9.0",
+		"@orpc/client": "^1.14.0",
+		"@orpc/contract": "^1.14.0",
+		"@orpc/json-schema": "^1.14.0",
+		"@orpc/openapi": "^1.14.0",
+		"@orpc/server": "^1.14.0",
+		"@orpc/zod": "^1.14.0",
+		"hono": "^4.0.0",
+		"ioredis": "^5.0.0",
+		"zod": "^4.0.0"
+	},
+	"peerDependenciesMeta": {
+		"@mastra/core": {
+			"optional": true
+		},
+		"@opentelemetry/api": {
+			"optional": true
+		},
+		"@orpc/json-schema": {
+			"optional": true
+		},
+		"@orpc/openapi": {
+			"optional": true
+		},
+		"@orpc/zod": {
+			"optional": true
+		},
+		"hono": {
+			"optional": true
+		},
+		"ioredis": {
+			"optional": true
+		}
+	},
+	"devDependencies": {
+		"@arethetypeswrong/cli": "^0.18.2",
+		"@biomejs/biome": "^2.2.4",
+		"@mastra/core": "1.51.0",
+		"@opentelemetry/api": "^1.9.0",
+		"@orpc/client": "1.14.8",
+		"@orpc/contract": "1.14.8",
+		"@orpc/json-schema": "1.14.8",
+		"@orpc/openapi": "1.14.8",
+		"@orpc/server": "1.14.8",
+		"@orpc/zod": "1.14.8",
+		"@types/bun": "^1.2.0",
+		"@types/node": "^22.0.0",
+		"hono": "^4.12.31",
+		"ioredis": "5.8.2",
+		"publint": "^0.3.12",
+		"typescript": "^7.0.2",
+		"zod": "4.4.3"
+	},
+	"bugs": {
+		"url": "https://github.com/HansKristoffer/orpc-fn/issues"
+	},
+	"packageManager": "bun@1.4.2"
+}
