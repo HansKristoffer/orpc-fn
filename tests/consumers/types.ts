@@ -470,6 +470,8 @@ import { eventIterator } from '@orpc/server'
 import { defineMeta, createStreamManifest } from 'orpc-fn'
 import { registerMcpTools } from 'orpc-fn/mcp/sdk'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { registerMcpTools as registerMcpToolsV2 } from 'orpc-fn/mcp/server'
+import { McpServer as McpServerV2 } from '@modelcontextprotocol/server'
 const native = fn({
 	name: 'nativeIterator',
 	output: eventIterator(z.number()),
@@ -625,6 +627,24 @@ registerMcpTools(
 )
 registerMcpTools(
 	mcpServer,
+	{ tenantOnly },
+	{
+		filter: () => true,
+		// @ts-expect-error the router requires tenant in its initial context
+		context: () => ({})
+	}
+)
+const mcpServerV2 = new McpServerV2(
+	{ name: 'consumer', version: '1' },
+	{ capabilities: { tools: {} } }
+)
+registerMcpToolsV2(
+	mcpServerV2.server,
+	{ foreign },
+	{ filter: () => true, context: () => ({}) }
+)
+registerMcpToolsV2(
+	mcpServerV2.server,
 	{ tenantOnly },
 	{
 		filter: () => true,

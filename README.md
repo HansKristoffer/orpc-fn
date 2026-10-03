@@ -167,7 +167,7 @@ The tool takes the procedure's raw input and returns its parsed output, and `Inf
 
 Optional peers: `@orpc/zod`, `@orpc/json-schema`.
 
-Inspection definitions from `listTools` use Standard Schema and are not `McpServer.registerTool` configs. Executable registration is a separate optional entry point, with SDK `@modelcontextprotocol/sdk` ^1.32.0:
+Inspection definitions from `listTools` use Standard Schema and are not `McpServer.registerTool` configs. Executable registration is a separate optional entry point per SDK major: `orpc-fn/mcp/sdk` for `@modelcontextprotocol/sdk` ^1.32.0 and `orpc-fn/mcp/server` for `@modelcontextprotocol/server` ^2.0.0:
 
 ```ts
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -180,6 +180,16 @@ registerMcpTools(server, router, {
   context: ({ signal }) => authenticateToolRequest(signal)
 })
 // Connect your SDK transport; see examples/adoption/mcp.ts.
+```
+
+For MCP SDK v2 (`@modelcontextprotocol/server` ^2.0.0), import the same `registerMcpTools` from `orpc-fn/mcp/server` instead; options and behaviour are identical:
+
+```ts
+import { McpServer } from '@modelcontextprotocol/server'
+import { registerMcpTools } from 'orpc-fn/mcp/server'
+
+const mcp = new McpServer({ name: 'api', version: '1.0.0' }, { capabilities: { tools: {} } })
+registerMcpTools(mcp.server, router, { filter: hasTag('external'), context })
 ```
 
 The adapter installs the SDK list/call handlers on a low-level `Server` (also accessible as `McpServer.server`). Use one registration per server; these handlers own its tool list. It forwards cancellation, validates/coerces arguments, applies procedure authorization, and formats results as JSON/text MCP content. Override `formatResult` for images, structured content or other presentation. Tool selection is required. Object unions are supported; streams are rejected. Resolve lazy routers first with oRPC's `unlazyRouter`.
