@@ -22,7 +22,8 @@ export type {
 export {
 	createRouter,
 	createStreamManifest,
-	createStreamManifestAsync
+	createStreamManifestAsync,
+	renderStreamManifest
 } from './router.js'
 export type {
 	AnyFnContext,

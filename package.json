@@ -77,6 +77,9 @@
 		}
 	},
 	"types": "./dist/index.d.ts",
+	"bin": {
+		"orpc-fn": "./dist/cli.js"
+	},
 	"files": [
 		"dist",
 		"LICENSE",

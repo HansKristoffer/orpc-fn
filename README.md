@@ -88,7 +88,7 @@ Procedure builders must not set an input or output schema (`os.input(...)`); put
 
 Completion hooks discriminate by `procedure` and `handlerStarted`. Before handler context exists (auth/input failure), they receive the initial context. Logging, tracing, metrics and completion-hook failures preserve procedure results. Custom log fields cannot overwrite canonical completion fields. Stream completion runs once when the stream ends.
 
-Also exported: `defineMeta`, `createStreamManifest`, `createStreamManifestAsync`, `isExpectedClientError`, `createBoundedEventQueue`, `createRouter`, `createBoundCall`, and the types `HandlerParams`, `RouteConfig`, `BoundCall`, `FnMeta`, `FnContext`, `FnCompletedEvent`, `ProcedureInput`, `ProcedureOutput`, `ProcedureContext`, `InitialContextOf`, `CurrentContextOf` and `GuardOptions`.
+Also exported: `defineMeta`, `createStreamManifest`, `createStreamManifestAsync`, `renderStreamManifest`, `isExpectedClientError`, `createBoundedEventQueue`, `createRouter`, `createBoundCall`, and the types `HandlerParams`, `RouteConfig`, `BoundCall`, `FnMeta`, `FnContext`, `FnCompletedEvent`, `ProcedureInput`, `ProcedureOutput`, `ProcedureContext`, `InitialContextOf`, `CurrentContextOf` and `GuardOptions`.
 
 ## `orpc-fn/live`: pub/sub and live queries
 
@@ -234,7 +234,14 @@ export const orpc = createTanstackQueryUtils(client) // Vue Query or React Query
 if (hasOrpcErrorCode(error, 'NOT_FOUND')) { /* … */ }
 ```
 
-`createRpcLink` takes every `RPCLink` option. It also batches parallel calls into one request, matching `mountOrpc`'s server-side batching (`batch: { maxSize, exclude, groups }`, or `false` to turn it off). A batch is one request with one client context, so by default only calls without a client context are batched; pass `groups` to batch calls that share one. A streaming response cannot be batched, and the request doesn't say whether the response will stream, so pass `streamPaths` generated from the actual router with `createStreamManifest` (or `createStreamManifestAsync` for lazy routers). Serialize it to a frontend module; importing that data needs no server runtime. Mark custom iterator routes with `stream: true` or use oRPC's `eventIterator` output schema. Generated live/pubsub routes are marked automatically. `batch.exclude` remains an escape hatch, and the legacy `subscribe` naming heuristic remains as a fallback.
+`createRpcLink` takes every `RPCLink` option. It also batches parallel calls into one request, matching `mountOrpc`'s server-side batching (`batch: { maxSize, exclude, groups }`, or `false` to turn it off). A batch is one request with one client context, so by default only calls without a client context are batched; pass `groups` to batch calls that share one. A streaming response cannot be batched, and the request doesn't say whether the response will stream, so pass `streamPaths` generated from the actual router with `createStreamManifest` (or `createStreamManifestAsync` for lazy routers). Serialize it to a frontend module; importing that data needs no server runtime. The `orpc-fn` CLI does that, resolving lazy routers, sorting paths and writing only on change:
+
+```sh
+orpc-fn stream-manifest src/router.ts#appRouter --out ../web/src/stream-paths.ts          # export const streamPaths = [...]
+orpc-fn stream-manifest src/router.ts#appRouter --out ../web/src/stream-paths.ts --check  # CI: exit 1 when stale
+```
+
+`--out x.json` writes JSON instead, and `--name` renames the export. The CLI imports the router, so that module's side effects (database clients, SDKs) still run; it exits when done rather than waiting on their open handles. Run TypeScript routers with `bun`, `tsx` or Node ≥ 22.18. Mark custom iterator routes with `stream: true` or use oRPC's `eventIterator` output schema. Generated live/pubsub routes are marked automatically. `batch.exclude` remains an escape hatch, and the legacy `subscribe` naming heuristic remains as a fallback.
 
 ## `orpc-fn/expo`
 
