@@ -276,7 +276,6 @@ On native, calls go through `expo/fetch`, the only fetch that streams there. The
 
 ## Docs
 
-- [Migrating an app from an in-repo `lib/fn`](docs/migration.md)
 - [Decisions: what oRPC already ships and why this exists](docs/decisions.md)
 - [Releasing](docs/releasing.md)
 - [Independent core, tenant, revision, MCP and Expo examples](examples/adoption/README.md)
