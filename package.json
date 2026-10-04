@@ -172,7 +172,6 @@
 		"ioredis": "5.8.2",
 		"publint": "^0.3.12",
 		"typescript": "^7.0.2",
-		"typescript-ast": "npm:typescript@5.7.3",
 		"zod": "4.4.3"
 	},
 	"bugs": {

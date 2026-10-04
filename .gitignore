@@ -5,3 +5,4 @@ dist
 .env
 .artifacts/
 .cli-test-*
+.plans/
