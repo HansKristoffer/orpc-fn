@@ -10,6 +10,7 @@ import { call, os } from '@orpc/server'
 import { z } from 'zod'
 import { quiet } from '../../tests/fixture.js'
 import { createFn } from '../index.js'
+import type { LogAttributes } from '../logger.js'
 import type {
 	BacklogOptions,
 	PubSubMessage,
@@ -324,6 +325,83 @@ describe('createPubSub subscribe lifecycle', () => {
 		abort.abort()
 		await iterator.return(undefined)
 		small.drainPubSubSubscribers()
+	})
+})
+
+describe('pubsub logs', () => {
+	test('use constant event names and carry the channel as an attribute', async () => {
+		const lines: Array<{
+			level: string
+			message: string
+			attributes: LogAttributes | undefined
+		}> = []
+		const record =
+			(level: string) => (message: string, attributes?: LogAttributes) => {
+				lines.push({ level, message, attributes })
+			}
+		const app = createFn({
+			procedures: { public: os },
+			default: 'public',
+			logger: () => ({
+				debug: record('debug'),
+				info: record('info'),
+				warn: record('warn'),
+				error: record('error')
+			}),
+			pubsub: { transport }
+		})
+		const feed = app.createPubSub({
+			name: 'test.logs',
+			channel: {
+				subscribe: ({ input }) => `test:logs:${input.id}`,
+				publish: () => 'test:logs:all'
+			},
+			inputSchema: z.object({ id: z.string() }),
+			eventSchema: z.object({ n: z.number() })
+		})
+		const channel = 'test:logs:org-1'
+		const abort = new AbortController()
+		const iterator = await call(
+			feed.subscribe,
+			{ id: 'org-1' },
+			{ context: {}, signal: abort.signal }
+		)
+		const next = iterator.next()
+		await settle()
+		for (const listener of listeners.get(channel) ?? []) listener('not json')
+		emit(channel, { n: 1 })
+		await next
+		for (const handler of [...lostHandlers]) handler(new Error('boom'))
+		abort.abort()
+		await iterator.return(undefined)
+
+		const at = (message: string) => lines.find((l) => l.message === message)
+		expect(at('pubsub.subscribing')).toMatchObject({
+			level: 'debug',
+			attributes: { channel }
+		})
+		expect(at('pubsub.subscribed')).toMatchObject({
+			level: 'debug',
+			attributes: { channel }
+		})
+		expect(at('pubsub.message_dropped')).toMatchObject({
+			level: 'warn',
+			attributes: { channel, error_type: 'SyntaxError' }
+		})
+		expect(at('pubsub.subscription_lost')).toMatchObject({
+			level: 'error',
+			attributes: { channel, error_type: 'Error', error_message: 'boom' }
+		})
+		expect(at('pubsub.resubscribe_scheduled')).toMatchObject({
+			level: 'warn',
+			attributes: { channel, reason: 'lost', attempt: 1 }
+		})
+		expect(at('pubsub.unsubscribed')).toMatchObject({
+			level: 'debug',
+			attributes: { channel, messageCount: 1 }
+		})
+		expect(lines.filter((l) => l.message.includes(channel))).toEqual([])
+		app.drainPubSubSubscribers()
 	})
 })
 

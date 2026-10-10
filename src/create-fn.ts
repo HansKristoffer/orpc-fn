@@ -25,6 +25,7 @@ import { readFnMeta } from './meta.js'
 import {
 	type AttributeValue,
 	createTracing,
+	errorAttributes,
 	errorMessageOf,
 	type OtelApiLike,
 	type SpanLike,
@@ -523,12 +524,7 @@ export function createFn<
 			procedure: event.procedure,
 			duration_ms: event.durationMs,
 			status: success ? 'success' : 'failed',
-			...(error === undefined
-				? {}
-				: {
-						error_type: error instanceof Error ? error.name : typeof error,
-						error_message: errorMessageOf(error)
-					})
+			...(error === undefined ? {} : errorAttributes(error))
 		})
 	}
 

@@ -195,6 +195,14 @@ export function errorMessageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error)
 }
 
+/** Error fields for a log line, named like the `fn.completed` ones. */
+export function errorAttributes(error: unknown) {
+	return {
+		error_type: error instanceof Error ? error.name : typeof error,
+		error_message: errorMessageOf(error)
+	}
+}
+
 function protectSpan<T extends SpanLike>(span: T): T {
 	return new Proxy(span, {
 		get(target, key) {
