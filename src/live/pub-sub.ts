@@ -2,7 +2,12 @@ import type { Schema } from '@orpc/contract'
 import { ORPCError } from '@orpc/server'
 import type { ZodObject, ZodRawShape, ZodType, z } from 'zod'
 import type { FnLogger } from '../logger.js'
-import { errorMessageOf, type SpanLike, type Tracing } from '../otel.js'
+import {
+	errorAttributes,
+	errorMessageOf,
+	type SpanLike,
+	type Tracing
+} from '../otel.js'
 import type {
 	GuardOptions,
 	FnContext,
@@ -706,8 +711,9 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 								name: config.name,
 								channel
 							})
-							logger.warn(`Dropped malformed message on ${channel}`, {
-								error: errorMessageOf(error)
+							logger.warn('pubsub.message_dropped', {
+								channel,
+								...errorAttributes(error)
 							})
 						}
 					}
@@ -721,7 +727,8 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 				if (closed || timer) return
 				const delayMs = getResubscribeDelayMs(attempt)
 				attempt++
-				logger.warn(`Scheduling resubscribe for ${channel}`, {
+				logger.warn('pubsub.resubscribe_scheduled', {
+					channel,
 					reason,
 					attempt,
 					delayMs
@@ -749,8 +756,9 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 								connected = false
 								markPending()
 							}
-							logger.error(`Subscription to ${channel} lost`, {
-								error: error.message
+							logger.error('pubsub.subscription_lost', {
+								channel,
+								...errorAttributes(error)
 							})
 							scheduleResubscribe('lost')
 						},
@@ -784,10 +792,11 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 					connectedOnce = true
 					markReady()
 					attempt = 0
-					logger.info(`Subscribed to ${channel}`)
+					logger.debug('pubsub.subscribed', { channel })
 				} catch (error) {
-					logger.error(`Failed to subscribe to ${channel}`, {
-						error: errorMessageOf(error)
+					logger.error('pubsub.subscribe_failed', {
+						channel,
+						...errorAttributes(error)
 					})
 					scheduleResubscribe('subscribe-failed')
 				}
@@ -926,7 +935,7 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 				throw error
 			}
 
-			subscriberLogger.info(`Subscribing to ${channelName}`)
+			subscriberLogger.debug('pubsub.subscribing', { channel: channelName })
 
 			let messageCount = 0
 			let droppedCount = 0
@@ -1051,7 +1060,8 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 				span?.setAttribute('pubsub.message_count', messageCount)
 				span?.setAttribute('pubsub.dropped_count', droppedCount)
 				tracing.end(span, ...error)
-				subscriberLogger.info(`Unsubscribed from ${channelName}`, {
+				subscriberLogger.debug('pubsub.unsubscribed', {
+					channel: channelName,
 					messageCount,
 					droppedCount,
 					durationMs: Math.round(durationMs)
@@ -1106,10 +1116,10 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 						if (items.length > maxReplay) replayGap = true
 					} catch (error) {
 						replayGap = true
-						subscriberLogger.warn(
-							`Failed to replay backlog for ${channelName}`,
-							{ error: errorMessageOf(error) }
-						)
+						subscriberLogger.warn('pubsub.replay_failed', {
+							channel: channelName,
+							...errorAttributes(error)
+						})
 					}
 				}
 				for (const { data, id } of replaying ?? [])
