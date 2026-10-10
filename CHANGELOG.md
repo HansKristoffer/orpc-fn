@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.3.0...v0.4.0) (2026-10-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* pub/sub log output changed. `Subscribing to <channel>`, `Subscribed to <channel>`, `Unsubscribed from <channel>`, `Failed to subscribe to <channel>`, `Subscription to <channel> lost`, `Scheduling resubscribe for <channel>`, `Dropped malformed message on <channel>` and `Failed to replay backlog for <channel>` are now `pubsub.subscribing`, `pubsub.subscribed`, `pubsub.unsubscribed`, `pubsub.subscribe_failed`, `pubsub.subscription_lost`, `pubsub.resubscribe_scheduled`, `pubsub.message_dropped` and `pubsub.replay_failed`, with the channel in a `channel` attribute and errors in `error_type`/`error_message` instead of `error`. The first three log at debug instead of info. Update log queries and alerts that match the old text.
+
+### Bug Fixes
+
+* log pub/sub events under constant names with the channel as an attribute ([28771aa](https://github.com/HansKristoffer/orpc-fn/commit/28771aa423a6841bcb800e8da18b95bf9352759d))
+
 ## [0.3.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.2.1...v0.3.0) (2026-10-03)
 
 
