@@ -1,4 +1,4 @@
-import type { PubSubTransport } from './transport.js'
+import type { PubSubTransport, PubSubTransportStats } from './transport.js'
 
 /**
  * In-process transport for tests and single-process development. Delivery is
@@ -7,6 +7,7 @@ import type { PubSubTransport } from './transport.js'
 export function memoryTransport(): PubSubTransport & {
 	/** Active listeners per channel, for assertions. */
 	listenerCount(channel: string): number
+	stats(): PubSubTransportStats
 } {
 	const listeners = new Map<string, Set<(payload: string) => void>>()
 	const backlogs = new Map<string, { items: string[]; expiresAt: number }>()
@@ -49,6 +50,14 @@ export function memoryTransport(): PubSubTransport & {
 				if (set.size === 0) listeners.delete(channel)
 			}
 		},
-		listenerCount: (channel) => listeners.get(channel)?.size ?? 0
+		listenerCount: (channel) => listeners.get(channel)?.size ?? 0,
+		stats: () => ({
+			channels: listeners.size,
+			listeners: [...listeners.values()].reduce(
+				(sum, set) => sum + set.size,
+				0
+			),
+			subscriberConnected: true
+		})
 	}
 }

@@ -1,5 +1,9 @@
 import { errorMessageOf } from '../otel.js'
-import { backlogKey, type PubSubTransport } from './transport.js'
+import {
+	backlogKey,
+	type PubSubTransport,
+	type PubSubTransportStats
+} from './transport.js'
 
 export type RedisSend = (command: string, args: string[]) => Promise<unknown>
 
@@ -77,6 +81,8 @@ export type SubscriberConnection = {
 	resubscribe?(channel: string): Promise<unknown>
 	/** Stop delivering and release the connection (if the driver created it). */
 	close(): void | Promise<void>
+	/** The driver reports the connection open; omitted means open until lost. */
+	connected?(): boolean
 }
 
 /** Callbacks for one connection; they do nothing once it is replaced. */
@@ -115,7 +121,10 @@ export function createRedisTransport(driver: {
 	connectSubscriber: (
 		handlers: SubscriberHandlers
 	) => Promise<SubscriberConnection>
-}): PubSubTransport & { close(): Promise<void> } {
+}): PubSubTransport & {
+	close(): Promise<void>
+	stats(): PubSubTransportStats
+} {
 	const publishScript = createLuaScript(driver.send, PUBLISH_LUA)
 	const channels = new Map<string, ChannelState>()
 	// An UNSUBSCRIBE still in flight would cancel a SUBSCRIBE sent after it.
@@ -124,6 +133,8 @@ export function createRedisTransport(driver: {
 		connection: Promise<SubscriberConnection>
 		retire: () => Promise<void>
 	} | null = null
+	// The open connection of the current generation, once it resolves.
+	let open: SubscriberConnection | null = null
 
 	const connect = () => {
 		let retired = false
@@ -131,7 +142,10 @@ export function createRedisTransport(driver: {
 		const retire = (error?: Error) => {
 			if (retired) return closing ?? Promise.resolve()
 			retired = true
-			if (current?.connection === connection) current = null
+			if (current?.connection === connection) {
+				current = null
+				open = null
+			}
 			closing = connection.then((open) => open.close()).catch(() => {})
 			if (!error) return closing
 			const lost = [...channels.values()].flatMap((state) => [...state.entries])
@@ -182,9 +196,14 @@ export function createRedisTransport(driver: {
 			onLost: (error) => retire(error)
 		}
 		const connection = driver.connectSubscriber(handlers)
-		connection.catch(() => {
-			if (current?.connection === connection) current = null
-		})
+		connection.then(
+			(resolved) => {
+				if (!retired) open = resolved
+			},
+			() => {
+				if (current?.connection === connection) current = null
+			}
+		)
 		current = { connection, retire: () => retire() }
 		return connection
 	}
@@ -268,6 +287,14 @@ export function createRedisTransport(driver: {
 				await done
 			}
 		},
+		stats: () => ({
+			channels: channels.size,
+			listeners: [...channels.values()].reduce(
+				(sum, state) => sum + state.entries.size,
+				0
+			),
+			subscriberConnected: open ? (open.connected?.() ?? true) : false
+		}),
 		async close() {
 			const closing = current?.retire()
 			channels.clear()

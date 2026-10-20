@@ -14,9 +14,12 @@ import {
 	isExpectedClientError
 } from 'orpc-fn'
 import {
+	defineScopedChangeBus,
 	type FnLivePatch,
 	fnLivePatch,
+	invalidationStream,
 	type PubSubTransport,
+	type PubSubTransportStats,
 	streamLiveSnapshots
 } from 'orpc-fn/live'
 import { createMastraTool } from 'orpc-fn/mastra'
@@ -232,6 +235,58 @@ createPubSub({
 	authFn: ({ ctx }) => ctx.user.id.length > 0
 })
 
+// Change buses partition one scope rule across many buses.
+const defineChangeBus = defineScopedChangeBus(createPubSub, {
+	subscribe: (context) => context.user?.id ?? 'anonymous',
+	publish: (event: { tenantId: string }) => event.tenantId
+})
+const tenantChanges = defineChangeBus({
+	name: 'tenantChanges',
+	prefix: 'tenant',
+	inputSchema: z.object({}),
+	eventSchema: z.object({ tenantId: z.string(), kind: z.enum(['a', 'b']) })
+})
+tenantChanges.publish({ tenantId: 't', kind: 'a' })
+// @ts-expect-error kind is required
+tenantChanges.publish({ tenantId: 't' })
+defineChangeBus({
+	name: 'unscopedChanges',
+	prefix: 'unscoped',
+	inputSchema: z.object({}),
+	// @ts-expect-error the scope reads tenantId from every event
+	eventSchema: z.object({ kind: z.string() })
+})
+
+// One multiplexed stream of `{ domain }` events over several buses.
+const changes = fn({
+	name: 'changes',
+	stream: true,
+	input: z.object({}),
+	handler: ({ context, signal }) =>
+		invalidationStream({
+			context,
+			signal,
+			sources: { tenant: tenantChanges.subscribe, room: events.subscribe },
+			events: {
+				tenant: (event) =>
+					event.kind === 'a' ? { kind: event.kind } : undefined
+			}
+		})
+})
+type ChangeEvent =
+	InferRouterOutputs<{ c: typeof changes }>['c'] extends AsyncIterable<infer E>
+		? E
+		: never
+export type ChangeEvents = [
+	Assert<Equal<ChangeEvent['domain'], 'tenant' | 'room'>>,
+	Assert<
+		Equal<
+			Extract<ChangeEvent, { domain: 'tenant' }>,
+			{ domain: 'tenant' } & { kind?: 'a' }
+		>
+	>
+]
+
 const list = fnLive({
 	name: 'list',
 	input: z.object({ org: z.string() }),
@@ -299,6 +354,9 @@ const transports: PubSubTransport[] = [
 	ioredisTransport(ioClient)
 ]
 void transports
+const stats: PubSubTransportStats = memoryTransport().stats()
+const redisStats: PubSubTransportStats = bunRedisTransport(bunClient).stats()
+void [stats, redisStats]
 
 // ── Adapters ────────────────────────────────────────────────────────────────
 const tool = createMastraTool(inOut)

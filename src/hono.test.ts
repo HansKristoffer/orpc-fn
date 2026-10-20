@@ -3,7 +3,12 @@ import { ORPCError } from '@orpc/server'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { createRouter, fn, user } from '../tests/fixture.js'
-import { formatServerTiming, mountOrpc, normalizeExpoOrigin } from './hono.js'
+import {
+	formatServerTiming,
+	markRequestArrival,
+	mountOrpc,
+	normalizeExpoOrigin
+} from './hono.js'
 import { hasTag } from './mcp.js'
 
 describe('normalizeExpoOrigin (ported from orpc-context-headers.test.ts)', () => {
@@ -110,6 +115,13 @@ describe('mountOrpc', () => {
 		expect(response.headers.get('Access-Control-Expose-Headers')).toContain(
 			'Server-Timing'
 		)
+	})
+
+	test('a request marked on arrival reports its queue time', async () => {
+		const request = new Request('http://localhost/api/echo?text=hi')
+		markRequestArrival(request)
+		const response = await createApp().fetch(request)
+		expect(response.headers.get('Server-Timing')).toMatch(/, queue;dur=[\d.]+/)
 	})
 
 	test('serves RPC calls', async () => {

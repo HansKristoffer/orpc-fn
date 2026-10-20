@@ -74,6 +74,8 @@ export function ioredisTransport(
 					ours.delete(channel)
 					return subscriber.unsubscribe(channel)
 				},
+				connected: () =>
+					subscriber.status === undefined || subscriber.status === 'ready',
 				close() {
 					// Detach first: a given subscriber outlives this transport's use.
 					subscriber.off('ready', onReady)

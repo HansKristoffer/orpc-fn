@@ -110,4 +110,4 @@ These limits are deliberate; changing one needs a consumer that requires it.
 
 ## What waits for a consumer
 
-These stay in the app: caching policy, mutation retries, database transactions, rate limits, permissions, feature flags and jobs. These are reasonable additions but wait for a consumer that needs them: a typed `snapshot`/`patch`/`resync` stream envelope, outbox hooks, transport capability reporting, Redis Cluster support, disposal of scoped extras, and React or Vue live composables.
+These stay in the app: caching policy, mutation retries, database transactions, rate limits, permissions, feature flags and jobs. These are reasonable additions but wait for a consumer that needs them: a typed `snapshot`/`patch`/`resync` stream envelope, outbox hooks, Redis Cluster support, disposal of scoped extras, and React or Vue live composables.

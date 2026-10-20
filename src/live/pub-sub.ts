@@ -84,6 +84,11 @@ export type PublisherConfig = {
 	 * channel means no duplicate work.
 	 */
 	mirrorChannel?: string
+	/**
+	 * Log publish failures (validation or broker) instead of throwing them, so
+	 * a publish after a committed write cannot fail the request. No retry.
+	 */
+	safePublish?: boolean
 }
 
 /** Per-definition overrides of the factory queue bounds. */
@@ -612,10 +617,25 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 				}
 			})
 
+		const guarded = async (
+			operation: 'publish' | 'publishMany',
+			items: readonly unknown[]
+		) => {
+			if (!config.safePublish) return send(operation, items)
+			try {
+				await send(operation, items)
+			} catch (error) {
+				logger.error('pubsub.publish_failed', {
+					name,
+					...errorAttributes(error)
+				})
+			}
+		}
+
 		return {
-			publish: (data: unknown) => send('publish', [data]),
+			publish: (data: unknown) => guarded('publish', [data]),
 			publishMany: async (items: readonly unknown[]) => {
-				if (items.length > 0) await send('publishMany', items)
+				if (items.length > 0) await guarded('publishMany', items)
 			}
 		}
 	}
@@ -1205,6 +1225,7 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			backlogSize: _backlogSize,
 			backlogTtl: _backlogTtl,
 			mirrorChannel: _mirrorChannel,
+			safePublish: _safePublish,
 			maxQueueSize: _maxQueueSize,
 			maxIngressSize: _maxIngressSize,
 			maxReplaySize: _maxReplaySize,

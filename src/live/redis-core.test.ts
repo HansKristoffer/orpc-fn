@@ -118,6 +118,34 @@ describe('Redis connection generations', () => {
 	})
 })
 
+test('stats count channels and listeners and follow the connection', async () => {
+	const { transport, connections } = fakeDriver()
+	expect(transport.stats()).toEqual({
+		channels: 0,
+		listeners: 0,
+		subscriberConnected: false
+	})
+
+	const stopFirst = await transport.subscribe('a', () => {})
+	await transport.subscribe('a', () => {})
+	await transport.subscribe('b', () => {})
+	expect(transport.stats()).toEqual({
+		channels: 2,
+		listeners: 3,
+		subscriberConnected: true
+	})
+
+	await stopFirst()
+	expect(transport.stats().listeners).toBe(2)
+
+	connections[0]!.handlers.onLost(new Error('gone'))
+	expect(transport.stats()).toEqual({
+		channels: 0,
+		listeners: 0,
+		subscriberConnected: false
+	})
+})
+
 describe('ioredis with a given subscriber', () => {
 	test('reconnects do not stack message listeners', async () => {
 		const subscriber = Object.assign(new EventEmitter(), {
