@@ -77,7 +77,7 @@ export const {
 	},
 	default: 'protected',
 	tags: ['internal', 'external', 'mcp-support', 'mcp-readonly'],
-	meta: {} as { readOnly?: boolean; automationSafe?: boolean },
+	meta: {} as { readOnly?: boolean; automationSafe?: boolean; cli?: boolean },
 	extras: ({ context }) => ({
 		db: { query: (sql: string) => sql },
 		t: context.user

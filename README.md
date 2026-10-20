@@ -241,6 +241,32 @@ The adapter installs the SDK list/call handlers on a low-level `Server` (also ac
 
 Sanitized tool-name collisions between distinct procedures throw; identical aliases are deduplicated. Override `name` to resolve deliberate collisions. Tool names are the sanitized `fn` names (`user.me` becomes `user-me`). Input schemas carry the same JSON Schema as your OpenAPI docs (dates become `string`/`date-time`), and validation turns them back into `Date`s. Validation returns the raw arguments, and `call(procedure, args, { context })` parses those: transforms/refinements must be pure: SDK validation and procedure execution may run them more than once, always on raw input. `readOnlyHint` defaults to GET routes; pass `readOnly` to change it. `hasTag(tag)` also works as an oRPC `OpenAPIHandler` filter.
 
+## `orpc-fn/cli`
+
+Optional peer: `hanzio` ^3.1.0 (`hanzio/cli`).
+
+```ts
+import { defineCli } from 'hanzio/cli'
+import { procedureCommands } from 'orpc-fn/cli'
+
+const updateDeal = fn({
+  name: 'deal.update',
+  summary: 'Move a deal to another stage', // the command's help
+  meta: { cli: true },
+  input: z.object({ id: z.string().meta({ positional: true }), stage: z.string() }),
+  handler: async ({ input, context }) => { /* ... */ }
+})
+
+await defineCli({
+  name: 'app',
+  globals: z.object({ as: z.string().optional() }),
+  context: async ({ as }) => ({ user: as ? await loadUser(as) : undefined }),
+  commands: procedureCommands(router)
+}).run() // app deal update d_1 --stage won --as ada@example.com
+```
+
+`procedureCommands(router)` turns the routes declared with `meta: { cli: true }` into commands nested like the router, kebab-cased (`dealRoom.update` is `deal-room update`); add `cli?: boolean` to your meta type, or select routes with `filter`. Flags and positionals come from the route's `z.object()` input. A command calls the procedure through oRPC with the CLI's context, so middleware, guards and tracing run as over HTTP; `context: (cliContext, meta) => ...` maps that context per procedure and can refuse with a `CliError`. A 4xx `ORPCError` prints as `CODE: message`; anything else keeps its stack. Streams and non-object inputs throw when the commands are built. The procedure parses the already-validated flags again, so transforms must accept their own output.
+
 ## `orpc-fn/hono`
 
 Optional peers: `hono`, `@orpc/openapi`, `@orpc/zod`, `@orpc/json-schema`.
