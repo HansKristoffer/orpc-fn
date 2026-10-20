@@ -1,6 +1,7 @@
 import { type ClientContext, ORPCError, type ORPCErrorCode } from '@orpc/client'
 import { RPCLink, type RPCLinkOptions } from '@orpc/client/fetch'
 import { BatchLinkPlugin } from '@orpc/client/plugins'
+import { StandardRPCJsonSerializer } from '@orpc/client/standard'
 
 type BatchOptions<T extends ClientContext> = ConstructorParameters<
 	typeof BatchLinkPlugin<T>
@@ -86,4 +87,60 @@ export function hasOrpcErrorCode<TCode extends ORPCErrorCode>(
 	code: TCode
 ): error is ORPCError<TCode, unknown> {
 	return error instanceof ORPCError && error.code === code
+}
+
+/**
+ * The server's message, only when the backend marked it user-safe by putting
+ * a `userMessage` string on the error's `data`. Route error messages are
+ * developer text (English, internal model names), so they are not shown by
+ * default; they stay on the error for logs and error tracking.
+ *
+ * ```ts
+ * throw new ORPCError('BAD_REQUEST', {
+ *   message: 'Deal has no pipeline stage',       // logs, telemetry
+ *   data: { userMessage: 'Choose a stage first.' } // the user reads this
+ * })
+ * ```
+ */
+export function userSafeServerMessage(error: unknown): string | null {
+	if (!(error instanceof ORPCError)) return null
+	const data: unknown = error.data
+	if (typeof data !== 'object' || data === null) return null
+	const userMessage = (data as { userMessage?: unknown }).userMessage
+	return typeof userMessage === 'string' && userMessage.trim().length > 0
+		? userMessage
+		: null
+}
+
+/** User-facing text for a caught error: the opted-in server message, else your localized fallback. */
+export function userFacingErrorMessage(
+	error: unknown,
+	fallback: string
+): string {
+	return userSafeServerMessage(error) ?? fallback
+}
+
+const cacheSerializer = new StandardRPCJsonSerializer()
+
+/**
+ * `serialize`/`deserialize` for a TanStack Query persister. API payloads carry
+ * `Date`s (and maybe `Map`s, `Set`s, `BigInt`s) that plain JSON returns as
+ * strings; oRPC's own serializer round-trips them.
+ *
+ * ```ts
+ * createAsyncStoragePersister({ storage: AsyncStorage, ...queryCacheSerializer })
+ * ```
+ */
+export const queryCacheSerializer = {
+	serialize(value: unknown): string {
+		const [json, meta] = cacheSerializer.serialize(value)
+		return JSON.stringify({ json, meta })
+	},
+	deserialize<T>(text: string): T {
+		const { json, meta } = JSON.parse(text) as {
+			json: unknown
+			meta: Parameters<typeof cacheSerializer.deserialize>[1]
+		}
+		return cacheSerializer.deserialize(json, meta) as T
+	}
 }

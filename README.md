@@ -286,7 +286,10 @@ export const client: RouterClient<typeof router> = createORPCClient(link)
 export const orpc = createTanstackQueryUtils(client) // Vue Query or React Query
 
 if (hasOrpcErrorCode(error, 'NOT_FOUND')) { /* … */ }
+toast(userFacingErrorMessage(error, t('errors.generic'))) // server text only when it opts in
 ```
+
+Route error messages are developer text, so `userFacingErrorMessage` shows your localized fallback unless the server opted in with `new ORPCError('BAD_REQUEST', { message, data: { userMessage } })`. `queryCacheSerializer` is a `serialize`/`deserialize` pair for TanStack Query persisters that round-trips `Date`s and the other types oRPC sends.
 
 `createRpcLink` takes every `RPCLink` option. It also batches parallel calls into one request, matching `mountOrpc`'s server-side batching (`batch: { maxSize, exclude, groups }`, or `false` to turn it off). A batch is one request with one client context, so by default only calls without a client context are batched; pass `groups` to batch calls that share one. A streaming response cannot be batched, and the request doesn't say whether the response will stream, so pass `streamPaths` generated from the actual router with `createStreamManifest` (or `createStreamManifestAsync` for lazy routers). Serialize it to a frontend module; importing that data needs no server runtime. The `orpc-fn` CLI does that, resolving lazy routers, sorting paths and writing only on change:
 
@@ -316,7 +319,70 @@ const link = createBetterAuthExpoLink({
 })
 ```
 
-On native, calls go through `expo/fetch`, the only fetch that streams there. The bridge forwards the request body and the abort signal. Without the signal, cancelled subscriptions keep their sockets open, the device's HTTP pool runs out, and later requests hang. Cookies are sent in a header (`credentials: 'omit'`), together with `expo-origin` and `x-skip-oauth-proxy`, the same headers `@better-auth/expo` sends. On the server, `mountOrpc({ normalizeHeaders: normalizeExpoOrigin })` copies `expo-origin` to `origin`. The generic `createExpoLink` forwards upstream headers (including async/context-aware resolvers) and adds no provider-specific headers. `createBetterAuthExpoLink` supplies the cookie/origin preset above. On web, the link uses the platform fetch with cookies, or your explicit `webFetch` override. `createExpoFetch` is exported for a custom link.
+On native, calls go through `expo/fetch`, the only fetch that streams there. In Expo SDK 55, cancelling a stream makes `expo/fetch` close its body twice and throw `Invalid state: Controller is already closed`; patch `src/winter/fetch/FetchResponse.ts` so its `didComplete` and `didFailWithError` listeners return when `isControllerClosed` is already set (with `bun patch expo` or `patch-package`). The bridge forwards the request body and the abort signal. Without the signal, cancelled subscriptions keep their sockets open, the device's HTTP pool runs out, and later requests hang. Cookies are sent in a header (`credentials: 'omit'`), together with `expo-origin` and `x-skip-oauth-proxy`, the same headers `@better-auth/expo` sends. On the server, `mountOrpc({ normalizeHeaders: normalizeExpoOrigin })` copies `expo-origin` to `origin`. The generic `createExpoLink` forwards upstream headers (including async/context-aware resolvers) and adds no provider-specific headers. `createBetterAuthExpoLink` supplies the cookie/origin preset above. On web, the link uses the platform fetch with cookies, or your explicit `webFetch` override. `createExpoFetch` is exported for a custom link.
+
+## `orpc-fn/vue`
+
+Peers: `vue`, `@tanstack/vue-query`.
+
+```ts
+// main.ts
+app.use(VueQueryPlugin, { queryClient })
+provideOrpc(app, { client, utils: orpc })
+
+declare module 'orpc-fn/vue' {
+  interface Register { client: typeof client; utils: typeof orpc }
+}
+```
+
+```ts
+const { useQuery, useMutation, invalidate } = useApiClient()
+const orders = useQuery((o) => o.order.list.queryOptions({ input: { search: search.value } }))
+const save = useMutation((o) => o.order.update.mutationOptions({ onSuccess: () => invalidate((o) => o.order.key()) }))
+
+// The client half of `fnLive`: HTTP seeds the cache, the stream keeps it current.
+const order = useLiveQuery(
+  () => ({ id: props.id }),
+  (input, o) => o.order.get.queryOptions({ input }),
+  (input, o, opts) => o.order.get.subscribe.call(input, opts)
+)
+
+// Once, in the signed-in shell: one stream of `{ domain }` events invalidates list queries.
+useInvalidationStream((o, opts) => o.realtime.changes.call({}, opts), {
+  domains: { order: { debounceMs: 100, queryKeys: [orpc.order.key()] } },
+  logger
+})
+```
+
+`useOrpcSubscription` (also `useApiClient().useSubscription`) reconnects with jittered backoff and closes while the page is hidden (`respectVisibility: false` keeps it). `useLiveQuery` writes each stream event under the key it was opened for, so an event in flight from a previous input is dropped. Use `applyEvent` for patch streams, `select` for a cache shaped differently from the route output, and `mergeSeed` when the seed can resolve after stream events. Live queries carry `meta.live`, so invalidation streams skip them. `useSubscriptionInvalidates` treats a stream as a "something changed" ping, and `useQueryErrorMessage` is `userFacingErrorMessage` as a computed. A surface that talks to another API passes `orpc` to each composable instead of using `provideOrpc`.
+
+`orpc-fn/vue/testing` runs composables in a real app without a DOM: `withOrpcApp(setup, { utils })`, `createTestStream()` for a subscription the test drives (`await stream.push(event)` resolves once it was handled), and `createOrpcMock({ fn: mock })` for a deep stand-in of the utils.
+
+## `orpc-fn/react`
+
+Peers: `react`, `@tanstack/react-query`. Works on React Native: pausing follows TanStack's `focusManager`, so wire it to `AppState` once, as TanStack recommends:
+
+```ts
+focusManager.setEventListener((setFocused) => {
+  const subscription = AppState.addEventListener('change', (state) => setFocused(state === 'active'))
+  return () => subscription.remove()
+})
+```
+
+```tsx
+const { status } = useOrpcSubscription({ id }, client.order.watch, { onEvent: (order) => setOrder(order) })
+
+useInvalidationStream((opts) => client.realtime.changes({}, opts), {
+  enabled: signedIn,
+  domains: { order: { debounceMs: 500, queryKeys: [orpc.order.list.key()] } }
+})
+
+// Persist the cache per user: the buster drops someone else's saved cache, the hook clears memory.
+const owner = session ? `${session.user.id}:${session.activeOrganizationId ?? ''}` : null
+useQueryCacheOwner(owner)
+const persister = createAsyncStoragePersister({ storage: AsyncStorage, ...queryCacheSerializer })
+<PersistQueryClientProvider client={queryClient} persistOptions={{ persister, buster: owner ?? '' }} />
+```
 
 ## Docs
 

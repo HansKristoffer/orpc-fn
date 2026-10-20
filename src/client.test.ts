@@ -7,7 +7,9 @@ import { createRouter, fn, fnLive, transport } from '../tests/fixture.js'
 import {
 	createRpcLink,
 	hasOrpcErrorCode,
-	isSubscriptionPath
+	isSubscriptionPath,
+	queryCacheSerializer,
+	userFacingErrorMessage
 } from './client.js'
 import {
 	createExpoFetch,
@@ -273,4 +275,48 @@ test('generic Expo headers support async context and browser fetch injection', a
 	await generic.echo({ text: 'hi' }, { context: { token: 'secret' } })
 	expect(seen?.get('authorization')).toBe('Bearer secret')
 	expect(seen?.has('x-skip-oauth-proxy')).toBe(false)
+})
+
+describe('userFacingErrorMessage', () => {
+	test('uses the server message only when data.userMessage opts in', () => {
+		const fallback = 'Something went wrong'
+		expect(userFacingErrorMessage(new Error('boom'), fallback)).toBe(fallback)
+		expect(
+			userFacingErrorMessage(
+				new ORPCError('NOT_FOUND', { message: 'Work item not found' }),
+				fallback
+			)
+		).toBe(fallback)
+		expect(
+			userFacingErrorMessage(
+				new ORPCError('BAD_REQUEST', { data: { userMessage: '  ' } }),
+				fallback
+			)
+		).toBe(fallback)
+		expect(
+			userFacingErrorMessage(
+				new ORPCError('BAD_REQUEST', {
+					data: { userMessage: 'Choose a stage first.' }
+				}),
+				fallback
+			)
+		).toBe('Choose a stage first.')
+	})
+})
+
+describe('queryCacheSerializer', () => {
+	test('round-trips dates that plain JSON would turn into strings', () => {
+		const cache = {
+			clientState: {
+				queries: [
+					{ state: { data: { at: new Date(0), tags: new Set(['a']) } } }
+				]
+			}
+		}
+		const restored = queryCacheSerializer.deserialize<typeof cache>(
+			queryCacheSerializer.serialize(cache)
+		)
+		expect(restored).toEqual(cache)
+		expect(restored.clientState.queries[0]?.state.data.at).toBeInstanceOf(Date)
+	})
 })
