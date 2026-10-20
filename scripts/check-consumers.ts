@@ -111,6 +111,11 @@ try {
 	// Adapters and types with every optional peer installed.
 	await install([
 		...versions(optional),
+		// The client type tests build real query utils; same version as @orpc/client.
+		versions(['@orpc/client'])[0]?.replace(
+			'@orpc/client',
+			'@orpc/tanstack-query'
+		) ?? '',
 		'@types/node@22',
 		'@types/react@19',
 		`typescript@${process.env.TYPESCRIPT_VERSION || rootTypeScript}`

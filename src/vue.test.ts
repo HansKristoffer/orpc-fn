@@ -41,7 +41,7 @@ describe('useOrpcSubscription', () => {
 			() =>
 				useApiClient<typeof utils>().useSubscription(
 					{ from: 1 },
-					(input, o, opts) => o.counter.watch.call(input, opts)
+					(o) => o.counter.watch.call
 				),
 			{ utils }
 		)
@@ -59,13 +59,9 @@ describe('useOrpcSubscription', () => {
 	test('a hidden page closes the stream and a visible one reopens it', async () => {
 		const stream = createTestStream<number>()
 		const app = withOrpcApp(() =>
-			useOrpcSubscription(
-				undefined,
-				(_input, _o, opts) => stream.subscribe(opts),
-				{
-					orpc: {}
-				}
-			)
+			useOrpcSubscription(undefined, () => stream.subscribe, {
+				orpc: {}
+			})
 		)
 		const first = await stream.opened(1)
 		focusManager.setFocused(false)
@@ -81,13 +77,9 @@ describe('useOrpcSubscription', () => {
 		const stream = createTestStream<number>()
 		const input = ref('a')
 		const app = withOrpcApp(() =>
-			useOrpcSubscription(
-				input,
-				(value, _o, opts) => stream.subscribe(value, opts),
-				{
-					orpc: {}
-				}
-			)
+			useOrpcSubscription(input, () => stream.subscribe, {
+				orpc: {}
+			})
 		)
 		const first = await stream.opened(1)
 		input.value = 'b'
@@ -100,7 +92,7 @@ describe('useOrpcSubscription', () => {
 	test('immediate: false waits for an explicit connect', async () => {
 		const stream = createTestStream<number>()
 		const app = withOrpcApp(() =>
-			useOrpcSubscription(undefined, (_i, _o, opts) => stream.subscribe(opts), {
+			useOrpcSubscription(undefined, () => stream.subscribe, {
 				orpc: {},
 				immediate: false
 			})
@@ -120,7 +112,7 @@ describe('useLiveQuery', () => {
 				useLiveQuery(
 					{ id: '1' },
 					(input, o: typeof utils) => o.item.get.queryOptions({ input }),
-					(input, o, opts) => o.item.watch.call(input, opts)
+					(o) => o.item.watch.call
 				),
 			{ utils }
 		)
@@ -146,7 +138,7 @@ describe('useLiveQuery', () => {
 				useLiveQuery(
 					input,
 					(value, o: typeof utils) => o.item.get.queryOptions({ input: value }),
-					(value, o, opts) => o.item.watch.call(value, opts),
+					(o) => o.item.watch.call,
 					{ onEvent }
 				),
 			{ utils }
@@ -169,7 +161,7 @@ describe('useLiveQuery', () => {
 				useLiveQuery(
 					{ id: '1' },
 					(input, o: typeof utils) => o.item.get.queryOptions({ input }),
-					(input, o, opts) => o.item.watch.call(input, opts),
+					(o) => o.item.watch.call,
 					{ mergeSeed: (fetched, cached) => cached ?? fetched }
 				),
 			{ utils }
@@ -189,7 +181,7 @@ describe('useLiveQuery', () => {
 				useLiveQuery(
 					{ id: '1' },
 					(input, o: typeof utils) => o.item.get.queryOptions({ input }),
-					(input, o, opts) => o.item.watch.call(input, opts),
+					(o) => o.item.watch.call,
 					{
 						select: (item: Item) => [item.name],
 						applyEvent: (event: Item, previous: string[] | undefined) =>
@@ -210,7 +202,7 @@ describe('useInvalidationStream', () => {
 	test('invalidates the event domain and leaves live queries alone', async () => {
 		const stream = createTestStream<{ domain: 'order' }>()
 		const app = withOrpcApp(() =>
-			useInvalidationStream((_o, opts) => stream.subscribe(opts), {
+			useInvalidationStream(undefined, () => stream.subscribe, {
 				orpc: {},
 				domains: { order: { queryKeys: [['order']] } }
 			})

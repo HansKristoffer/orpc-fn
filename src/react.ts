@@ -1,11 +1,22 @@
-import { focusManager, useQueryClient } from '@tanstack/react-query'
+import {
+	focusManager,
+	hashKey,
+	keepPreviousData,
+	type QueryKey,
+	type UseQueryOptions,
+	type UseQueryResult,
+	useQuery,
+	useQueryClient
+} from '@tanstack/react-query'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import {
 	createInvalidationCoordinator,
+	createStreamScope,
 	createSubscriptionRunner,
 	type InvalidationStreamOptions,
 	type LiveConnectionStatus,
-	type SubscriptionRunner
+	type SubscriptionRunner,
+	seedQueryFn
 } from './realtime.js'
 
 export type { InvalidationDomain, LiveConnectionStatus } from './realtime.js'
@@ -25,7 +36,7 @@ export type UseOrpcSubscriptionOptions<TInput, TEvent> = {
 	) => void
 	/** Every successful connect; `connectionId > 1` is a reconnect. */
 	onConnect?: (connectionId: number) => void
-	onError?: (error: Error) => void
+	onError?: ((error: Error) => void) | undefined
 	onClose?: () => void
 	/**
 	 * Close the stream while the app is not focused (default: true). Focus is
@@ -95,6 +106,190 @@ export function useOrpcSubscription<TInput, TEvent>(
 	return { status }
 }
 
+type ApplyEvent<TStreamEvent, TData> = (
+	event: TStreamEvent,
+	previous: TData | undefined
+) => TData | undefined
+
+type LiveQueryOptions<
+	TInput,
+	TRouteData,
+	TStreamEvent,
+	TData,
+	TSubscriptionInput
+> = {
+	/** Run the query and its stream (default: true). */
+	enabled?: boolean | undefined
+	/** Input for the stream when it differs from the query's. */
+	subscriptionInput?: TSubscriptionInput | undefined
+	/**
+	 * Convert the route output once at fetch time into a differently typed
+	 * cache; `applyEvent` then reduces stream events into that cache.
+	 */
+	select?: (data: TRouteData) => TData
+	/** The raw route output of a seed, before `select` drops fields. */
+	onSeed?: (data: TRouteData, input: TInput) => void
+	/**
+	 * Fold a stream event into the cached data. Required when the stream sends
+	 * something other than the cached type (an `fnLive` patch route, or a
+	 * `select`ed cache). Return `undefined` to skip the write.
+	 */
+	applyEvent?: ApplyEvent<TStreamEvent, NoInfer<TData>>
+	onEvent?: (event: TStreamEvent, meta: { connectionId: number }) => void
+	onError?: ((error: Error) => void) | undefined
+	/**
+	 * Reconcile a fetched seed with what the stream already wrote. The HTTP
+	 * request can resolve last, so a plain overwrite would drop events that
+	 * arrived while it was in flight. Default: take the fetched value.
+	 */
+	mergeSeed?: (
+		fetched: NoInfer<TData>,
+		cached: NoInfer<TData> | undefined
+	) => NoInfer<TData>
+	/** Show the previous key's data while a new key loads (default: true). */
+	keepPreviousData?: boolean
+	/** Close the stream while the app is not focused (default: true). */
+	pauseWhenUnfocused?: boolean | undefined
+}
+
+type LiveQueryOptionsFn<TInput, TData, TError> = (
+	input: TInput
+) => UseQueryOptions<TData, TError, TData, QueryKey>
+
+type LiveQueryResult<TData, TError> = UseQueryResult<TData, TError> & {
+	liveStatus: LiveConnectionStatus
+}
+
+/**
+ * The client half of `fnLive`: the HTTP query seeds the cache, and the live
+ * route's stream writes each snapshot into the same cache entry. Marked
+ * `meta.live`, so invalidation streams leave it alone.
+ *
+ * ```tsx
+ * const order = useLiveQuery({ id }, (input) => orpc.order.get.queryOptions({ input }), client.order.watch)
+ * ```
+ *
+ * One signature, not overloads: TypeScript fixes an untyped callback's
+ * parameters at the first overload it tries, which made valid calls fail.
+ */
+export function useLiveQuery<
+	TInput,
+	TRouteData,
+	TStreamEvent,
+	TData = TRouteData,
+	TError = Error,
+	TSubscriptionInput = TInput
+>(
+	input: TInput,
+	queryOptionsFn: LiveQueryOptionsFn<TInput, TRouteData, TError>,
+	subscribe: SubscribeFn<NoInfer<TSubscriptionInput>, TStreamEvent>,
+	...options: [TStreamEvent] extends [TData]
+		? [
+				options?: LiveQueryOptions<
+					TInput,
+					TRouteData,
+					TStreamEvent,
+					TData,
+					TSubscriptionInput
+				>
+			]
+		: [
+				options: LiveQueryOptions<
+					TInput,
+					TRouteData,
+					TStreamEvent,
+					TData,
+					TSubscriptionInput
+				> & { applyEvent: ApplyEvent<TStreamEvent, NoInfer<TData>> }
+			]
+): LiveQueryResult<TData, TError>
+export function useLiveQuery<
+	TInput,
+	TRouteData,
+	TStreamEvent,
+	TData,
+	TError,
+	TSubscriptionInput
+>(
+	input: TInput,
+	queryOptionsFn: LiveQueryOptionsFn<TInput, TRouteData, TError>,
+	subscribe: SubscribeFn<TSubscriptionInput, TStreamEvent>,
+	options: LiveQueryOptions<
+		TInput,
+		TRouteData,
+		TStreamEvent,
+		TData,
+		TSubscriptionInput
+	> = {}
+): LiveQueryResult<TData, TError> {
+	const queryClient = useQueryClient()
+	const focused = useIsFocused()
+	const [scope] = useState(createStreamScope)
+
+	// oRPC query options are plain objects; `queryFn` is read through one shape.
+	const raw = queryOptionsFn(input) as unknown as {
+		queryKey: QueryKey
+		queryFn?: (context: unknown) => Promise<TRouteData>
+		enabled?: UseQueryOptions['enabled']
+		meta?: Record<string, unknown>
+	} & Record<string, unknown>
+	const keyHash = hashKey(raw.queryKey)
+	const latest = useRef({ raw, keyHash, options })
+	latest.current = { raw, keyHash, options }
+
+	const { status } = useOrpcSubscription(
+		(options.subscriptionInput === undefined
+			? input
+			: options.subscriptionInput) as TSubscriptionInput,
+		subscribe,
+		{
+			enabled: options.enabled,
+			pauseWhenUnfocused: options.pauseWhenUnfocused,
+			onError: options.onError,
+			onConnect: (connectionId) =>
+				scope.open(connectionId, latest.current.keyHash),
+			onEvent: (event, { connectionId }) => {
+				const current = latest.current
+				// The consumer callback must not see an event for a scope no longer shown.
+				if (!scope.owns(connectionId, current.keyHash)) return
+				// Without `applyEvent` the stream event is the cache type (the first overload).
+				const applyEvent =
+					current.options.applyEvent ??
+					((streamEvent: TStreamEvent) => streamEvent as unknown as TData)
+				const key = current.raw.queryKey
+				const next = applyEvent(event, queryClient.getQueryData<TData>(key))
+				if (next !== undefined) queryClient.setQueryData(key, next)
+				current.options.onEvent?.(event, { connectionId })
+			}
+		}
+	)
+
+	const wrapsSeed = options.select || options.mergeSeed
+	const queryFn =
+		raw.queryFn && wrapsSeed
+			? seedQueryFn(raw.queryFn, {
+					input,
+					readCache: () => queryClient.getQueryData<TData>(raw.queryKey),
+					select: options.select,
+					onSeed: options.onSeed,
+					mergeSeed: options.mergeSeed
+				})
+			: raw.queryFn
+	const runs = options.enabled !== false && focused
+	const query = useQuery({
+		...raw,
+		...(queryFn ? { queryFn } : {}),
+		enabled: runs ? (raw.enabled ?? true) : false,
+		...(options.keepPreviousData === false
+			? {}
+			: { placeholderData: keepPreviousData }),
+		staleTime: Number.POSITIVE_INFINITY,
+		meta: { ...raw.meta, live: true }
+	} as UseQueryOptions<TData, TError, TData, QueryKey>)
+
+	return Object.assign(query, { liveStatus: status })
+}
+
 /**
  * One app-wide stream of `{ domain }` change events that keeps list and count
  * queries fresh: each event invalidates its domain's query keys (debounced),
@@ -102,19 +297,21 @@ export function useOrpcSubscription<TInput, TEvent>(
  * events lost while it was down. Mount once, in the signed-in shell.
  *
  * ```ts
- * useInvalidationStream((opts) => client.realtime.changes({}, opts), {
+ * useInvalidationStream({}, client.realtime.changes, {
  *   enabled: signedIn,
  *   domains: { order: { debounceMs: 100, queryKeys: [orpc.order.key()] } }
  * })
  * ```
  */
-export function useInvalidationStream<TEvent extends { domain: string }>(
-	subscribe: (options: {
-		signal: AbortSignal
-	}) => Promise<AsyncIterable<TEvent>>,
+export function useInvalidationStream<
+	TInput,
+	TEvent extends { domain: string }
+>(
+	input: TInput,
+	subscribe: SubscribeFn<TInput, TEvent>,
 	options: InvalidationStreamOptions<TEvent> &
 		Pick<
-			UseOrpcSubscriptionOptions<undefined, TEvent>,
+			UseOrpcSubscriptionOptions<TInput, TEvent>,
 			'enabled' | 'pauseWhenUnfocused'
 		>
 ): { status: LiveConnectionStatus } {
@@ -130,18 +327,14 @@ export function useInvalidationStream<TEvent extends { domain: string }>(
 	)
 	useEffect(() => coordinator.dispose, [coordinator])
 
-	return useOrpcSubscription<undefined, TEvent>(
-		undefined,
-		(_input, opts) => subscribe(opts),
-		{
-			enabled: options.enabled,
-			pauseWhenUnfocused: options.pauseWhenUnfocused,
-			onEvent: coordinator.event,
-			onConnect: coordinator.connect,
-			onError: coordinator.lost,
-			onClose: coordinator.lost
-		}
-	)
+	return useOrpcSubscription<TInput, TEvent>(input, subscribe, {
+		enabled: options.enabled,
+		pauseWhenUnfocused: options.pauseWhenUnfocused,
+		onEvent: coordinator.event,
+		onConnect: coordinator.connect,
+		onError: coordinator.lost,
+		onClose: coordinator.lost
+	})
 }
 
 /**

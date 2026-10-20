@@ -248,7 +248,11 @@ export type InvalidationDomain = {
 export type InvalidationStreamOptions<TEvent extends { domain: string }> = {
 	/** Query keys to invalidate per event `domain`. Unmapped domains are ignored. */
 	domains: { [K in TEvent['domain']]?: InvalidationDomain }
-	/** Passed to `invalidateQueries`. Default: TanStack's `'active'`. */
+	/**
+	 * Passed to `invalidateQueries`. Default: TanStack's `'active'`, which marks
+	 * inactive queries stale so they refetch on their next use. `'all'` also
+	 * refetches every cached query of the domain now, on each event.
+	 */
 	refetchType?: 'active' | 'inactive' | 'all' | 'none'
 	/** Every event, after its domain is invalidated (alerts, chimes). */
 	onEvent?: (event: TEvent) => void
@@ -360,5 +364,53 @@ export function createInvalidationCoordinator<
 			timers.clear()
 			catchUpPending = false
 		}
+	}
+}
+
+/**
+ * Which connection and query key the open live stream belongs to. An event
+ * counts only while both still match: the input changes synchronously but the
+ * stream is torn down asynchronously, so a frame in flight from the previous
+ * subscription would otherwise land in the new key (and, with
+ * `staleTime: Infinity`, stay there).
+ */
+export function createStreamScope() {
+	let openConnectionId: number | null = null
+	let openKeyHash: string | null = null
+	return {
+		open(connectionId: number, keyHash: string) {
+			openConnectionId = connectionId
+			openKeyHash = keyHash
+		},
+		owns: (connectionId: number, keyHash: string) =>
+			connectionId === openConnectionId && keyHash === openKeyHash
+	}
+}
+
+/**
+ * Wrap a live query's HTTP `queryFn`: report the raw seed, convert it with
+ * `select`, and reconcile it with what the stream already wrote. The cache is
+ * read after the request resolves, because stream events can arrive while it
+ * is in flight.
+ */
+export function seedQueryFn<TRouteData, TData, TInput>(
+	queryFn: (context: unknown) => Promise<TRouteData>,
+	options: {
+		input: TInput
+		readCache: () => TData | undefined
+		select?: ((data: TRouteData) => TData) | undefined
+		onSeed?: ((data: TRouteData, input: TInput) => void) | undefined
+		mergeSeed?:
+			| ((fetched: TData, cached: TData | undefined) => TData)
+			| undefined
+	}
+) {
+	const { select, onSeed, mergeSeed } = options
+	return async (context: unknown): Promise<TData> => {
+		const fetched = await queryFn(context)
+		onSeed?.(fetched, options.input)
+		// Without `select` the route output is the cache type.
+		const data = select ? select(fetched) : (fetched as unknown as TData)
+		return mergeSeed ? mergeSeed(data, options.readCache()) : data
 	}
 }

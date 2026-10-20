@@ -344,17 +344,17 @@ const save = useMutation((o) => o.order.update.mutationOptions({ onSuccess: () =
 const order = useLiveQuery(
   () => ({ id: props.id }),
   (input, o) => o.order.get.queryOptions({ input }),
-  (input, o, opts) => o.order.get.subscribe.call(input, opts)
+  (o) => o.order.watch.call // the composable passes the input and an abort signal
 )
 
 // Once, in the signed-in shell: one stream of `{ domain }` events invalidates list queries.
-useInvalidationStream((o, opts) => o.realtime.changes.call({}, opts), {
+useInvalidationStream({}, (o) => o.realtime.changes.call, {
   domains: { order: { debounceMs: 100, queryKeys: [orpc.order.key()] } },
   logger
 })
 ```
 
-`useOrpcSubscription` (also `useApiClient().useSubscription`) reconnects with jittered backoff and closes while the page is hidden (`respectVisibility: false` keeps it). `useLiveQuery` writes each stream event under the key it was opened for, so an event in flight from a previous input is dropped. Use `applyEvent` for patch streams, `select` for a cache shaped differently from the route output, and `mergeSeed` when the seed can resolve after stream events. Live queries carry `meta.live`, so invalidation streams skip them. `useSubscriptionInvalidates` treats a stream as a "something changed" ping, and `useQueryErrorMessage` is `userFacingErrorMessage` as a computed. A surface that talks to another API passes `orpc` to each composable instead of using `provideOrpc`.
+`useOrpcSubscription` (also `useApiClient().useSubscription`) reconnects with jittered backoff and closes while the page is hidden (`respectVisibility: false` keeps it). `useLiveQuery` writes each stream event under the key it was opened for, so an event in flight from a previous input is dropped. A stream whose events are not the cached type (an `fnLive` patch route, or a `select`ed cache) does not compile without `applyEvent`, and the stream's input must match the query's unless you pass `subscriptionInput`. Use `mergeSeed` when the seed can resolve after stream events. For large live payloads such as chat timelines, pass vue-query's `shallow: true` in the query options so the data is not made deeply reactive; mutate it only through `setQueryData`. Live queries carry `meta.live`, so invalidation streams skip them. Leave `refetchType` at TanStack's `'active'`: `'all'` refetches every cached query of a domain on each event, including screens nobody has open, which refetch on their next visit anyway. `useSubscriptionInvalidates` treats a stream as a "something changed" ping, and `useQueryErrorMessage` is `userFacingErrorMessage` as a computed. A surface that talks to another API passes `orpc` to each composable instead of using `provideOrpc`.
 
 `orpc-fn/vue/testing` runs composables in a real app without a DOM: `withOrpcApp(setup, { utils })`, `createTestStream()` for a subscription the test drives (`await stream.push(event)` resolves once it was handled), and `createOrpcMock({ fn: mock })` for a deep stand-in of the utils.
 
@@ -372,7 +372,11 @@ focusManager.setEventListener((setFocused) => {
 ```tsx
 const { status } = useOrpcSubscription({ id }, client.order.watch, { onEvent: (order) => setOrder(order) })
 
-useInvalidationStream((opts) => client.realtime.changes({}, opts), {
+// Same contract as the Vue `useLiveQuery`, with the client procedure passed as is.
+// For a large cache your `applyEvent` keeps immutable, pass `structuralSharing: false` in the query options.
+const order = useLiveQuery({ id }, (input) => orpc.order.get.queryOptions({ input }), client.order.watch)
+
+useInvalidationStream({}, client.realtime.changes, {
   enabled: signedIn,
   domains: { order: { debounceMs: 500, queryKeys: [orpc.order.list.key()] } }
 })

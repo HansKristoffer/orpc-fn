@@ -28,9 +28,11 @@ import {
 import { userFacingErrorMessage } from './client.js'
 import {
 	createInvalidationCoordinator,
+	createStreamScope,
 	createSubscriptionRunner,
 	type InvalidationStreamOptions,
-	type LiveConnectionStatus
+	type LiveConnectionStatus,
+	seedQueryFn
 } from './realtime.js'
 
 export type { InvalidationDomain, LiveConnectionStatus } from './realtime.js'
@@ -121,10 +123,15 @@ function resolveQueryEnabled(enabled: unknown): boolean {
 	return Boolean(toValue(enabled))
 }
 
+/**
+ * Picks the stream to open from the utils. A procedure's `call` fits as is:
+ * `(o) => o.order.watch.call`. The composable passes the input and an abort signal.
+ */
 export type OrpcSubscribeFn<TInput, TEvent, TOrpc = RegisteredOrpcUtils> = (
+	orpc: TOrpc
+) => (
 	input: TInput,
-	orpc: TOrpc,
-	opts: { signal: AbortSignal }
+	options: { signal: AbortSignal }
 ) => Promise<AsyncIterable<TEvent>>
 
 export interface UseSubscriptionOptions<TEvent, TOrpc = RegisteredOrpcUtils> {
@@ -202,7 +209,7 @@ export function useOrpcSubscription<
 	const error = ref<Error | null>(null)
 
 	const runner = createSubscriptionRunner<TEvent>({
-		open: (signal) => subscribeFn(toValue(input), getUtils(), { signal }),
+		open: (signal) => subscribeFn(getUtils())(toValue(input), { signal }),
 		canConnect: () => isStreamAllowed.value,
 		shouldReconnect: () => autoReconnectOnClose && shouldAutoConnect.value,
 		onStatus: (next) => {
@@ -430,20 +437,40 @@ export function useApiClient<TOrpc = RegisteredOrpcUtils>(clientOptions?: {
 	}
 }
 
-type LiveQueryOptions<TData, TOrpc, TStreamEvent, TSubscriptionInput> = {
+type ApplyEvent<TStreamEvent, TData> = (
+	event: TStreamEvent,
+	previous: TData | undefined
+) => TData | undefined
+
+type LiveQueryOptions<
+	TInput,
+	TRouteData,
+	TStreamEvent,
+	TData,
+	TOrpc,
+	TSubscriptionInput
+> = {
 	immediate?: MaybeRefOrGetter<boolean>
 	orpc?: MaybeRefOrGetter<TOrpc>
 	/** Input for the stream when it differs from the query's. */
 	subscriptionInput?: MaybeRefOrGetter<TSubscriptionInput>
 	/**
-	 * Fold a stream event into the cached data when the stream sends something
-	 * other than full snapshots (patches). Return `undefined` to skip the write
-	 * (a patch before any snapshot). Default: replace the cache with the event.
+	 * Convert the route output once at fetch time into a differently typed
+	 * cache; `applyEvent` then reduces stream events into that cache.
 	 */
-	applyEvent?: (
-		event: TStreamEvent,
-		previous: TData | undefined
-	) => TData | undefined
+	select?: (data: TRouteData) => TData
+	/**
+	 * The raw route output of a seed before `select` drops fields. `input` is
+	 * what the seed was fetched for, so a seed that resolves after the input
+	 * moved on can be told apart.
+	 */
+	onSeed?: (data: TRouteData, input: TInput) => void
+	/**
+	 * Fold a stream event into the cached data. Required when the stream sends
+	 * something other than the cached type (an `fnLive` patch route, or a
+	 * `select`ed cache). Return `undefined` to skip the write.
+	 */
+	applyEvent?: ApplyEvent<TStreamEvent, NoInfer<TData>>
 	onEvent?: (event: TStreamEvent, meta?: { connectionId: number }) => void
 	onError?: (error: Error) => void
 	/**
@@ -451,7 +478,10 @@ type LiveQueryOptions<TData, TOrpc, TStreamEvent, TSubscriptionInput> = {
 	 * request can resolve last, so a plain overwrite would drop events that
 	 * arrived while it was in flight. Default: take the fetched value.
 	 */
-	mergeSeed?: (fetched: TData, cached: TData | undefined) => TData
+	mergeSeed?: (
+		fetched: NoInfer<TData>,
+		cached: NoInfer<TData> | undefined
+	) => NoInfer<TData>
 	/**
 	 * Show the previous key's data while a new key loads (default: true). Pass
 	 * false when the key says which entity is shown, not just how it is
@@ -468,38 +498,19 @@ type LiveQueryReturn<TData, TError> = ReturnType<
 
 /**
  * The client half of `fnLive`: the HTTP query seeds the cache, and the live
- * route's stream writes each snapshot (or `applyEvent` result) into the same
- * cache entry. Marked `meta.live`, so invalidation streams leave it alone.
+ * route's stream writes each snapshot into the same cache entry. Marked
+ * `meta.live`, so invalidation streams leave it alone.
+ *
+ * One signature, not overloads: TypeScript fixes an untyped callback's
+ * parameters at the first overload it tries, which made valid calls fail.
  */
 export function useLiveQuery<
 	TInput,
-	TData,
+	TRouteData,
+	TStreamEvent,
+	TData = TRouteData,
 	TError = Error,
 	TOrpc = RegisteredOrpcUtils,
-	TStreamEvent = TData,
-	TSubscriptionInput = TInput
->(
-	input: MaybeRefOrGetter<TInput>,
-	queryOptionsFn: (
-		input: TInput,
-		orpc: TOrpc
-	) => UseQueryOptions<TData, TError> & { queryKey: QueryKey },
-	subscribeFn: OrpcSubscribeFn<TSubscriptionInput, TStreamEvent, TOrpc>,
-	options?: LiveQueryOptions<TData, TOrpc, TStreamEvent, TSubscriptionInput> & {
-		select?: undefined
-	}
-): LiveQueryReturn<TData, TError>
-/**
- * With `select`, the route output is converted once at fetch time into a
- * differently typed cache, so `applyEvent` reduces into that cache directly.
- */
-export function useLiveQuery<
-	TInput,
-	TData,
-	TError = Error,
-	TOrpc = RegisteredOrpcUtils,
-	TStreamEvent = TData,
-	TRouteData = TData,
 	TSubscriptionInput = TInput
 >(
 	input: MaybeRefOrGetter<TInput>,
@@ -507,28 +518,40 @@ export function useLiveQuery<
 		input: TInput,
 		orpc: TOrpc
 	) => UseQueryOptions<TRouteData, TError> & { queryKey: QueryKey },
-	subscribeFn: OrpcSubscribeFn<TSubscriptionInput, TStreamEvent, TOrpc>,
-	options: LiveQueryOptions<TData, TOrpc, TStreamEvent, TSubscriptionInput> & {
-		select: (data: TRouteData) => TData
-		/**
-		 * The raw route output of a seed before `select` drops fields. `input`
-		 * is what the seed was fetched for, so a seed that resolves after the
-		 * input moved on can be told apart.
-		 */
-		onSeed?: (data: TRouteData, input: TInput) => void
-		applyEvent: (
-			event: TStreamEvent,
-			previous: TData | undefined
-		) => TData | undefined
-	}
+	subscribeFn: OrpcSubscribeFn<
+		NoInfer<TSubscriptionInput>,
+		TStreamEvent,
+		TOrpc
+	>,
+	...options: [TStreamEvent] extends [TData]
+		? [
+				options?: LiveQueryOptions<
+					TInput,
+					TRouteData,
+					TStreamEvent,
+					TData,
+					TOrpc,
+					TSubscriptionInput
+				>
+			]
+		: [
+				options: LiveQueryOptions<
+					TInput,
+					TRouteData,
+					TStreamEvent,
+					TData,
+					TOrpc,
+					TSubscriptionInput
+				> & { applyEvent: ApplyEvent<TStreamEvent, NoInfer<TData>> }
+			]
 ): LiveQueryReturn<TData, TError>
 export function useLiveQuery<
 	TInput,
+	TRouteData,
+	TStreamEvent,
 	TData,
 	TError,
 	TOrpc,
-	TStreamEvent,
-	TRouteData,
 	TSubscriptionInput
 >(
 	input: MaybeRefOrGetter<TInput>,
@@ -537,16 +560,19 @@ export function useLiveQuery<
 		orpc: TOrpc
 	) => UseQueryOptions<TRouteData, TError> & { queryKey: QueryKey },
 	subscribeFn: OrpcSubscribeFn<TSubscriptionInput, TStreamEvent, TOrpc>,
-	options: LiveQueryOptions<TData, TOrpc, TStreamEvent, TSubscriptionInput> & {
-		select?: ((data: TRouteData) => TData) | undefined
-		onSeed?: (data: TRouteData, input: TInput) => void
-	} = {}
+	options: LiveQueryOptions<
+		TInput,
+		TRouteData,
+		TStreamEvent,
+		TData,
+		TOrpc,
+		TSubscriptionInput
+	> = {}
 ): LiveQueryReturn<TData, TError> {
 	const queryClient = useQueryClient()
 	const getO = useUtilsGetter(options.orpc)
 	const visible = useDocumentVisible()
-	// Without `applyEvent` (or `select`) the stream event, route output and
-	// cache share one type (the first overload), so these casts are identities.
+	// Without `applyEvent` the stream event is the cache type (the first overload).
 	const applyEvent =
 		options.applyEvent ?? ((event: TStreamEvent) => event as unknown as TData)
 	// Recomputed when the input changes, not once per stream event.
@@ -554,13 +580,7 @@ export function useLiveQuery<
 		() => queryOptionsFn(toValue(input), getO()).queryKey
 	)
 	const queryHash = computed(() => hashKey(queryKey.value))
-
-	// An event is written under the key its stream was opened for. The input
-	// ref changes synchronously but the stream is torn down by an async
-	// watcher, so a frame in flight from the previous subscription would
-	// otherwise land in the new key (and, with staleTime Infinity, stay there).
-	let streamHash: string | null = null
-	let streamConnectionId: number | null = null
+	const scope = createStreamScope()
 
 	const subscription = useOrpcSubscription(
 		computed(
@@ -576,15 +596,10 @@ export function useLiveQuery<
 			onError: options.onError,
 			maxEvents: 1,
 			orpc: getO,
-			onConnect: (connectionId) => {
-				streamConnectionId = connectionId
-				streamHash = queryHash.value
-			},
+			onConnect: (connectionId) => scope.open(connectionId, queryHash.value),
 			onEvent: (event, meta) => {
-				if (meta && meta.connectionId !== streamConnectionId) return
-				// The input moved on: the event describes a scope no longer shown,
-				// so the consumer callback must not see it either.
-				if (streamHash !== queryHash.value) return
+				// The consumer callback must not see an event for a scope no longer shown.
+				if (!meta || !scope.owns(meta.connectionId, queryHash.value)) return
 				const key = queryKey.value
 				const next = applyEvent(event, queryClient.getQueryData<TData>(key))
 				if (next !== undefined) queryClient.setQueryData(key, next)
@@ -600,26 +615,20 @@ export function useLiveQuery<
 			// wraps fields in MaybeRefDeep, so `queryFn` is read through one shape.
 			const raw = queryOptionsFn(inputValue, getO()) as unknown as {
 				queryKey: QueryKey
-				queryFn?: (ctx: unknown) => Promise<TRouteData>
+				queryFn?: (context: unknown) => Promise<TRouteData>
 				enabled?: unknown
 			} & Record<string, unknown>
-			const { select, onSeed, mergeSeed } = options
-			const rawQueryFn = raw.queryFn
+			const wrapsSeed = options.select || options.mergeSeed
 			const queryFn =
-				rawQueryFn && (select || mergeSeed)
-					? async (ctx: unknown) => {
-							const fetched = await rawQueryFn(ctx)
-							onSeed?.(fetched, inputValue)
-							const data = select
-								? select(fetched)
-								: (fetched as unknown as TData)
-							// Read the cache after awaiting: the stream may have written
-							// newer data into this key while the request was in flight.
-							return mergeSeed
-								? mergeSeed(data, queryClient.getQueryData<TData>(raw.queryKey))
-								: data
-						}
-					: rawQueryFn
+				raw.queryFn && wrapsSeed
+					? seedQueryFn(raw.queryFn, {
+							input: inputValue,
+							readCache: () => queryClient.getQueryData<TData>(raw.queryKey),
+							select: options.select,
+							onSeed: options.onSeed,
+							mergeSeed: options.mergeSeed
+						})
+					: raw.queryFn
 			return {
 				...raw,
 				...(queryFn ? { queryFn } : {}),
@@ -678,19 +687,18 @@ export function useSubscriptionInvalidates<
  * events lost while it was down. Call once, in the signed-in shell.
  *
  * ```ts
- * useInvalidationStream((o, opts) => o.realtime.changes.call({}, opts), {
+ * useInvalidationStream({}, (o) => o.realtime.changes.call, {
  *   domains: { order: { debounceMs: 100, queryKeys: [orpc.order.key()] } }
  * })
  * ```
  */
 export function useInvalidationStream<
+	TInput,
 	TEvent extends { domain: string },
 	TOrpc = RegisteredOrpcUtils
 >(
-	subscribe: (
-		orpc: TOrpc,
-		opts: { signal: AbortSignal }
-	) => Promise<AsyncIterable<TEvent>>,
+	input: MaybeRefOrGetter<TInput>,
+	subscribe: OrpcSubscribeFn<TInput, TEvent, TOrpc>,
 	options: InvalidationStreamOptions<TEvent> &
 		Pick<
 			UseSubscriptionOptions<TEvent, TOrpc>,
@@ -699,20 +707,16 @@ export function useInvalidationStream<
 ): UseSubscriptionReturn<TEvent> {
 	const coordinator = createInvalidationCoordinator(useQueryClient(), options)
 	if (getCurrentScope()) onScopeDispose(coordinator.dispose)
-	return useOrpcSubscription<undefined, TEvent, TOrpc>(
-		undefined,
-		(_input, orpc, opts) => subscribe(orpc, opts),
-		{
-			immediate: options.immediate,
-			respectVisibility: options.respectVisibility,
-			orpc: options.orpc,
-			maxEvents: 1,
-			onEvent: coordinator.event,
-			onConnect: coordinator.connect,
-			onError: coordinator.lost,
-			onClose: coordinator.lost
-		}
-	)
+	return useOrpcSubscription<TInput, TEvent, TOrpc>(input, subscribe, {
+		immediate: options.immediate,
+		respectVisibility: options.respectVisibility,
+		orpc: options.orpc,
+		maxEvents: 1,
+		onEvent: coordinator.event,
+		onConnect: coordinator.connect,
+		onError: coordinator.lost,
+		onClose: coordinator.lost
+	})
 }
 
 /** Localized text for a failed query: your fallback unless the server marked its message user-safe. */
