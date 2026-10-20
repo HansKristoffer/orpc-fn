@@ -21,6 +21,7 @@
 		"live-query",
 		"mastra",
 		"mcp",
+		"cli",
 		"hono",
 		"typescript",
 		"tanstack-query",
@@ -92,6 +93,10 @@
 		"./mcp/server": {
 			"types": "./dist/mcp/server.d.ts",
 			"import": "./dist/mcp/server.js"
+		},
+		"./cli": {
+			"types": "./dist/procedure-cli.d.ts",
+			"import": "./dist/procedure-cli.js"
 		}
 	},
 	"types": "./dist/index.d.ts",
@@ -131,6 +136,7 @@
 		"@orpc/openapi": "^1.14.0",
 		"@orpc/server": "^1.14.0",
 		"@orpc/zod": "^1.14.0",
+		"hanzio": "^3.1.0",
 		"hono": "^4.0.0",
 		"ioredis": "^5.0.0",
 		"zod": "^4.0.0",
@@ -155,6 +161,9 @@
 			"optional": true
 		},
 		"@orpc/zod": {
+			"optional": true
+		},
+		"hanzio": {
 			"optional": true
 		},
 		"hono": {
@@ -203,6 +212,7 @@
 		"@types/node": "^22.0.0",
 		"@types/react": "19",
 		"@types/react-test-renderer": "19",
+		"hanzio": "^3.1.0",
 		"hono": "^4.12.31",
 		"ioredis": "5.8.2",
 		"publint": "^0.3.12",

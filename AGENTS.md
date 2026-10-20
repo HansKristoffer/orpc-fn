@@ -5,7 +5,7 @@ orpc-fn lets an app define a backend function once and get a typed oRPC procedur
 ## What we never compromise on
 
 1. **Types are the product.** The common call, `fn({ input, handler })`, infers everything: no casts, no explicit type arguments. Handler context follows the selected procedure builder. `test:types-performance` must not regress on its 300-route fixture.
-2. **Optional peers stay optional.** The root entry imports only `@orpc/server` and `@orpc/contract`. Tracing, Mastra, MCP, Hono, Redis and Expo live behind their own subpaths, and an app that does not use one never installs it.
+2. **Optional peers stay optional.** The root entry imports only `@orpc/server` and `@orpc/contract`. Tracing, Mastra, MCP, Hono, hanzio, Redis and Expo live behind their own subpaths, and an app that does not use one never installs it.
 3. **The client stays small.** `orpc-fn/client`, `orpc-fn/expo`, `orpc-fn/vue`, `orpc-fn/react` and a serialized stream manifest pull in no server, live or tool-adapter code. `test:client-bundle` guards this.
 4. **oRPC first.** Depend on oRPC where it covers the behaviour; keep our own code only where it falls short. Every such call is recorded in [decisions](docs/decisions.md).
 5. **The app owns its domain.** Auth, permission vocabulary, database, transactions, tenancy, jobs and reliable publication stay in the app. The library takes them through `createFn`.
@@ -39,7 +39,7 @@ Treat this file as good defaults, not hard rules. The developer's instructions o
 The most common defect here is a change that works on the route kind you tested and is missing from the rest. Before calling work done, walk this list and say which entries applied:
 
 - **Route kinds.** `fn`, `fnLive` (and patch mode), `createPubSub` subscriptions and plain streams share one execution policy. Guards, extras, meta and completion must behave the same on each.
-- **Subpaths.** Each export in `package.json` is a surface: `live` and its transports, `mastra`, `mcp`, `mcp/sdk`, `mcp/server`, `hono`, `client`, `expo`, `vue`, `vue/testing`, `react`, and the `orpc-fn` CLI. Adapter-shaped changes need a decision per adapter, even if the decision is "not supported here".
+- **Subpaths.** Each export in `package.json` is a surface: `live` and its transports, `mastra`, `mcp`, `mcp/sdk`, `mcp/server`, `hono`, `cli` (procedures as `hanzio/cli` commands), `client`, `expo`, `vue`, `vue/testing`, `react`, and the `orpc-fn` CLI. Adapter-shaped changes need a decision per adapter, even if the decision is "not supported here".
 - **Transports.** Memory, Bun Redis and ioredis implement one contract; a change to one is a change to all three.
 - **Types and runtime.** A rule enforced in the types also needs a runtime check for JavaScript callers and spread options, and the other way round.
 - **Consumers.** `tests/consumers` compiles the packed package under NodeNext and Bundler, on TypeScript 5.7 and the current version. `examples/adoption` must keep compiling against it.

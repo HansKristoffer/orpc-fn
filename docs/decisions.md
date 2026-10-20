@@ -100,6 +100,10 @@ Pub/sub subscriptions used to skip guards, extras and completion logging. Comple
 
 The core accepts any Standard Schema, oRPC's own `eventIterator` included. Executable tools (MCP, Mastra) need JSON Schema, so they go through the Zod to JSON Schema conversion in `@orpc/zod`. A widened core does not promise that every validator works with every adapter. Validation and execution can both parse the raw tool input, so transforms and refinements must be pure.
 
+## `trpc-cli` vs `/cli`
+
+`trpc-cli` builds a CLI from an oRPC router, but it reads command metadata from oRPC's top-level `meta` (where `fn()` keeps its own record under one key) and route descriptions do not reach it, it calls procedures with one static context, and it is a second CLI style beside the one our library bins use. **Decision:** `/cli` maps opted-in routes to `hanzio/cli` commands, which own parsing, help, completion and exit codes; this package only reads `fn()` meta and calls the procedure.
+
 ## Limits of live delivery
 
 These limits are deliberate; changing one needs a consumer that requires it.
