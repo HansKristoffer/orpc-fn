@@ -9,6 +9,8 @@ export interface BunRedisClientLike {
 	unsubscribe(channel: string, listener?: Listener): Promise<unknown>
 	duplicate(): Promise<BunRedisClientLike>
 	close(): void
+	/** Bun's `RedisClient.connected`; read by `stats()` when present. */
+	readonly connected?: boolean
 	onconnect: ((this: never) => void) | null
 	onclose: ((this: never, error: Error) => void) | null
 }
@@ -58,6 +60,7 @@ export function bunRedisTransport(
 					ours.delete(channel)
 					return subscriber.unsubscribe(channel, dispatch)
 				},
+				connected: () => subscriber.connected !== false,
 				close() {
 					// No-ops, not null: Bun calls `onclose` without checking it.
 					subscriber.onconnect = () => {}

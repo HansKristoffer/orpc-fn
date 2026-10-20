@@ -4,7 +4,7 @@ import type { ZodType, z } from 'zod'
 import { RAW_INPUT } from '../timing.js'
 import { LIVE_GAP, positiveInteger } from './lifecycle.js'
 import type { FnLogger } from '../logger.js'
-import { errorMessageOf, type SpanLike } from '../otel.js'
+import { errorMessageOf } from '../otel.js'
 import type {
 	FnContext,
 	FnDefinition,
@@ -100,8 +100,6 @@ export type FnLiveConfig<
 			}
 		) => MaybePromise<boolean>
 		authFn?: AuthFn<TInput, FnContext<TDef, TKey>>
-		/** Log publish failures instead of throwing them into the publishing route. */
-		safePublish?: boolean
 		/** Batch events arriving within this window into one snapshot update. */
 		coalesceMs?: number
 		/** Maximum events collected in one coalescing batch (default 1000). */
@@ -441,7 +439,6 @@ type RuntimeLiveConfig = Omit<ChannelOptions, 'name'> & {
 	reauthorize?: AuthFn<Record<string, unknown>, unknown>
 	transformerFn?: (params: RuntimeParams & Record<string, unknown>) => unknown
 	shouldUpdate?: (params: RuntimeParams & Record<string, unknown>) => unknown
-	safePublish?: boolean
 	coalesceMs?: number
 	maxBatchSize?: number
 	summary?: string
@@ -456,11 +453,9 @@ export function createFnLive(runtime: {
 	// biome-ignore lint/suspicious/noExplicitAny: runtime half of the typed `Fn`
 	fn: (options: any) => AnyProcedure
 	createChannel: (options: ChannelOptions) => Channel
-	createLogger: (scope: string, span: SpanLike | undefined) => FnLogger
 	isGuard: (option: string) => boolean
 }) {
 	const { fn, createChannel, isGuard } = runtime
-	const liveLogger = runtime.createLogger('fn-live', undefined)
 
 	return (
 		options: {
@@ -495,22 +490,8 @@ export function createFnLive(runtime: {
 		// `createChannel` reads only the channel keys of the live config.
 		const channel = createChannel({ ...live, name: liveName })
 
-		const publish = async (event: unknown) => {
-			if (!live.safePublish) return channel.publish(event)
-			try {
-				await channel.publish(event)
-			} catch (err) {
-				// Live update failures must not roll back the route that emitted them,
-				// but they should still be visible in logs.
-				liveLogger.error('fnLive publish failed', {
-					name: liveName,
-					err: errorMessageOf(err)
-				})
-			}
-		}
-
 		const runHandler = (params: RuntimeParams) =>
-			handler({ ...params, publish })
+			handler({ ...params, publish: channel.publish })
 
 		const procedure = fn({
 			...routeConfig,
@@ -640,7 +621,7 @@ export function createFnLive(runtime: {
 		return {
 			procedure,
 			subscribe,
-			publish,
+			publish: channel.publish,
 			getChannelName: channel.getChannelName,
 			getSubscriptionChannelName: channel.getSubscriptionChannelName,
 			getPublishChannelName: channel.getPublishChannelName

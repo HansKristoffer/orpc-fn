@@ -75,7 +75,10 @@ export type MountOrpcOptions<
 	plugins?: Plugin<InferRouterInitialContext<R>>[]
 	/** Rewrite request headers before they reach the context (see `normalizeExpoOrigin`). */
 	normalizeHeaders?: (headers: Headers) => Headers
-	/** Time spent before the handler ran, reported as `queue`. */
+	/**
+	 * Time spent before the handler ran, reported as `queue`. Default: time
+	 * since {@link markRequestArrival}, when the server marked the request.
+	 */
 	queueMs?: (request: Request) => number | undefined
 	/**
 	 * Unexpected procedure errors (oRPC turns thrown errors into responses, so
@@ -84,6 +87,23 @@ export type MountOrpcOptions<
 	onError?: (error: unknown, request: { url: string; method: string }) => void
 	/** Default: 4xx `ORPCError` or `AbortError`. */
 	isExpectedError?: (error: unknown) => boolean
+}
+
+const arrivals = new WeakMap<Request, number>()
+
+/**
+ * Marks a request at the server's front door (`Bun.serve({ fetch })`), before
+ * routing and middleware. `mountOrpc` reports the time until the procedure
+ * runs as `queue_ms`: in-process queueing no handler timer can see.
+ */
+export function markRequestArrival(request: Request): void {
+	arrivals.set(request, performance.now())
+}
+
+/** Milliseconds since {@link markRequestArrival}, or undefined when unmarked. */
+export function msSinceRequestArrival(request: Request): number | undefined {
+	const arrivedAt = arrivals.get(request)
+	return arrivedAt === undefined ? undefined : performance.now() - arrivedAt
 }
 
 /**
@@ -175,7 +195,7 @@ export function mountOrpc<E extends Env, R extends AnyRouter>(
 	) => {
 		app.use(`${prefix}/*`, async (c, next) => {
 			const timing: RequestTiming = {}
-			const queueMs = options.queueMs?.(c.req.raw)
+			const queueMs = (options.queueMs ?? msSinceRequestArrival)(c.req.raw)
 			if (queueMs !== undefined)
 				timing.queue_ms = Math.round(queueMs * 100) / 100
 			const started = performance.now()

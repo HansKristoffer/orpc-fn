@@ -9,6 +9,10 @@ export {
 	throwInitialSnapshotError
 } from './fn-live.js'
 export {
+	type InvalidationEvent,
+	invalidationStream
+} from './invalidation-stream.js'
+export {
 	type AuthFn,
 	type ChannelDefinition,
 	type ChannelQueueOptions,
@@ -26,8 +30,15 @@ export {
 	type PubSubRuntimeOptions
 } from './pub-sub.js'
 export {
+	type ChangeBusChannel,
+	type ChangeBusScope,
+	defineScopedChangeBus,
+	type ScopedChangeBus
+} from './scoped-change-bus.js'
+export {
 	type BacklogOptions,
 	backlogKey,
 	type PubSubMessage,
-	type PubSubTransport
+	type PubSubTransport,
+	type PubSubTransportStats
 } from './transport.js'

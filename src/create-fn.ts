@@ -542,7 +542,6 @@ export function createFn<
 		fnLive: createFnLive({
 			fn,
 			createChannel: live.createChannel,
-			createLogger,
 			isGuard
 		}),
 		createPubSub: live.createPubSub,

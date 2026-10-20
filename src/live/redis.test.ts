@@ -7,7 +7,7 @@ import { quiet } from '../../tests/fixture.js'
 import { createFn } from '../index.js'
 import { ioredisTransport } from './ioredis.js'
 import { bunRedisTransport } from './redis-bun.js'
-import type { PubSubTransport } from './transport.js'
+import type { PubSubTransport, PubSubTransportStats } from './transport.js'
 
 // Runs against a real Redis when REDIS_URL is set (CI starts one), once per
 // adapter, so both clients' subscriber, NOSCRIPT and Lua semantics are covered.
@@ -36,7 +36,10 @@ afterAll(() => {
 
 describe.skipIf(!url).each(adapters)('$name transport', (adapter) => {
 	const prefix = `orpc-fn-test:${adapter.name}:${process.pid}`
-	let transport: PubSubTransport & { close(): Promise<void> }
+	let transport: PubSubTransport & {
+		close(): Promise<void>
+		stats(): PubSubTransportStats
+	}
 
 	const received = (channel: string) => {
 		const payloads: string[] = []
@@ -54,6 +57,11 @@ describe.skipIf(!url).each(adapters)('$name transport', (adapter) => {
 		const second = received(channel)
 		const unsubscribeFirst = await first.subscribe()
 		const unsubscribeSecond = await second.subscribe()
+		expect(transport.stats()).toEqual({
+			channels: 1,
+			listeners: 2,
+			subscriberConnected: true
+		})
 
 		await transport.publish([{ channel, payload: 'hello' }])
 		await Bun.sleep(50)

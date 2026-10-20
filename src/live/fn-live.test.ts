@@ -184,6 +184,19 @@ describe('fnLive runtime (memory transport)', () => {
 		expect(transport.listenerCount('counter:org_1')).toBe(0)
 	})
 
+	test('safePublish keeps a failed publish out of the publishing route', async () => {
+		const safe = fnLive({
+			name: 'test.liveSafe',
+			procedure: 'public',
+			input: z.object({}),
+			handler: () => 0,
+			live: { eventSchema, channel: 'safe', safePublish: true }
+		})
+		const invalid = {} as Parameters<typeof safe.publish>[0]
+		await expect(safe.publish(invalid)).resolves.toBeUndefined()
+		await expect(live.publish(invalid)).rejects.toThrow()
+	})
+
 	test('a failing initial snapshot releases the subscription', async () => {
 		const failing = fnLive({
 			name: 'test.liveFailing',

@@ -1,6 +1,16 @@
 /** One payload for one channel. */
 export type PubSubMessage = { channel: string; payload: string }
 
+/** What a transport holds open on this instance, for gauges and health checks. */
+export type PubSubTransportStats = {
+	/** Broker channels subscribed (one per channel, however many listeners). */
+	channels: number
+	/** Local listeners across those channels. */
+	listeners: number
+	/** The subscriber connection is open; false before the first subscribe. */
+	subscriberConnected: boolean
+}
+
 export type BacklogOptions = {
 	/** Items kept per channel (oldest dropped). */
 	size: number
@@ -39,6 +49,8 @@ export interface PubSubTransport {
 		onLost?: (error: Error) => void,
 		options?: { onReconnect?: () => void }
 	): Promise<() => Promise<void>>
+	/** Current subscription counts and connection state. */
+	stats?(): PubSubTransportStats
 }
 
 export const backlogKey = (channel: string) => `${channel}:backlog`

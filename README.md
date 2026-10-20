@@ -130,13 +130,47 @@ The `subscribe` route runs builder middleware and the same fn guards/extras/meta
 - `reauthorize` can check access before each live update. Initial authorization covers idle streams; apps that need immediate revocation should close those streams.
 - `safePublish` logs publish errors instead of throwing them; it does not retry or guarantee delivery.
 
-**`createPubSub`** returns a typed `subscribe` route plus `publish`, `publishMany` (one atomic round-trip across channels) and typed `getSubscriptionChannelName({ input, context })` / `getPublishChannelName(event)` methods. The shared partial-input `getChannelName` method is deprecated. Publishers pass the event schema's input type; subscribers, filters and channel resolvers get its output type. The raw event travels in oRPC's JSON format, so `Date`, `Map`, `Set` and `BigInt` survive, and each receiver parses it once. Options include `filterFn`, `authFn`, `mirrorChannel`, `overflowMarker`, `procedure`, configured guards and `meta`. Channels may be static or use `channel: { subscribe: ({ input, context }) => key, publish: (parsedEvent) => key }`. Carry publishing tenant keys in the event. A factory `namespace` prefixes channels, mirrors and backlog keys. Each pub/sub definition subscribes to each channel once and parses each payload once for all local subscribers. Each subscriber then runs its filter in arrival order as it reads; its bounded queue holds events before filtering, so `onDrop` counts unfiltered events. Abort and drain release a subscription at once, even one that is not being read. A lost subscription is retried with exponential backoff and jitter. **`createPublisher`** is the publish-only half.
+**`createPubSub`** returns a typed `subscribe` route plus `publish`, `publishMany` (one atomic round-trip across channels) and typed `getSubscriptionChannelName({ input, context })` / `getPublishChannelName(event)` methods. The shared partial-input `getChannelName` method is deprecated. Publishers pass the event schema's input type; subscribers, filters and channel resolvers get its output type. The raw event travels in oRPC's JSON format, so `Date`, `Map`, `Set` and `BigInt` survive, and each receiver parses it once. Options include `filterFn`, `authFn`, `mirrorChannel`, `overflowMarker`, `procedure`, configured guards and `meta`. Channels may be static or use `channel: { subscribe: ({ input, context }) => key, publish: (parsedEvent) => key }`. Carry publishing tenant keys in the event. A factory `namespace` prefixes channels, mirrors and backlog keys. Each pub/sub definition subscribes to each channel once and parses each payload once for all local subscribers. Each subscriber then runs its filter in arrival order as it reads; its bounded queue holds events before filtering, so `onDrop` counts unfiltered events. Abort and drain release a subscription at once, even one that is not being read. A lost subscription is retried with exponential backoff and jitter. `safePublish` logs a failed publish (`pubsub.publish_failed`) instead of throwing, as on `fnLive`. **`createPublisher`** is the publish-only half.
+
+**`defineScopedChangeBus`** binds `createPubSub` to one scope rule, for buses that tell everyone in a scope (usually an organization) "this changed". Each bus names a channel `prefix`; events go to `${prefix}:${scope}`. Publishing is safe by default, since buses publish after committed writes. `bus.channel` lets an `fnLive` share the bus's events.
+
+```ts
+import { defineScopedChangeBus, invalidationStream } from 'orpc-fn/live'
+
+const defineChangeBus = defineScopedChangeBus(createPubSub, {
+  subscribe: (context) => activeOrganizationId(context), // throw to refuse
+  publish: (event: { organizationId: string }) => event.organizationId
+})
+export const dealChanges = defineChangeBus({
+  name: 'deal.subscribe',
+  prefix: 'deal:change',
+  inputSchema: z.object({}),
+  eventSchema: z.object({ organizationId: z.string(), dealId: z.string() })
+})
+```
+
+**`invalidationStream`** fans several streams into one stream of `{ domain }` events, so a client holds one connection and invalidates queries per domain. `events` optionally forwards fields from a source event, for example to raise an alert. Sources are called with `{}` and the caller's context. Equal events that queue while the consumer is busy collapse into one. When one source ends (a deploy drain) the stream ends, when one throws the stream throws, and every source is closed either way.
+
+```ts
+export const subscribeChanges = fn({
+  name: 'realtime.subscribeChanges',
+  stream: true,
+  input: z.object({}),
+  handler: ({ context, signal }) =>
+    invalidationStream({
+      context,
+      signal,
+      sources: { deal: dealChanges.subscribe, workItem: workItemChanges.subscribe },
+      events: { deal: (event) => (event.kind === 'won' ? { dealId: event.dealId } : undefined) }
+    })
+})
+```
 
 **Graceful shutdown:** `await shutdown()` stops new subscriptions/publication, cancels initialization/retries, ends existing streams and awaits cleanup. It closes a supplied transport only with `ownsTransport: true`, and a lazy `transport: () => …` only if it was ever created; it is never created during or after shutdown. A custom transport whose pending `subscribe` cannot be cancelled may resolve later; that late subscription is immediately released. `drainPubSubSubscribers()` remains a synchronous, nonterminal operation. Both are per factory.
 
 Recent event IDs deduplicate replay/live overlap; legacy payloads remain readable. Replay is bounded and TTL-limited, so it is not durable resume. A snapshot may already include a queued delta: reducers must use revisions or idempotence. See [the revision example](examples/adoption/revisions.ts). Parsing ingress, replay staging and subscriber queues are bounded; positive queue/TTL/time options are validated.
 
-**Transports** implement `PubSubTransport` (`publish(messages, backlog?)`, `readBacklog(channel)`, `subscribe(channel, listener, onLost, { onReconnect }?)`):
+**Transports** implement `PubSubTransport` (`publish(messages, backlog?)`, `readBacklog(channel)`, `subscribe(channel, listener, onLost, { onReconnect }?)` and optional `stats()`):
 
 | Subpath | Client | Notes |
 |---|---|---|
@@ -144,7 +178,16 @@ Recent event IDs deduplicate replay/live overlap; legacy payloads remain readabl
 | `orpc-fn/live/ioredis` | ioredis 5 | Dedicated subscriber via `duplicate()`; ioredis re-subscribes itself |
 | `orpc-fn/live/memory` | none | Tests and single-process dev |
 
-A subscriber connection that is lost, or cannot restore its channels after a reconnect, is closed and replaced; nothing it still emits is delivered. The Redis transports publish and maintain backlogs with one Lua script, sent by SHA, with a fallback to `EVAL` when Redis returns `NOSCRIPT`. Await `transport.close()` when the app owns its lifecycle. The Redis Lua batching adapter supports standalone Redis; Redis Cluster requires compatible key slots and is not promised by this adapter.
+A subscriber connection that is lost, or cannot restore its channels after a reconnect, is closed and replaced; nothing it still emits is delivered. The Redis transports publish and maintain backlogs with one Lua script, sent by SHA, with a fallback to `EVAL` when Redis returns `NOSCRIPT`. Await `transport.close()` when the app owns its lifecycle.
+
+All three return `stats()`: `{ channels, listeners, subscriberConnected }` on this instance. With `activePubSubSubscriberCount()` from `createFn` that covers pub/sub gauges; a transport opens no connection until the first subscribe, so it can be created eagerly:
+
+```ts
+const transport = bunRedisTransport(redis)
+createFn({ /* … */, pubsub: { transport, ownsTransport: true } })
+meter.createObservableGauge('pubsub_subscribed_channels').addCallback((g) => g.observe(transport.stats().channels))
+meter.createObservableGauge('pubsub_redis_subscriber_connected').addCallback((g) => g.observe(transport.stats().subscriberConnected ? 1 : 0))
+``` The Redis Lua batching adapter supports standalone Redis; Redis Cluster requires compatible key slots and is not promised by this adapter.
 
 `streamLiveSnapshots`, `fnLivePatch` and `throwInitialSnapshotError` are exported for custom streams.
 
@@ -221,6 +264,7 @@ Behaviour:
 - Scalar docs are served at the OpenAPI prefix.
 - `onError` sees only unexpected errors.
 - `openapi.filter`, `openapi.smartCoercion` and `openapi.spec` (for security schemes) cover an external API with its own auth.
+- `markRequestArrival(request)` at the front door (`Bun.serve({ fetch })`, before routing) makes `queue_ms` the time until the procedure runs: in-process queueing no handler timer sees. Pass `queueMs` to measure it another way.
 - `context` builds the router's context and is checked against it: it is required when `{ headers, timing }` alone does not satisfy the router. It may return a `Response`, for example a 401.
 
 ## `orpc-fn/client`
