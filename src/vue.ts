@@ -195,7 +195,8 @@ export function useOrpcSubscription<
 		() => toValue(immediate) && isStreamAllowed.value
 	)
 
-	const events = ref<TEvent[]>([]) as Ref<TEvent[]>
+	// Shallow: event payloads are replaced, never mutated, so deep proxies are wasted work.
+	const events = shallowRef<TEvent[]>([])
 	const latestEvent = shallowRef<TEvent | undefined>(undefined)
 	const status = ref<LiveConnectionStatus>('idle')
 	const error = ref<Error | null>(null)
@@ -548,13 +549,17 @@ export function useLiveQuery<
 	// cache share one type (the first overload), so these casts are identities.
 	const applyEvent =
 		options.applyEvent ?? ((event: TStreamEvent) => event as unknown as TData)
-	const keyFor = () => queryOptionsFn(toValue(input), getO()).queryKey
+	// Recomputed when the input changes, not once per stream event.
+	const queryKey = computed(
+		() => queryOptionsFn(toValue(input), getO()).queryKey
+	)
+	const queryHash = computed(() => hashKey(queryKey.value))
 
 	// An event is written under the key its stream was opened for. The input
 	// ref changes synchronously but the stream is torn down by an async
 	// watcher, so a frame in flight from the previous subscription would
 	// otherwise land in the new key (and, with staleTime Infinity, stay there).
-	let streamKey: QueryKey | null = null
+	let streamHash: string | null = null
 	let streamConnectionId: number | null = null
 
 	const subscription = useOrpcSubscription(
@@ -573,19 +578,16 @@ export function useLiveQuery<
 			orpc: getO,
 			onConnect: (connectionId) => {
 				streamConnectionId = connectionId
-				streamKey = keyFor()
+				streamHash = queryHash.value
 			},
 			onEvent: (event, meta) => {
 				if (meta && meta.connectionId !== streamConnectionId) return
-				const queryKey = keyFor()
 				// The input moved on: the event describes a scope no longer shown,
 				// so the consumer callback must not see it either.
-				if (streamKey && hashKey(streamKey) !== hashKey(queryKey)) return
-				const next = applyEvent(
-					event,
-					queryClient.getQueryData<TData>(queryKey)
-				)
-				if (next !== undefined) queryClient.setQueryData(queryKey, next)
+				if (streamHash !== queryHash.value) return
+				const key = queryKey.value
+				const next = applyEvent(event, queryClient.getQueryData<TData>(key))
+				if (next !== undefined) queryClient.setQueryData(key, next)
 				options.onEvent?.(event, meta)
 			}
 		}

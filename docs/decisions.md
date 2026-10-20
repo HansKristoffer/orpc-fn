@@ -78,6 +78,8 @@ oRPC parses a handler's return value through the output schema, so the handler r
 
 `orpc-fn/vue` and `orpc-fn/react` hold the subscription, live-query and invalidation-stream code hellu wrote once per framework. The connection logic (generation-guarded connects, backoff, reconnect catch-up) is one framework-free core; each subpath is a thin wrapper. Pausing follows TanStack's `focusManager` instead of `document` or React Native's `AppState`, so neither subpath imports a platform module and an app sets the focus source once. The "refetch stale queries on focus" that hellu's coordinator did by hand is TanStack's own `refetchOnWindowFocus`, so it is not repeated. Persisting the cache is TanStack's persister; we only supply oRPC's serializer and the cache-owner reset.
 
+`@orpc/tanstack-query` 1.14 ships `experimental_liveOptions`, a query whose data is the latest event of a stream. For a plain `fnLive` snapshot stream it is enough, and an app can use it directly. `useLiveQuery` stays because the apps also need what it lacks: patch streams folded by `applyEvent`, an HTTP seed that a persisted or server-rendered cache can satisfy, backoff reconnects after a stream ends, and closing streams in hidden tabs.
+
 ## Guards return a decision
 
 A guard returned `unknown` and its result was ignored, so `permission: () => false` let the handler run, although the README used exactly that predicate style. **Decision:** a guard returns `void | boolean` (or a promise of one). `false` throws `FORBIDDEN`, `true` or `undefined` allows, and a thrown error keeps its code. Other return values fail in the types and at runtime. Typing the guard as `() => void` alone would not catch this, because TypeScript lets a value-returning function stand in for it.
