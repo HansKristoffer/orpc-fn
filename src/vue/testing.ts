@@ -5,7 +5,7 @@ import { provideOrpc } from '../vue.js'
 type Method = (...args: never[]) => unknown
 type MockFactory = (implementation: Method) => Method
 
-export type OrpcMock = Record<string, unknown> & {
+export type OrpcMock<T> = T & {
 	/** Reset every method mock created so far (calls `mockReset` when the factory provides it). */
 	$reset: () => void
 }
@@ -30,9 +30,12 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
  * A deep stand-in for oRPC utils or a client: `o.order.key()` is `['order']`,
  * `o.order.get.call()` resolves an empty stream, `.key()`/`.queryKey()` on a
  * procedure return `[]`, and any other method returns `{}`. The same path
- * always returns the same mock, so calls can be asserted.
+ * always returns the same mock, so calls can be asserted. Type it as your
+ * utils: `createOrpcMock<typeof orpc>({ fn: mock })`.
  */
-export function createOrpcMock(options: CreateOrpcMockOptions = {}): OrpcMock {
+export function createOrpcMock<T = Record<string, unknown>>(
+	options: CreateOrpcMockOptions = {}
+): OrpcMock<T> {
 	const { fn = (implementation) => implementation, keys, overrides } = options
 	const created: Method[] = []
 	const method = (implementation: Method) => {
@@ -95,7 +98,8 @@ export function createOrpcMock(options: CreateOrpcMockOptions = {}): OrpcMock {
 		return found
 	}
 
-	return new Proxy({ $reset: reset } as OrpcMock, {
+	// The proxy answers every path at runtime; `T` is the shape tests read it as.
+	return new Proxy({ $reset: reset } as OrpcMock<T>, {
 		get(_target, key) {
 			if (key === '$reset') return reset
 			if (typeof key === 'symbol') return undefined

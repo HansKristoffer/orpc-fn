@@ -743,6 +743,7 @@ const appClient: RouterClient<{
 	order: { get: typeof getOrder.procedure; watch: typeof getOrder.subscribe }
 	list: { get: typeof list.procedure; watch: typeof list.subscribe }
 	realtime: { changes: typeof changes }
+	typed: { errors: typeof typedErrors }
 }> = createORPCClient(createRpcLink({ url: 'http://localhost/rpc' }))
 const appUtils = createTanstackQueryUtils(appClient)
 type Order = { id: string; total: number }
@@ -753,10 +754,34 @@ declare module 'orpc-fn/vue' {
 }
 // Hooks run inside a component; these only need to compile.
 export function useConsumerHooks() {
-	// Registered utils reach every callback without type arguments.
-	const orderQuery = vue
-		.useApiClient()
-		.useQuery((o) => o.order.get.queryOptions({ input: { id: '1' } }))
+	// Registered utils reach every callback without type arguments, and
+	// TanStack's own generics come through: `select`, tagged keys, page
+	// params and declared errors.
+	const api = vue.useApiClient()
+	const orderQuery = api.useQuery((o) =>
+		o.order.get.queryOptions({ input: { id: '1' } })
+	)
+	const orderTotal = api.useQuery((o) =>
+		o.order.get.queryOptions({
+			input: { id: '1' },
+			select: (order) => order.total
+		})
+	)
+	const cachedOrder = api.getQueryData((o) =>
+		o.order.get.queryKey({ input: { id: '1' } })
+	)
+	api.setQueryData(
+		(o) => o.order.get.queryKey({ input: { id: '1' } }),
+		(previous) => previous && { ...previous, total: previous.total + 1 }
+	)
+	const pages = api.useInfiniteQuery((o) =>
+		o.order.get.infiniteOptions({
+			input: (page: number) => ({ id: String(page) }),
+			initialPageParam: 0,
+			getNextPageParam: (last) => last.total
+		})
+	)
+	const failing = api.useMutation((o) => o.typed.errors.mutationOptions())
 	const liveOrder = vue.useLiveQuery(
 		{ id: '1' },
 		(input, o) => o.order.get.queryOptions({ input }),
@@ -814,11 +839,31 @@ export function useConsumerHooks() {
 		(input) => appUtils.order.get.queryOptions({ input }),
 		appClient.order.watch
 	)
-	return [orderQuery, liveOrder, reactOrder] as const
+	return [
+		orderQuery,
+		liveOrder,
+		reactOrder,
+		orderTotal,
+		cachedOrder,
+		pages,
+		failing
+	] as const
 }
 type Hooks = ReturnType<typeof useConsumerHooks>
 export type ClientHookTypes = [
 	Assert<Equal<Hooks[0]['data']['value'], Order | undefined>>,
 	Assert<Equal<Hooks[1]['data']['value'], Order | undefined>>,
-	Assert<Equal<Hooks[2]['data'], Order | undefined>>
+	Assert<Equal<Hooks[2]['data'], Order | undefined>>,
+	Assert<Equal<Hooks[3]['data']['value'], number | undefined>>,
+	Assert<Equal<Hooks[4], Order | undefined>>,
+	Assert<Equal<NonNullable<Hooks[5]['data']['value']>['pageParams'], number[]>>,
+	Assert<
+		Equal<
+			Extract<
+				NonNullable<Hooks[6]['error']['value']>,
+				{ code: 'DOMAIN' }
+			>['data'],
+			{ id: string }
+		>
+	>
 ]

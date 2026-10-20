@@ -1,7 +1,17 @@
 import {
+	type DefaultError,
+	type FetchQueryOptions,
 	focusManager,
 	hashKey,
+	type InferDataFromTag,
+	type InfiniteData,
 	type InvalidateQueryFilters,
+	type MutationObserverOptions,
+	type UseInfiniteQueryOptions,
+	type UseInfiniteQueryReturnType,
+	type UseMutationReturnType,
+	type UseQueryReturnType,
+	type Updater,
 	keepPreviousData,
 	type QueryKey,
 	type UseQueryOptions,
@@ -51,10 +61,17 @@ export interface Register {}
 
 export type RegisteredOrpcUtils = Register extends { utils: infer T }
 	? T
-	: unknown
+	: {
+			'orpc-fn/vue: register your utils with `declare module "orpc-fn/vue" { interface Register { utils: typeof orpc } }`, or pass `orpc`': never
+		}
 export type RegisteredOrpcClient = Register extends { client: infer T }
 	? T
 	: unknown
+
+/** An explicit `<TData>`, else the data type oRPC tagged on the key. */
+type CachedData<TData, TKey extends QueryKey> = [TData] extends [never]
+	? InferDataFromTag<unknown, TKey>
+	: TData
 
 type ProvidedOrpc = { client: unknown; utils: unknown }
 const orpcKey: InjectionKey<ProvidedOrpc> = Symbol('orpc-fn')
@@ -293,27 +310,6 @@ export function useOrpcSubscription<
 	}
 }
 
-type InferMutationData<T> = T extends {
-	mutationFn?: (...args: never[]) => Promise<infer D>
-}
-	? D
-	: unknown
-type InferMutationVariables<T> = T extends {
-	mutationFn?: (variables: infer V, ...args: never[]) => unknown
-}
-	? V
-	: unknown
-type MutationOptionsLike = {
-	mutationFn?: (...args: never[]) => Promise<unknown>
-}
-type VueMutationResult<TOptions> = ReturnType<
-	typeof useVueMutation<
-		InferMutationData<TOptions>,
-		Error,
-		InferMutationVariables<TOptions>
-	>
->
-
 /**
  * TanStack Query composables that receive the oRPC utils, so call sites read
  * `useQuery((o) => o.order.get.queryOptions({ input }))`. Pass `orpc` to bind
@@ -325,72 +321,112 @@ export function useApiClient<TOrpc = RegisteredOrpcUtils>(clientOptions?: {
 	const queryClient = useQueryClient()
 	const getO = useUtilsGetter(clientOptions?.orpc)
 
-	function useQuery<TData, TError = Error>(
-		optionsFn: (orpc: TOrpc) => UseQueryOptions<TData, TError>
-	) {
-		return useVueQuery<TData, TError>(computed(() => optionsFn(getO())))
+	// Each wrapper forwards TanStack's own generics, so `select`, typed errors,
+	// page params and oRPC's tagged keys infer exactly as with vue-query itself.
+	function useQuery<
+		TQueryFnData,
+		TError = DefaultError,
+		TData = TQueryFnData,
+		TQueryKey extends QueryKey = QueryKey
+	>(
+		optionsFn: (
+			orpc: TOrpc
+		) => UseQueryOptions<TQueryFnData, TError, TData, TQueryFnData, TQueryKey>
+	): UseQueryReturnType<TData, TError> {
+		// A computed is a ref at runtime; TypeScript cannot relate a computed of
+		// the generic options to vue-query's MaybeRef parameter, so it is asserted.
+		const options = computed(() => optionsFn(getO()))
+		return useVueQuery<TQueryFnData, TError, TData, TQueryKey>(
+			options as unknown as UseQueryOptions<
+				TQueryFnData,
+				TError,
+				TData,
+				TQueryFnData,
+				TQueryKey
+			>
+		)
 	}
 
-	/**
-	 * ```ts
-	 * useInfiniteQuery((o) => ({
-	 *   ...o.template.getAll.queryOptions({ input: {} }),
-	 *   initialPageParam: 0,
-	 *   getNextPageParam: (lastPage) => lastPage.nextCursor
-	 * }))
-	 * ```
-	 */
-	function useInfiniteQuery<TData>(
-		optionsFn: (orpc: TOrpc) => {
-			queryKey: QueryKey
-			queryFn: (context: { pageParam: unknown }) => Promise<TData>
-			initialPageParam: unknown
-			getNextPageParam: (lastPage: TData, allPages: TData[]) => unknown
-			getPreviousPageParam?: (firstPage: TData, allPages: TData[]) => unknown
-			[key: string]: unknown
-		}
-	) {
-		return useVueInfiniteQuery(computed(() => optionsFn(getO())))
+	/** `useInfiniteQuery((o) => o.order.list.infiniteOptions({ input, initialPageParam, getNextPageParam }))` */
+	function useInfiniteQuery<
+		TQueryFnData,
+		TError = DefaultError,
+		TData = InfiniteData<TQueryFnData>,
+		TQueryKey extends QueryKey = QueryKey,
+		TPageParam = unknown
+	>(
+		optionsFn: (
+			orpc: TOrpc
+		) => UseInfiniteQueryOptions<
+			TQueryFnData,
+			TError,
+			TData,
+			TQueryKey,
+			TPageParam
+		>
+	): UseInfiniteQueryReturnType<TData, TError> {
+		const options = computed(() => optionsFn(getO()))
+		return useVueInfiniteQuery<
+			TQueryFnData,
+			TError,
+			TData,
+			TQueryKey,
+			TPageParam
+		>(
+			options as unknown as UseInfiniteQueryOptions<
+				TQueryFnData,
+				TError,
+				TData,
+				TQueryKey,
+				TPageParam
+			>
+		)
 	}
 
 	/**
 	 * With `initialInput`, also returns `inputData`, a ref that `mutate()` and
 	 * `mutateAsync()` use when called without variables (form state).
 	 */
-	function useMutation<TOptions extends MutationOptionsLike>(
-		optionsFn: (orpc: TOrpc) => TOptions,
-		config: { initialInput: InferMutationVariables<TOptions> }
-	): VueMutationResult<TOptions> & {
-		inputData: Ref<InferMutationVariables<TOptions>>
-		mutate: (variables?: InferMutationVariables<TOptions>) => void
-		mutateAsync: (
-			variables?: InferMutationVariables<TOptions>
-		) => Promise<InferMutationData<TOptions>>
+	function useMutation<
+		TData = unknown,
+		TError = DefaultError,
+		TVariables = void,
+		TContext = unknown
+	>(
+		optionsFn: (
+			orpc: TOrpc
+		) => MutationObserverOptions<TData, TError, TVariables, TContext>,
+		config: { initialInput: TVariables }
+	): UseMutationReturnType<TData, TError, TVariables, TContext> & {
+		inputData: Ref<TVariables>
+		mutate: (variables?: TVariables) => void
+		mutateAsync: (variables?: TVariables) => Promise<TData>
 	}
-	function useMutation<TOptions extends MutationOptionsLike>(
-		optionsFn: (orpc: TOrpc) => TOptions
-	): VueMutationResult<TOptions>
-	function useMutation<TOptions extends MutationOptionsLike>(
-		optionsFn: (orpc: TOrpc) => TOptions,
-		config?: { initialInput: InferMutationVariables<TOptions> }
+	function useMutation<
+		TData = unknown,
+		TError = DefaultError,
+		TVariables = void,
+		TContext = unknown
+	>(
+		optionsFn: (
+			orpc: TOrpc
+		) => MutationObserverOptions<TData, TError, TVariables, TContext>
+	): UseMutationReturnType<TData, TError, TVariables, TContext>
+	function useMutation<TData, TError, TVariables, TContext>(
+		optionsFn: (
+			orpc: TOrpc
+		) => MutationObserverOptions<TData, TError, TVariables, TContext>,
+		config?: { initialInput: TVariables }
 	) {
-		// oRPC's mutation options are plain objects; vue-query's parameter type
-		// wraps every field in a ref, so the options cross this one boundary.
-		const mutation = useVueMutation(
-			computed(() => optionsFn(getO())) as unknown as Parameters<
-				typeof useVueMutation
-			>[0]
-		) as unknown as VueMutationResult<TOptions>
+		const mutation = useVueMutation(computed(() => optionsFn(getO())))
 		if (config?.initialInput === undefined) return mutation
-		const inputData = ref(config.initialInput) as Ref<
-			InferMutationVariables<TOptions>
-		>
+		const inputData = ref(config.initialInput) as Ref<TVariables>
 		return {
 			...mutation,
 			inputData,
-			mutate: (variables?: InferMutationVariables<TOptions>) =>
+			mutate: (variables?: TVariables) =>
 				mutation.mutate(variables ?? inputData.value),
-			mutateAsync: (variables?: InferMutationVariables<TOptions>) =>
+			mutateAsync: (variables?: TVariables) =>
 				mutation.mutateAsync(variables ?? inputData.value)
 		}
 	}
@@ -406,7 +442,8 @@ export function useApiClient<TOrpc = RegisteredOrpcUtils>(clientOptions?: {
 		})
 	}
 
-	const keyOf = (keyFn: (orpc: TOrpc) => QueryKey) => keyFn(getO())
+	const keyOf = <TKey extends QueryKey>(keyFn: (orpc: TOrpc) => TKey) =>
+		keyFn(getO())
 
 	return {
 		useQuery,
@@ -418,15 +455,30 @@ export function useApiClient<TOrpc = RegisteredOrpcUtils>(clientOptions?: {
 			filters?: Omit<InvalidateQueryFilters, 'queryKey'>
 		) => queryClient.invalidateQueries({ queryKey: keyOf(keyFn), ...filters }),
 		/** Route preloading and hover-to-prefetch. */
-		prefetch: <TData>(optionsFn: (orpc: TOrpc) => UseQueryOptions<TData>) =>
-			queryClient.prefetchQuery(optionsFn(getO())),
-		getQueryData: <TData>(keyFn: (orpc: TOrpc) => QueryKey) =>
-			queryClient.getQueryData<TData>(keyOf(keyFn)),
-		/** Optimistic updates. */
-		setQueryData: <TData>(
-			keyFn: (orpc: TOrpc) => QueryKey,
-			updater: TData | ((old: TData | undefined) => TData)
-		) => queryClient.setQueryData<TData>(keyOf(keyFn), updater),
+		prefetch: <
+			TQueryFnData,
+			TError = DefaultError,
+			TData = TQueryFnData,
+			TQueryKey extends QueryKey = QueryKey
+		>(
+			optionsFn: (
+				orpc: TOrpc
+			) => FetchQueryOptions<TQueryFnData, TError, TData, TQueryKey>
+		) => queryClient.prefetchQuery(optionsFn(getO())),
+		/** Data is typed from oRPC's tagged key; pass `<TData>` for an untagged one. */
+		getQueryData: <TData = never, TKey extends QueryKey = QueryKey>(
+			keyFn: (orpc: TOrpc) => TKey
+		): CachedData<TData, TKey> | undefined =>
+			queryClient.getQueryData<CachedData<TData, TKey>>(keyOf(keyFn)),
+		/** Optimistic updates, typed like `getQueryData`. */
+		setQueryData: <TData = never, TKey extends QueryKey = QueryKey>(
+			keyFn: (orpc: TOrpc) => TKey,
+			updater: Updater<
+				CachedData<TData, TKey> | undefined,
+				CachedData<TData, TKey> | undefined
+			>
+		) =>
+			queryClient.setQueryData<CachedData<TData, TKey>>(keyOf(keyFn), updater),
 		cancelQueries: (keyFn: (orpc: TOrpc) => QueryKey) =>
 			queryClient.cancelQueries({ queryKey: keyOf(keyFn) }),
 		removeQueries: (keyFn: (orpc: TOrpc) => QueryKey) =>

@@ -243,14 +243,13 @@ describe('useQueryErrorMessage', () => {
 
 describe('createOrpcMock', () => {
 	test('auto-mocks namespaces, keys and procedures with stable mocks', async () => {
-		const orpc = createOrpcMock({ fn: mock, keys: { order: ['orders'] } }) as {
+		const orpc = createOrpcMock<{
 			order: {
 				key(): unknown
 				get: { call(): Promise<AsyncIterable<unknown>> }
 			}
 			support: { key(): unknown }
-			$reset(): void
-		}
+		}>({ fn: mock, keys: { order: ['orders'] } })
 		expect(orpc.order.key()).toEqual(['orders'])
 		expect(orpc.support.key()).toEqual(['support'])
 		const iterable = await orpc.order.get.call()
