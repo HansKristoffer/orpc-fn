@@ -297,7 +297,7 @@ export function useLiveQuery<
  * events lost while it was down. Mount once, in the signed-in shell.
  *
  * ```ts
- * useInvalidationStream({}, client.realtime.changes, {
+ * useInvalidationStream({}, client.realtime.subscribeChanges, {
  *   enabled: signedIn,
  *   domains: { order: { debounceMs: 100, queryKeys: [orpc.order.key()] } }
  * })

@@ -687,7 +687,7 @@ export function useSubscriptionInvalidates<
  * events lost while it was down. Call once, in the signed-in shell.
  *
  * ```ts
- * useInvalidationStream({}, (o) => o.realtime.changes.call, {
+ * useInvalidationStream({}, (o) => o.realtime.subscribeChanges.call, {
  *   domains: { order: { debounceMs: 100, queryKeys: [orpc.order.key()] } }
  * })
  * ```

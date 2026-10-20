@@ -742,13 +742,10 @@ const getOrder = fnLive({
 const appClient: RouterClient<{
 	order: { get: typeof getOrder.procedure; watch: typeof getOrder.subscribe }
 	list: { get: typeof list.procedure; watch: typeof list.subscribe }
+	realtime: { changes: typeof changes }
 }> = createORPCClient(createRpcLink({ url: 'http://localhost/rpc' }))
 const appUtils = createTanstackQueryUtils(appClient)
 type Order = { id: string; total: number }
-declare const changes: (
-	input: Record<string, never>,
-	options: { signal: AbortSignal }
-) => Promise<AsyncIterable<{ domain: 'order' | 'invoice' }>>
 declare module 'orpc-fn/vue' {
 	interface Register {
 		utils: typeof appUtils
@@ -788,12 +785,19 @@ export function useConsumerHooks() {
 	// biome-ignore format: keep the overload error on the expected line
 	// @ts-expect-error `select` changes the cache type, so the stream needs `applyEvent`
 	vue.useLiveQuery({ id: '1' }, (input, o) => o.order.get.queryOptions({ input }), (o) => o.order.watch.call, { select: (order: Order) => order.total })
-	vue.useInvalidationStream({}, () => changes, {
-		// @ts-expect-error domains are the event's domains
+	// The server's `invalidationStream` route plugs straight into the client.
+	vue.useInvalidationStream({}, (o) => o.realtime.changes.call, {
+		domains: { tenant: { queryKeys: [appUtils.order.key()] } },
+		onEvent: (event) => {
+			if (event.domain === 'tenant') void event.kind
+		}
+	})
+	vue.useInvalidationStream({}, (o) => o.realtime.changes.call, {
+		// @ts-expect-error domains are the stream's domains
 		domains: { shipment: { queryKeys: [] } }
 	})
-	react.useInvalidationStream({}, changes, {
-		domains: { order: { queryKeys: [appUtils.order.key()] } }
+	react.useInvalidationStream({}, appClient.realtime.changes, {
+		domains: { room: { debounceMs: 500, queryKeys: [appUtils.order.key()] } }
 	})
 
 	// React takes the client procedure as is.

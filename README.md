@@ -166,6 +166,8 @@ export const subscribeChanges = fn({
 })
 ```
 
+On the client, `useInvalidationStream` from `orpc-fn/vue` or `orpc-fn/react` consumes it; its `domains` map is typed from the route's domains.
+
 **Graceful shutdown:** `await shutdown()` stops new subscriptions/publication, cancels initialization/retries, ends existing streams and awaits cleanup. It closes a supplied transport only with `ownsTransport: true`, and a lazy `transport: () => …` only if it was ever created; it is never created during or after shutdown. A custom transport whose pending `subscribe` cannot be cancelled may resolve later; that late subscription is immediately released. `drainPubSubSubscribers()` remains a synchronous, nonterminal operation. Both are per factory.
 
 Recent event IDs deduplicate replay/live overlap; legacy payloads remain readable. Replay is bounded and TTL-limited, so it is not durable resume. A snapshot may already include a queued delta: reducers must use revisions or idempotence. See [the revision example](examples/adoption/revisions.ts). Parsing ingress, replay staging and subscriber queues are bounded; positive queue/TTL/time options are validated.
@@ -348,7 +350,7 @@ const order = useLiveQuery(
 )
 
 // Once, in the signed-in shell: one stream of `{ domain }` events invalidates list queries.
-useInvalidationStream({}, (o) => o.realtime.changes.call, {
+useInvalidationStream({}, (o) => o.realtime.subscribeChanges.call, {
   domains: { order: { debounceMs: 100, queryKeys: [orpc.order.key()] } },
   logger
 })
@@ -376,7 +378,7 @@ const { status } = useOrpcSubscription({ id }, client.order.watch, { onEvent: (o
 // For a large cache your `applyEvent` keeps immutable, pass `structuralSharing: false` in the query options.
 const order = useLiveQuery({ id }, (input) => orpc.order.get.queryOptions({ input }), client.order.watch)
 
-useInvalidationStream({}, client.realtime.changes, {
+useInvalidationStream({}, client.realtime.subscribeChanges, {
   enabled: signedIn,
   domains: { order: { debounceMs: 500, queryKeys: [orpc.order.list.key()] } }
 })
