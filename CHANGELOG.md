@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.4.0...v0.5.0) (2026-10-20)
+
+
+### Features
+
+* add orpc-fn/vue, orpc-fn/vue/testing and orpc-fn/react client subpaths ([#12](https://github.com/HansKristoffer/orpc-fn/issues/12)) ([7cc5393](https://github.com/HansKristoffer/orpc-fn/commit/7cc5393c29c244a7bde693f2d2b422d26c617632))
+* **cli:** procedureCommands turns fn() routes into hanzio/cli commands ([#15](https://github.com/HansKristoffer/orpc-fn/issues/15)) ([7caa3a9](https://github.com/HansKristoffer/orpc-fn/commit/7caa3a9013b13112217a47c23e9fcbd20db0e210))
+* **live:** scoped change buses, invalidation streams and transport stats ([71393d4](https://github.com/HansKristoffer/orpc-fn/commit/71393d42e225ef2ddbc226c3c88bf1eee8a08c33))
+* **live:** scoped change buses, invalidation streams and transport stats ([b926145](https://github.com/HansKristoffer/orpc-fn/commit/b92614535e3fd0c8714aafd6ba291e5d1e498b55))
+
 ## [0.4.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.3.0...v0.4.0) (2026-10-10)
 
 
