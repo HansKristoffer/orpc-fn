@@ -129,9 +129,9 @@ export type OrpcSubscribeFn<TInput, TEvent, TOrpc = RegisteredOrpcUtils> = (
 
 export interface UseSubscriptionOptions<TEvent, TOrpc = RegisteredOrpcUtils> {
 	/** Start the stream on its own (default: true). With false, call `connect()`. */
-	immediate?: MaybeRefOrGetter<boolean>
+	immediate?: MaybeRefOrGetter<boolean> | undefined
 	onEvent?: (event: TEvent, meta?: { connectionId: number }) => void
-	onError?: (error: Error) => void
+	onError?: ((error: Error) => void) | undefined
 	/** Every successful connect; `connectionId > 1` is a reconnect. */
 	onConnect?: (connectionId: number) => void
 	onClose?: () => void
@@ -145,13 +145,13 @@ export interface UseSubscriptionOptions<TEvent, TOrpc = RegisteredOrpcUtils> {
 	 * does not retry. Default: true.
 	 */
 	autoReconnectOnClose?: boolean
-	orpc?: MaybeRefOrGetter<TOrpc>
+	orpc?: MaybeRefOrGetter<TOrpc> | undefined
 	/**
 	 * Close the stream while the page is hidden (default: true), so a
 	 * background tab holds no server connection. It reconnects, and a live
 	 * route re-sends its snapshot, when the page is visible again.
 	 */
-	respectVisibility?: boolean
+	respectVisibility?: boolean | undefined
 }
 
 export interface UseSubscriptionReturn<TEvent> {
@@ -312,7 +312,7 @@ type VueMutationResult<TOptions> = ReturnType<
  * another client than the provided one.
  */
 export function useApiClient<TOrpc = RegisteredOrpcUtils>(clientOptions?: {
-	orpc?: MaybeRefOrGetter<TOrpc>
+	orpc?: MaybeRefOrGetter<TOrpc> | undefined
 }) {
 	const queryClient = useQueryClient()
 	const getO = useUtilsGetter(clientOptions?.orpc)
@@ -566,13 +566,9 @@ export function useLiveQuery<
 		),
 		subscribeFn,
 		{
-			...(options.immediate === undefined
-				? {}
-				: { immediate: options.immediate }),
-			...(options.respectVisibility === undefined
-				? {}
-				: { respectVisibility: options.respectVisibility }),
-			...(options.onError ? { onError: options.onError } : {}),
+			immediate: options.immediate,
+			respectVisibility: options.respectVisibility,
+			onError: options.onError,
 			maxEvents: 1,
 			orpc: getO,
 			onConnect: (connectionId) => {
@@ -660,9 +656,9 @@ export function useSubscriptionInvalidates<
 	} = {}
 ): UseSubscriptionReturn<TEvent> {
 	const { onEvent, shouldInvalidate, ...subscriptionOptions } = options
-	const { useSubscription, invalidate } = useApiClient<TOrpc>(
-		options.orpc ? { orpc: options.orpc } : undefined
-	)
+	const { useSubscription, invalidate } = useApiClient<TOrpc>({
+		orpc: options.orpc
+	})
 	return useSubscription(input, subscribeFn, {
 		...subscriptionOptions,
 		onEvent: (event) => {
@@ -705,13 +701,9 @@ export function useInvalidationStream<
 		undefined,
 		(_input, orpc, opts) => subscribe(orpc, opts),
 		{
-			...(options.immediate === undefined
-				? {}
-				: { immediate: options.immediate }),
-			...(options.respectVisibility === undefined
-				? {}
-				: { respectVisibility: options.respectVisibility }),
-			...(options.orpc ? { orpc: options.orpc } : {}),
+			immediate: options.immediate,
+			respectVisibility: options.respectVisibility,
+			orpc: options.orpc,
 			maxEvents: 1,
 			onEvent: coordinator.event,
 			onConnect: coordinator.connect,

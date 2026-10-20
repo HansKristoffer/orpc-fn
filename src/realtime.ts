@@ -30,7 +30,7 @@ export function nextReconnectDelayMs(
 	return Math.round(base + base * 0.25 * random())
 }
 
-export type SubscriptionRunnerOptions<TEvent> = {
+type SubscriptionRunnerOptions<TEvent> = {
 	open: (signal: AbortSignal) => Promise<AsyncIterable<TEvent>>
 	onEvent: (event: TEvent, connectionId: number) => void
 	onStatus: (status: LiveConnectionStatus) => void
@@ -223,10 +223,10 @@ async function closeIterator<T>(iterator: AsyncIterator<T> | null) {
 const toError = (error: unknown) =>
 	error instanceof Error ? error : new Error(String(error))
 
-export type QueryKeyLike = readonly unknown[]
+type QueryKeyLike = readonly unknown[]
 
 /** The part of a TanStack `QueryClient` the coordinator uses. */
-export type InvalidatingQueryClient = {
+type InvalidatingQueryClient = {
 	invalidateQueries(filters: {
 		queryKey: QueryKeyLike
 		refetchType?: 'active' | 'inactive' | 'all' | 'none'
@@ -262,7 +262,7 @@ export type InvalidationStreamOptions<TEvent extends { domain: string }> = {
  * reconnect stale until the next change; not waiting at all lets a stream that
  * dies the instant it opens refetch everything once per retry.
  */
-export const INVALIDATION_SETTLE_MS = 1_500
+const SETTLE_MS = 1_500
 const DISCONNECT_LOG_INTERVAL_MS = 60_000
 
 /**
@@ -282,8 +282,8 @@ export function createInvalidationCoordinator<
 	let catchUpPending = false
 	let lastLostLogAt = Number.NEGATIVE_INFINITY
 
-	const domainConfig = (domain: unknown): InvalidationDomain | undefined =>
-		typeof domain === 'string' && Object.hasOwn(options.domains, domain)
+	const domainConfig = (domain: string): InvalidationDomain | undefined =>
+		Object.hasOwn(options.domains, domain)
 			? (options.domains as Record<string, InvalidationDomain | undefined>)[
 					domain
 				]
@@ -322,27 +322,29 @@ export function createInvalidationCoordinator<
 		event(event: TEvent) {
 			// A delivered event proves the connection; no need to wait it out.
 			markHealthy()
-			const domain = (event as { domain?: unknown } | null)?.domain
+
+			// The stream is typed, but a JavaScript caller or a newer server may send anything.
+			const domain: unknown = (event as { domain?: unknown } | null)?.domain
+			if (typeof domain !== 'string') return
+
 			const config = domainConfig(domain)
-			if (config) {
-				const delay = config.debounceMs ?? 0
-				if (delay <= 0) invalidate(config)
-				else if (!timers.has(domain as string)) {
-					timers.set(
-						domain as string,
-						setTimeout(() => {
-							timers.delete(domain as string)
-							invalidate(config)
-						}, delay)
-					)
-				}
+			const delay = config?.debounceMs ?? 0
+			if (config && delay <= 0) {
+				invalidate(config)
+			} else if (config && !timers.has(domain)) {
+				const timer = setTimeout(() => {
+					timers.delete(domain)
+					invalidate(config)
+				}, delay)
+				timers.set(domain, timer)
 			}
-			if (typeof domain === 'string') options.onEvent?.(event)
+
+			options.onEvent?.(event)
 		},
 		connect(connectionId: number) {
 			clearSettleTimer()
 			catchUpPending ||= connectionId > 1
-			settleTimer = setTimeout(markHealthy, INVALIDATION_SETTLE_MS)
+			settleTimer = setTimeout(markHealthy, SETTLE_MS)
 		},
 		lost() {
 			// Reconnecting is the subscription's job; this connection can no longer settle.

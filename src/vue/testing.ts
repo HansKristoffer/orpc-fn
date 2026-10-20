@@ -146,6 +146,7 @@ export function createTestStream<T>(): TestStream<T> {
 				(arg): arg is { signal?: AbortSignal } =>
 					isObject(arg) && 'signal' in arg
 			)
+
 		type Queued = {
 			result: IteratorResult<T, undefined>
 			delivered: () => void
@@ -159,6 +160,7 @@ export function createTestStream<T>(): TestStream<T> {
 		} | null = null
 		// The event the consumer holds; it is processed once it asks for the next.
 		let handedOut: (() => void) | null = null
+
 		const settle = () => {
 			if (!pending) return
 			const current = pending
@@ -173,12 +175,15 @@ export function createTestStream<T>(): TestStream<T> {
 			handedOut = next.delivered
 			current.resolve(next.result)
 		}
+
 		const close = () => {
 			closed = true
 			handedOut?.()
 			handedOut = null
 			for (const queued of queue) queued.delivered()
 		}
+
+		// oRPC rejects a pending `next()` with an AbortError when the call is aborted.
 		options?.signal?.addEventListener('abort', () => {
 			const abort = new Error('This operation was aborted')
 			abort.name = 'AbortError'
@@ -186,6 +191,7 @@ export function createTestStream<T>(): TestStream<T> {
 			settle()
 			close()
 		})
+
 		const connection: TestConnection<T> = {
 			input: args[0],
 			signal: options?.signal,
@@ -200,7 +206,8 @@ export function createTestStream<T>(): TestStream<T> {
 				})
 			},
 			end() {
-				queue.push({ result: { done: true, value: undefined }, delivered() {} })
+				const done = { done: true as const, value: undefined }
+				queue.push({ result: done, delivered: () => {} })
 				settle()
 				closed = true
 			},
@@ -210,6 +217,7 @@ export function createTestStream<T>(): TestStream<T> {
 				close()
 			}
 		}
+
 		const iterator: AsyncIterator<T, undefined> = {
 			next() {
 				handedOut?.()
@@ -226,6 +234,7 @@ export function createTestStream<T>(): TestStream<T> {
 				return { done: true, value: undefined }
 			}
 		}
+
 		connections.push(connection)
 		for (const waiter of [...openWaiters]) {
 			if (connections.length < waiter.count) continue

@@ -18,7 +18,7 @@ export type SubscribeFn<TInput, TEvent> = (
 
 export type UseOrpcSubscriptionOptions<TInput, TEvent> = {
 	/** Run the stream (default: true). */
-	enabled?: boolean
+	enabled?: boolean | undefined
 	onEvent?: (
 		event: TEvent,
 		meta: { connectionId: number; input: TInput }
@@ -31,7 +31,7 @@ export type UseOrpcSubscriptionOptions<TInput, TEvent> = {
 	 * Close the stream while the app is not focused (default: true). Focus is
 	 * TanStack's `focusManager`: on React Native, wire it to `AppState` once.
 	 */
-	pauseWhenUnfocused?: boolean
+	pauseWhenUnfocused?: boolean | undefined
 }
 
 const subscribeFocus = (listener: () => void) =>
@@ -39,7 +39,7 @@ const subscribeFocus = (listener: () => void) =>
 const getFocus = () => focusManager.isFocused()
 
 /** Whether the app is focused, from TanStack's `focusManager`. */
-export function useIsFocused(): boolean {
+function useIsFocused(): boolean {
 	return useSyncExternalStore(subscribeFocus, getFocus, getFocus)
 }
 
@@ -134,10 +134,8 @@ export function useInvalidationStream<TEvent extends { domain: string }>(
 		undefined,
 		(_input, opts) => subscribe(opts),
 		{
-			...(options.enabled === undefined ? {} : { enabled: options.enabled }),
-			...(options.pauseWhenUnfocused === undefined
-				? {}
-				: { pauseWhenUnfocused: options.pauseWhenUnfocused }),
+			enabled: options.enabled,
+			pauseWhenUnfocused: options.pauseWhenUnfocused,
 			onEvent: coordinator.event,
 			onConnect: coordinator.connect,
 			onError: coordinator.lost,

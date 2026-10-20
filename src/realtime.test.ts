@@ -10,7 +10,6 @@ import {
 import {
 	createInvalidationCoordinator,
 	createSubscriptionRunner,
-	INVALIDATION_SETTLE_MS,
 	type LiveConnectionStatus,
 	nextReconnectDelayMs
 } from './realtime.js'
@@ -162,6 +161,8 @@ describe('createSubscriptionRunner', () => {
 })
 
 describe('createInvalidationCoordinator', () => {
+	// How long a quiet reconnect must stay up before it counts as healthy.
+	const settleMs = 1_500
 	const invalidateQueries = mock(async (_filters: unknown) => {})
 	type ChangeEvent = { domain: 'support' | 'knowledgeGap' | 'workItem' }
 	const queryKeys = {
@@ -213,18 +214,6 @@ describe('createInvalidationCoordinator', () => {
 		expect(invalidatedKeys()).toEqual([['support']])
 	})
 
-	test('skips live queries via the predicate', () => {
-		const coordinator = coordinate()
-		coordinator.event({ domain: 'workItem' })
-		jest.advanceTimersByTime(100)
-		const [filters] = invalidateQueries.mock.calls[0] ?? []
-		const { predicate } = filters as {
-			predicate: (query: { meta?: Record<string, unknown> }) => boolean
-		}
-		expect(predicate({ meta: { live: true } })).toBe(false)
-		expect(predicate({ meta: {} })).toBe(true)
-	})
-
 	test('a steady stream of events cannot postpone the refresh', () => {
 		const coordinator = coordinate()
 		coordinator.event({ domain: 'support' })
@@ -256,7 +245,7 @@ describe('createInvalidationCoordinator', () => {
 	test('the first connection never triggers a catch-up refetch', () => {
 		const coordinator = coordinate()
 		coordinator.connect(1)
-		jest.advanceTimersByTime(INVALIDATION_SETTLE_MS)
+		jest.advanceTimersByTime(settleMs)
 		coordinator.event({ domain: 'knowledgeGap' })
 		expect(invalidatedKeys()).toEqual([['knowledgeGap']])
 	})
@@ -273,7 +262,7 @@ describe('createInvalidationCoordinator', () => {
 	test('reconnect catch-up fires after the settle window if the stream stays quiet', () => {
 		const coordinator = coordinate()
 		coordinator.connect(2)
-		jest.advanceTimersByTime(INVALIDATION_SETTLE_MS - 1)
+		jest.advanceTimersByTime(settleMs - 1)
 		expect(invalidateQueries).toHaveBeenCalledTimes(0)
 		jest.advanceTimersByTime(1)
 		expect(invalidatedKeys()).toContainEqual(['support'])
@@ -283,7 +272,7 @@ describe('createInvalidationCoordinator', () => {
 		const coordinator = coordinate()
 		coordinator.connect(2)
 		coordinator.lost()
-		jest.advanceTimersByTime(INVALIDATION_SETTLE_MS)
+		jest.advanceTimersByTime(settleMs)
 		expect(invalidateQueries).toHaveBeenCalledTimes(0)
 	})
 
@@ -292,7 +281,7 @@ describe('createInvalidationCoordinator', () => {
 		coordinator.connect(2)
 		coordinator.lost()
 		coordinator.connect(3)
-		jest.advanceTimersByTime(INVALIDATION_SETTLE_MS)
+		jest.advanceTimersByTime(settleMs)
 		expect(invalidatedKeys()).toContainEqual(['support'])
 	})
 

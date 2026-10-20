@@ -215,15 +215,20 @@ describe('useInvalidationStream', () => {
 				domains: { order: { queryKeys: [['order']] } }
 			})
 		)
-		const invalidate = mock(
-			app.queryClient.invalidateQueries.bind(app.queryClient)
-		)
-		app.queryClient.invalidateQueries = invalidate
+		const cache = app.queryClient.getQueryCache()
+		cache.build(app.queryClient, { queryKey: ['order', 'list'] })
+		cache.build(app.queryClient, {
+			queryKey: ['order', 'live'],
+			meta: { live: true }
+		})
+
 		await stream.opened()
 		await stream.push({ domain: 'order' })
-		expect(invalidate).toHaveBeenCalledWith(
-			expect.objectContaining({ queryKey: ['order'] })
-		)
+
+		const isInvalidated = (queryKey: string[]) =>
+			app.queryClient.getQueryState(queryKey)?.isInvalidated
+		expect(isInvalidated(['order', 'list'])).toBe(true)
+		expect(isInvalidated(['order', 'live'])).toBe(false)
 		app.stop()
 	})
 })
