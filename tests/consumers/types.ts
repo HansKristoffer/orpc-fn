@@ -27,6 +27,9 @@ import { hasTag, listTools } from 'orpc-fn/mcp'
 import { mountOrpc } from 'orpc-fn/hono'
 import { createRpcLink, hasOrpcErrorCode } from 'orpc-fn/client'
 import { createBetterAuthExpoLink } from 'orpc-fn/expo'
+import { createTanstackQueryUtils } from '@orpc/tanstack-query'
+import * as vue from 'orpc-fn/vue'
+import * as react from 'orpc-fn/react'
 import { createORPCClient } from '@orpc/client'
 import type { RouterClient } from '@orpc/server'
 import { ioredisTransport } from 'orpc-fn/live/ioredis'
@@ -728,3 +731,139 @@ fnLive({ name: 'wrongStateSchema', input: z.object({}), output: z.object({ n: z.
 // biome-ignore format: keep the overload error on the expected line
 // @ts-expect-error patch output needs a separate wire schema
 fnLive({ name: 'missingPatchSchema', input: z.object({}), handler: () => 1, live: { channel: 'x', eventSchema: z.object({}), stateSchema: z.number(), transformerFn: () => fnLivePatch(2, { delta: 1 }) } })
+
+// ── Vue and React ───────────────────────────────────────────────────────────
+const getOrder = fnLive({
+	name: 'order.get',
+	input: z.object({ id: z.string() }),
+	handler: ({ input }) => ({ id: input.id, total: 1 }),
+	live: { eventSchema: z.object({ id: z.string() }), channel: 'orders' }
+})
+const appClient: RouterClient<{
+	order: { get: typeof getOrder.procedure; watch: typeof getOrder.subscribe }
+	list: { get: typeof list.procedure; watch: typeof list.subscribe }
+	realtime: { changes: typeof changes }
+	typed: { errors: typeof typedErrors }
+}> = createORPCClient(createRpcLink({ url: 'http://localhost/rpc' }))
+const appUtils = createTanstackQueryUtils(appClient)
+type Order = { id: string; total: number }
+declare module 'orpc-fn/vue' {
+	interface Register {
+		utils: typeof appUtils
+	}
+}
+// Hooks run inside a component; these only need to compile.
+export function useConsumerHooks() {
+	// Registered utils reach every callback without type arguments, and
+	// TanStack's own generics come through: `select`, tagged keys, page
+	// params and declared errors.
+	const api = vue.useApiClient()
+	const orderQuery = api.useQuery((o) =>
+		o.order.get.queryOptions({ input: { id: '1' } })
+	)
+	const orderTotal = api.useQuery((o) =>
+		o.order.get.queryOptions({
+			input: { id: '1' },
+			select: (order) => order.total
+		})
+	)
+	const cachedOrder = api.getQueryData((o) =>
+		o.order.get.queryKey({ input: { id: '1' } })
+	)
+	api.setQueryData(
+		(o) => o.order.get.queryKey({ input: { id: '1' } }),
+		(previous) => previous && { ...previous, total: previous.total + 1 }
+	)
+	const pages = api.useInfiniteQuery((o) =>
+		o.order.get.infiniteOptions({
+			input: (page: number) => ({ id: String(page) }),
+			initialPageParam: 0,
+			getNextPageParam: (last) => last.total
+		})
+	)
+	const failing = api.useMutation((o) => o.typed.errors.mutationOptions())
+	const liveOrder = vue.useLiveQuery(
+		{ id: '1' },
+		(input, o) => o.order.get.queryOptions({ input }),
+		(o) => o.order.watch.call
+	)
+	// vue-query's own options pass through, e.g. `shallow` for large payloads.
+	vue.useLiveQuery(
+		{ id: '1' },
+		(input, o) => o.order.get.queryOptions({ input, shallow: true }),
+		(o) => o.order.watch.call
+	)
+	// biome-ignore format: keep the overload error on the expected line
+	// @ts-expect-error the input is typed from the procedure
+	vue.useLiveQuery({ id: 1 }, (input, o) => o.order.get.queryOptions({ input: { id: String(input.id) } }), (o) => o.order.watch.call)
+	// biome-ignore format: keep the overload error on the expected line
+	// @ts-expect-error a patch stream needs `applyEvent` to fold events into the cache
+	vue.useLiveQuery({ org: 'a' }, (input, o) => o.list.get.queryOptions({ input }), (o) => o.list.watch.call)
+	vue.useLiveQuery(
+		{ org: 'a' },
+		(input, o) => o.list.get.queryOptions({ input }),
+		(o) => o.list.watch.call,
+		{
+			applyEvent: (event, previous) => ('touched' in event ? previous : event)
+		}
+	)
+	// biome-ignore format: keep the overload error on the expected line
+	// @ts-expect-error `select` changes the cache type, so the stream needs `applyEvent`
+	vue.useLiveQuery({ id: '1' }, (input, o) => o.order.get.queryOptions({ input }), (o) => o.order.watch.call, { select: (order: Order) => order.total })
+	// The server's `invalidationStream` route plugs straight into the client.
+	vue.useInvalidationStream({}, (o) => o.realtime.changes.call, {
+		domains: { tenant: { queryKeys: [appUtils.order.key()] } },
+		onEvent: (event) => {
+			if (event.domain === 'tenant') void event.kind
+		}
+	})
+	vue.useInvalidationStream({}, (o) => o.realtime.changes.call, {
+		// @ts-expect-error domains are the stream's domains
+		domains: { shipment: { queryKeys: [] } }
+	})
+	react.useInvalidationStream({}, appClient.realtime.changes, {
+		domains: { room: { debounceMs: 500, queryKeys: [appUtils.order.key()] } }
+	})
+
+	// React takes the client procedure as is.
+	react.useOrpcSubscription({ org: 'a' }, appClient.list.watch, {
+		onEvent: (event, { input }) => {
+			const org: string = input.org
+			void [event, org]
+		}
+	})
+	// @ts-expect-error the input is typed from the procedure
+	react.useOrpcSubscription({ org: 1 }, appClient.list.watch)
+	const reactOrder = react.useLiveQuery(
+		{ id: '1' },
+		(input) => appUtils.order.get.queryOptions({ input }),
+		appClient.order.watch
+	)
+	return [
+		orderQuery,
+		liveOrder,
+		reactOrder,
+		orderTotal,
+		cachedOrder,
+		pages,
+		failing
+	] as const
+}
+type Hooks = ReturnType<typeof useConsumerHooks>
+export type ClientHookTypes = [
+	Assert<Equal<Hooks[0]['data']['value'], Order | undefined>>,
+	Assert<Equal<Hooks[1]['data']['value'], Order | undefined>>,
+	Assert<Equal<Hooks[2]['data'], Order | undefined>>,
+	Assert<Equal<Hooks[3]['data']['value'], number | undefined>>,
+	Assert<Equal<Hooks[4], Order | undefined>>,
+	Assert<Equal<NonNullable<Hooks[5]['data']['value']>['pageParams'], number[]>>,
+	Assert<
+		Equal<
+			Extract<
+				NonNullable<Hooks[6]['error']['value']>,
+				{ code: 'DOMAIN' }
+			>['data'],
+			{ id: string }
+		>
+	>
+]

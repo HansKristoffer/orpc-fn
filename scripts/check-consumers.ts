@@ -73,7 +73,11 @@ try {
 		'@mastra/core',
 		'@opentelemetry/api',
 		'@modelcontextprotocol/sdk',
-		'@modelcontextprotocol/server'
+		'@modelcontextprotocol/server',
+		'vue',
+		'@tanstack/vue-query',
+		'react',
+		'@tanstack/react-query'
 	]
 	const versions = (names: string[]) =>
 		names.map((name) => {
@@ -84,7 +88,11 @@ try {
 					'@mastra/core': '1.51.0',
 					'@opentelemetry/api': '1.9.0',
 					'@modelcontextprotocol/sdk': '1.32.0',
-					'@modelcontextprotocol/server': '2.0.0'
+					'@modelcontextprotocol/server': '2.0.0',
+					vue: '3.3.0',
+					'@tanstack/vue-query': '5.80.0',
+					react: '18.0.0',
+					'@tanstack/react-query': '5.80.0'
 				}
 				return `${name}@${minimum[name] ?? '1.14.0'}`
 			}
@@ -103,7 +111,13 @@ try {
 	// Adapters and types with every optional peer installed.
 	await install([
 		...versions(optional),
+		// The client type tests build real query utils; same version as @orpc/client.
+		versions(['@orpc/client'])[0]?.replace(
+			'@orpc/client',
+			'@orpc/tanstack-query'
+		) ?? '',
 		'@types/node@22',
+		'@types/react@19',
 		`typescript@${process.env.TYPESCRIPT_VERSION || rootTypeScript}`
 	])
 	await run([...node, 'smoke.mjs'], fixture, { WITH_OPTIONAL_PEERS: '1' })

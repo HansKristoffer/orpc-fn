@@ -74,7 +74,11 @@ oRPC parses a handler's return value through the output schema, so the handler r
 
 ## Client helpers
 
-`orpc-fn/client` and `orpc-fn/expo` hold only what the apps wrote by hand: a batching link that sends subscriptions on their own, and the `expo/fetch` bridge with the Better Auth headers. `createORPCClient` and `createTanstackQueryUtils` are already one line each in `@orpc/client` and `@orpc/tanstack-query`, so they are not wrapped. Expo and React Native are passed in (`fetch`, `native`) rather than imported, so the package has no Expo dependency. The Vue live-query composables stay in lullu until a second app needs them.
+`orpc-fn/client` and `orpc-fn/expo` hold only what the apps wrote by hand: a batching link that sends subscriptions on their own, and the `expo/fetch` bridge with the Better Auth headers. `createORPCClient` and `createTanstackQueryUtils` are already one line each in `@orpc/client` and `@orpc/tanstack-query`, so they are not wrapped. Expo and React Native are passed in (`fetch`, `native`) rather than imported, so the package has no Expo dependency.
+
+`orpc-fn/vue` and `orpc-fn/react` hold the subscription, live-query and invalidation-stream code hellu wrote once per framework. The connection logic (generation-guarded connects, backoff, reconnect catch-up) is one framework-free core; each subpath is a thin wrapper. Pausing follows TanStack's `focusManager` instead of `document` or React Native's `AppState`, so neither subpath imports a platform module and an app sets the focus source once. The "refetch stale queries on focus" that hellu's coordinator did by hand is TanStack's own `refetchOnWindowFocus`, so it is not repeated. Persisting the cache is TanStack's persister; we only supply oRPC's serializer and the cache-owner reset.
+
+`@orpc/tanstack-query` 1.14 ships `experimental_liveOptions`, a query whose data is the latest event of a stream. For a plain `fnLive` snapshot stream it is enough, and an app can use it directly. `useLiveQuery` stays because the apps also need what it lacks: patch streams folded by `applyEvent`, an HTTP seed that a persisted or server-rendered cache can satisfy, backoff reconnects after a stream ends, and closing streams in hidden tabs.
 
 ## Guards return a decision
 
@@ -110,4 +114,4 @@ These limits are deliberate; changing one needs a consumer that requires it.
 
 ## What waits for a consumer
 
-These stay in the app: caching policy, mutation retries, database transactions, rate limits, permissions, feature flags and jobs. These are reasonable additions but wait for a consumer that needs them: a typed `snapshot`/`patch`/`resync` stream envelope, outbox hooks, Redis Cluster support, disposal of scoped extras, and React or Vue live composables.
+These stay in the app: caching policy, mutation retries, database transactions, rate limits, permissions, feature flags and jobs. These are reasonable additions but wait for a consumer that needs them: a typed `snapshot`/`patch`/`resync` stream envelope, outbox hooks, Redis Cluster support, and disposal of scoped extras.
