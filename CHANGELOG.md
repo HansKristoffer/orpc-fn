@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.5.1...v0.6.0) (2026-10-21)
+
+
+### Features
+
+* **live:** default a change bus's inputSchema and add channelFor(scope) ([#19](https://github.com/HansKristoffer/orpc-fn/issues/19)) ([89a5148](https://github.com/HansKristoffer/orpc-fn/commit/89a5148fb8f37c6d224b4997a182820f6f4d051f))
+
+
+### Bug Fixes
+
+* **vue:** type useApiClient's composables from the route and the registered utils ([#18](https://github.com/HansKristoffer/orpc-fn/issues/18)) ([fbb7984](https://github.com/HansKristoffer/orpc-fn/commit/fbb79843b26e720c9b1d95f2b0e533b93ce00572))
+
 ## [0.5.1](https://github.com/HansKristoffer/orpc-fn/compare/v0.5.0...v0.5.1) (2026-10-21)
 
 
