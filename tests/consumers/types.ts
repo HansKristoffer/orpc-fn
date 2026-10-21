@@ -739,8 +739,27 @@ const getOrder = fnLive({
 	handler: ({ input }) => ({ id: input.id, total: 1 }),
 	live: { eventSchema: z.object({ id: z.string() }), channel: 'orders' }
 })
+const updateOrder = fn({
+	name: 'order.update',
+	input: z.object({
+		id: z.string(),
+		status: z.enum(['open', 'held']),
+		note: z.string().optional()
+	}),
+	handler: ({ input }) => ({ id: input.id, total: 1 })
+})
+const orderStats = fn({
+	name: 'order.stats',
+	input: z.object({}),
+	handler: () => ({ pendingCount: 0 })
+})
 const appClient: RouterClient<{
-	order: { get: typeof getOrder.procedure; watch: typeof getOrder.subscribe }
+	order: {
+		get: typeof getOrder.procedure
+		watch: typeof getOrder.subscribe
+		update: typeof updateOrder
+		stats: typeof orderStats
+	}
 	list: { get: typeof list.procedure; watch: typeof list.subscribe }
 	realtime: { changes: typeof changes }
 	typed: { errors: typeof typedErrors }
@@ -782,6 +801,37 @@ export function useConsumerHooks() {
 		})
 	)
 	const failing = api.useMutation((o) => o.typed.errors.mutationOptions())
+	// The mutation's input comes from the route; a narrower `initialInput` is
+	// checked against it and does not narrow the form state.
+	const draft = { id: '1', status: 'open' as const }
+	const form = api.useMutation(
+		(o) =>
+			o.order.update.mutationOptions({
+				onSuccess: (result) => void result.total
+			}),
+		{ initialInput: draft }
+	)
+	form.inputData.value.note = 'rush'
+	form.inputData.value.status = 'held'
+	form.mutate({ id: '1', status: 'held', note: 'rush' })
+	api.useMutation((o) => o.order.update.mutationOptions(), {
+		// @ts-expect-error `initialInput` is checked against the route input
+		initialInput: { id: '1', status: 'closed' }
+	})
+	// Callback options see the route output.
+	const stats = api.useQuery((o) =>
+		o.order.stats.queryOptions({
+			input: {},
+			refetchInterval: (query) =>
+				query.state.data?.pendingCount ? 30_000 : false
+		})
+	)
+	// The registered utils are the default, also through `ReturnType`.
+	const invalidate: vue.ApiClient['invalidate'] = api.invalidate
+	const viaReturnType: ReturnType<typeof vue.useApiClient>['invalidate'] =
+		invalidate
+	viaReturnType((o) => o.order.get.key())
+	api.orpc.order.get.queryOptions({ input: { id: '1' } })
 	const liveOrder = vue.useLiveQuery(
 		{ id: '1' },
 		(input, o) => o.order.get.queryOptions({ input }),
@@ -846,7 +896,9 @@ export function useConsumerHooks() {
 		orderTotal,
 		cachedOrder,
 		pages,
-		failing
+		failing,
+		form,
+		stats
 	] as const
 }
 type Hooks = ReturnType<typeof useConsumerHooks>
@@ -865,5 +917,12 @@ export type ClientHookTypes = [
 			>['data'],
 			{ id: string }
 		>
-	>
+	>,
+	Assert<
+		Equal<
+			Hooks[7]['inputData']['value'],
+			{ id: string; status: 'open' | 'held'; note?: string | undefined }
+		>
+	>,
+	Assert<Equal<Hooks[8]['data']['value'], { pendingCount: number } | undefined>>
 ]

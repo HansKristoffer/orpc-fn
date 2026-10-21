@@ -368,6 +368,16 @@ const { useQuery, useMutation, invalidate } = useApiClient()
 const orders = useQuery((o) => o.order.list.queryOptions({ input: { search: search.value } }))
 const save = useMutation((o) => o.order.update.mutationOptions({ onSuccess: () => invalidate((o) => o.order.key()) }))
 
+// Form state: `inputData` is typed from the route; `initialInput` is checked against it.
+const { inputData: form, mutate } = useMutation((o) => o.order.update.mutationOptions(), {
+  initialInput: { id: props.id, data: {} }
+})
+
+// A helper that takes the composables: `ApiClient` is bound to the registered utils.
+function invalidateOrders(invalidate: ApiClient['invalidate']) {
+  void invalidate((o) => o.order.key())
+}
+
 // The client half of `fnLive`: HTTP seeds the cache, the stream keeps it current.
 const order = useLiveQuery(
   () => ({ id: props.id }),
@@ -382,7 +392,7 @@ useInvalidationStream({}, (o) => o.realtime.subscribeChanges.call, {
 })
 ```
 
-`useOrpcSubscription` (also `useApiClient().useSubscription`) reconnects with jittered backoff and closes while the page is hidden (`respectVisibility: false` keeps it). `useLiveQuery` writes each stream event under the key it was opened for, so an event in flight from a previous input is dropped. A stream whose events are not the cached type (an `fnLive` patch route, or a `select`ed cache) does not compile without `applyEvent`, and the stream's input must match the query's unless you pass `subscriptionInput`. Use `mergeSeed` when the seed can resolve after stream events. For large live payloads such as chat timelines, pass vue-query's `shallow: true` in the query options so the data is not made deeply reactive; mutate it only through `setQueryData`. Live queries carry `meta.live`, so invalidation streams skip them. Leave `refetchType` at TanStack's `'active'`: `'all'` refetches every cached query of a domain on each event, including screens nobody has open, which refetch on their next visit anyway. `useSubscriptionInvalidates` treats a stream as a "something changed" ping, and `useQueryErrorMessage` is `userFacingErrorMessage` as a computed. A surface that talks to another API passes `orpc` to each composable instead of using `provideOrpc`.
+`useApiClient()` also returns the utils as `orpc`, for calls outside a composable such as `queryClient.fetchQuery(orpc.unit.list.queryOptions({ input }))`. `useOrpcSubscription` (also `useApiClient().useSubscription`) reconnects with jittered backoff and closes while the page is hidden (`respectVisibility: false` keeps it). `useLiveQuery` writes each stream event under the key it was opened for, so an event in flight from a previous input is dropped. A stream whose events are not the cached type (an `fnLive` patch route, or a `select`ed cache) does not compile without `applyEvent`, and the stream's input must match the query's unless you pass `subscriptionInput`. Use `mergeSeed` when the seed can resolve after stream events. For large live payloads such as chat timelines, pass vue-query's `shallow: true` in the query options so the data is not made deeply reactive; mutate it only through `setQueryData`. Live queries carry `meta.live`, so invalidation streams skip them. Leave `refetchType` at TanStack's `'active'`: `'all'` refetches every cached query of a domain on each event, including screens nobody has open, which refetch on their next visit anyway. `useSubscriptionInvalidates` treats a stream as a "something changed" ping, and `useQueryErrorMessage` is `userFacingErrorMessage` as a computed. A surface that talks to another API passes `orpc` to each composable instead of using `provideOrpc`.
 
 `orpc-fn/vue/testing` runs composables in a real app without a DOM: `withOrpcApp(setup, { utils })`, `createTestStream()` for a subscription the test drives (`await stream.push(event)` resolves once it was handled), and `createOrpcMock({ fn: mock })` for a deep stand-in of the utils.
 
