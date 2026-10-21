@@ -310,6 +310,11 @@ export function useOrpcSubscription<
 	}
 }
 
+/** What {@link useApiClient} returns, e.g. `ApiClient['invalidate']` for a helper. */
+export type ApiClient<TOrpc = RegisteredOrpcUtils> = ReturnType<
+	typeof useBoundApiClient<TOrpc>
+>
+
 /**
  * TanStack Query composables that receive the oRPC utils, so call sites read
  * `useQuery((o) => o.order.get.queryOptions({ input }))`. Pass `orpc` to bind
@@ -317,32 +322,35 @@ export function useOrpcSubscription<
  */
 export function useApiClient<TOrpc = RegisteredOrpcUtils>(clientOptions?: {
 	orpc?: MaybeRefOrGetter<TOrpc> | undefined
-}) {
+}): ApiClient<TOrpc>
+// `ReturnType<typeof useApiClient>` reads the last overload: the registered utils.
+export function useApiClient(): ApiClient
+export function useApiClient<TOrpc>(clientOptions?: {
+	orpc?: MaybeRefOrGetter<TOrpc> | undefined
+}): ApiClient<TOrpc> {
+	return useBoundApiClient(clientOptions?.orpc)
+}
+
+function useBoundApiClient<TOrpc>(orpc: MaybeRefOrGetter<TOrpc> | undefined) {
 	const queryClient = useQueryClient()
-	const getO = useUtilsGetter(clientOptions?.orpc)
+	const getO = useUtilsGetter(orpc)
 
 	// Each wrapper forwards TanStack's own generics, so `select`, typed errors,
 	// page params and oRPC's tagged keys infer exactly as with vue-query itself.
-	function useQuery<
-		TQueryFnData,
-		TError = DefaultError,
-		TData = TQueryFnData,
-		TQueryKey extends QueryKey = QueryKey
-	>(
+	function useQuery<TQueryFnData, TError = DefaultError, TData = TQueryFnData>(
 		optionsFn: (
 			orpc: TOrpc
-		) => UseQueryOptions<TQueryFnData, TError, TData, TQueryFnData, TQueryKey>
+		) => UseQueryOptions<TQueryFnData, TError, TData, TQueryFnData>
 	): UseQueryReturnType<TData, TError> {
 		// A computed is a ref at runtime; TypeScript cannot relate a computed of
 		// the generic options to vue-query's MaybeRef parameter, so it is asserted.
 		const options = computed(() => optionsFn(getO()))
-		return useVueQuery<TQueryFnData, TError, TData, TQueryKey>(
+		return useVueQuery<TQueryFnData, TError, TData>(
 			options as unknown as UseQueryOptions<
 				TQueryFnData,
 				TError,
 				TData,
-				TQueryFnData,
-				TQueryKey
+				TQueryFnData
 			>
 		)
 	}
@@ -387,16 +395,19 @@ export function useApiClient<TOrpc = RegisteredOrpcUtils>(clientOptions?: {
 	 * With `initialInput`, also returns `inputData`, a ref that `mutate()` and
 	 * `mutateAsync()` use when called without variables (form state).
 	 */
+	// The input type comes from the route alone; `initialInput` is only checked
+	// against it. `unknown`, not `void`, lets `initialInput` pass the first
+	// inference pass, which runs before the `(o) => ...` callback is read.
 	function useMutation<
 		TData = unknown,
 		TError = DefaultError,
-		TVariables = void,
+		TVariables = unknown,
 		TContext = unknown
 	>(
 		optionsFn: (
 			orpc: TOrpc
 		) => MutationObserverOptions<TData, TError, TVariables, TContext>,
-		config: { initialInput: TVariables }
+		config: { initialInput: NoInfer<TVariables> }
 	): UseMutationReturnType<TData, TError, TVariables, TContext> & {
 		inputData: Ref<TVariables>
 		mutate: (variables?: TVariables) => void
@@ -446,6 +457,10 @@ export function useApiClient<TOrpc = RegisteredOrpcUtils>(clientOptions?: {
 		keyFn(getO())
 
 	return {
+		/** The utils themselves, for `queryClient.fetchQuery(orpc.x.queryOptions(...))` and the like. */
+		get orpc(): TOrpc {
+			return getO()
+		},
 		useQuery,
 		useInfiniteQuery,
 		useMutation,
