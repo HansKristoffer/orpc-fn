@@ -5,7 +5,7 @@ orpc-fn lets an app define a backend function once and get a typed oRPC procedur
 ## What we never compromise on
 
 1. **Types are the product.** The common call, `fn({ input, handler })`, infers everything: no casts, no explicit type arguments. Handler context follows the selected procedure builder. `test:types-performance` must not regress on its 300-route fixture.
-2. **Optional peers stay optional.** The root entry imports only `@orpc/server` and `@orpc/contract`. Tracing, Mastra, MCP, Hono, hanzio, Redis and Expo live behind their own subpaths, and an app that does not use one never installs it.
+2. **Optional peers stay optional.** The root entry imports only `@orpc/server` and `@orpc/contract`. Tracing, Mastra, MCP, Hono, Redis and Expo live behind their own subpaths, and an app that does not use one never installs it. `hanzio` is the one runtime dependency: it backs the `orpc-fn` bin, which must work without optional peers.
 3. **The client stays small.** `orpc-fn/client`, `orpc-fn/expo`, `orpc-fn/vue`, `orpc-fn/react` and a serialized stream manifest pull in no server, live or tool-adapter code. `test:client-bundle` guards this.
 4. **oRPC first.** Depend on oRPC where it covers the behaviour; keep our own code only where it falls short. Every such call is recorded in [decisions](docs/decisions.md).
 5. **The app owns its domain.** Auth, permission vocabulary, database, transactions, tenancy, jobs and reliable publication stay in the app. The library takes them through `createFn`.

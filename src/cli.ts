@@ -1,68 +1,58 @@
 #!/usr/bin/env node
-// biome-ignore-all lint/suspicious/noConsole: a CLI reports on the console
 import { readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { parseArgs } from 'node:util'
 import type { AnyRouter } from '@orpc/server'
+import { CliError, defineCli, defineCommand } from 'hanzio/cli'
+import { z } from 'zod'
 import { createStreamManifestAsync, renderStreamManifest } from './router.js'
 
-const usage = `Usage: orpc-fn stream-manifest <module>[#export] --out <file.ts|file.json> [--name streamPaths] [--check]
-
-Imports the router (export "default" unless #export is given) and writes the
-paths of its streaming routes for createRpcLink({ streamPaths }). The file is
-only written when its content changes. --check writes nothing and exits 1 when
-the file is missing or stale. Importing the router runs its module code; run
-TypeScript routers with a runtime that loads .ts (bun, tsx, node >= 22.18).`
-
-async function run(argv: readonly string[]): Promise<number> {
-	const { positionals, values } = parseArgs({
-		args: [...argv],
-		allowPositionals: true,
-		options: {
-			out: { type: 'string' },
-			name: { type: 'string' },
-			check: { type: 'boolean' },
-			help: { type: 'boolean', short: 'h' }
-		}
-	})
-	const [command, target] = positionals
-	if (values.help || command !== 'stream-manifest' || !target || !values.out) {
-		console.error(usage)
-		return values.help ? 0 : 2
-	}
-	const [modulePath = '', exportName = 'default'] = target.split('#')
-	const loaded: Record<string, unknown> = await import(
-		pathToFileURL(resolve(modulePath)).href
-	)
-	const router = loaded[exportName]
-	if (!router || typeof router !== 'object') {
-		console.error(`orpc-fn: ${modulePath} has no router export "${exportName}"`)
-		return 2
-	}
-	const out = resolve(values.out)
-	const source = renderStreamManifest(
-		await createStreamManifestAsync(router as AnyRouter),
-		{ format: out.endsWith('.json') ? 'json' : 'ts', name: values.name }
-	)
-	const current = await readFile(out, 'utf8').catch(() => undefined)
-	if (current === source) return 0
-	if (values.check) {
-		console.error(
-			`orpc-fn: ${values.out} is stale; rerun without --check to update it`
+const streamManifest = defineCommand({
+	description:
+		"Write the paths of a router's streaming routes for createRpcLink({ streamPaths }), only when they change. Importing the router runs its module code: load .ts routers with bun, tsx or node >= 22.18.",
+	input: z.object({
+		module: z
+			.string()
+			.describe('Router module, with #export for a named export')
+			.meta({ positional: true }),
+		out: z.string().describe('Manifest to write: file.ts or file.json'),
+		name: z
+			.string()
+			.optional()
+			.describe('Exported constant name in a .ts file'),
+		check: z.boolean().describe('Exit 1 when the file is missing or stale')
+	}),
+	run: async (input) => {
+		const [modulePath = '', exportName = 'default'] = input.module.split('#')
+		const loaded: Record<string, unknown> = await import(
+			pathToFileURL(resolve(modulePath)).href
 		)
-		return 1
+		const router = loaded[exportName]
+		if (!router || typeof router !== 'object')
+			throw new CliError(
+				`orpc-fn: ${modulePath} has no router export "${exportName}"`,
+				{ exitCode: 2 }
+			)
+		const out = resolve(input.out)
+		const source = renderStreamManifest(
+			await createStreamManifestAsync(router as AnyRouter),
+			{ format: out.endsWith('.json') ? 'json' : 'ts', name: input.name }
+		)
+		const current = await readFile(out, 'utf8').catch(() => undefined)
+		if (current === source) return
+		if (input.check)
+			throw new CliError(
+				`orpc-fn: ${input.out} is stale; rerun without --check to update it`
+			)
+		await writeFile(out, source)
+		return `orpc-fn: wrote ${input.out}`
 	}
-	await writeFile(out, source)
-	console.log(`orpc-fn: wrote ${values.out}`)
-	return 0
-}
+})
+
+const cli = defineCli({
+	name: 'orpc-fn',
+	commands: { 'stream-manifest': streamManifest }
+})
 
 // Exit explicitly: the imported router may hold open database or broker handles.
-run(process.argv.slice(2)).then(
-	(code) => process.exit(code),
-	(error) => {
-		console.error(error)
-		process.exit(1)
-	}
-)
+process.exit(await cli.run())

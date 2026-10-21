@@ -104,6 +104,8 @@ The core accepts any Standard Schema, oRPC's own `eventIterator` included. Execu
 
 `trpc-cli` builds a CLI from an oRPC router, but it reads command metadata from oRPC's top-level `meta` (where `fn()` keeps its own record under one key) and route descriptions do not reach it, it calls procedures with one static context, and it is a second CLI style beside the one our library bins use. **Decision:** `/cli` maps opted-in routes to `hanzio/cli` commands, which own parsing, help, completion and exit codes; this package only reads `fn()` meta and calls the procedure.
 
+The `orpc-fn` bin is built on `hanzio/cli` too, and a bin cannot sit behind an optional peer: it must run in an app that installed only the required peers. **Decision:** `hanzio` is a dependency, not a peer. It has no dependencies of its own and `hanzio/cli` needs only `node:util` and `zod`, which is already a required peer; the cost is its ~1.1 MB unpacked package. Commands are recognised across copies, but `CliError` is matched with `instanceof`, so an app using `/cli` should resolve to the same `hanzio` copy (a matching major dedupes).
+
 ## Limits of live delivery
 
 These limits are deliberate; changing one needs a consumer that requires it.
