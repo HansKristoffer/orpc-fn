@@ -22,7 +22,7 @@ test('help lists the stream-manifest command and its options', () => {
 Usage: orpc-fn <command> [options]
 
 Commands:
-  stream-manifest        Write the paths of a router's streaming routes for createRpcLink({ streamPaths }), only when they change. Importing the router runs its module code: load .ts routers with bun, tsx or node >= 22.18.
+  stream-manifest        Generate the stream manifest for createRpcLink({ streamPaths })
   completion <bash|zsh>  Print a shell completion script
 
 Options:
@@ -36,7 +36,13 @@ Run "orpc-fn <command> --help" for a command's options.
 		code: 0,
 		stdout: `Usage: orpc-fn stream-manifest <module> [options]
 
-Write the paths of a router's streaming routes for createRpcLink({ streamPaths }), only when they change. Importing the router runs its module code: load .ts routers with bun, tsx or node >= 22.18.
+Generate the stream manifest for createRpcLink({ streamPaths })
+
+Imports the router (export "default" unless #export is given) and writes the
+paths of its streaming routes for createRpcLink({ streamPaths }). The file is
+only written when its content changes. --check writes nothing and exits 1 when
+the file is missing or stale. Importing the router runs its module code; run
+TypeScript routers with a runtime that loads .ts (bun, tsx, node >= 22.18).
 
 Arguments:
   <module>  Router module, with #export for a named export
