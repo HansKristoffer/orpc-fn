@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "orpc-fn",
+      "dependencies": {
+        "hanzio": "^3.1.0",
+      },
       "devDependencies": {
         "@arethetypeswrong/cli": "^0.18.2",
         "@biomejs/biome": "^2.2.4",
@@ -25,7 +28,6 @@
         "@types/node": "^22.0.0",
         "@types/react": "19",
         "@types/react-test-renderer": "19",
-        "hanzio": "^3.1.0",
         "hono": "^4.12.31",
         "ioredis": "5.8.2",
         "publint": "^0.3.12",
@@ -48,7 +50,6 @@
         "@orpc/zod": "^1.14.0",
         "@tanstack/react-query": "^5.80.0",
         "@tanstack/vue-query": "^5.80.0",
-        "hanzio": "^3.1.0",
         "hono": "^4.0.0",
         "ioredis": "^5.0.0",
         "react": "^18.0.0 || ^19.0.0",
@@ -65,7 +66,6 @@
         "@orpc/zod",
         "@tanstack/react-query",
         "@tanstack/vue-query",
-        "hanzio",
         "hono",
         "ioredis",
         "react",

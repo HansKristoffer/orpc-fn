@@ -243,7 +243,7 @@ Sanitized tool-name collisions between distinct procedures throw; identical alia
 
 ## `orpc-fn/cli`
 
-Optional peer: `hanzio` ^3.1.0 (`hanzio/cli`).
+Uses `hanzio/cli`, which orpc-fn depends on (`hanzio` ^3.1.0). Your `defineCli` must come from the same `hanzio` copy, so keep your own `hanzio` on a matching major.
 
 ```ts
 import { defineCli } from 'hanzio/cli'
