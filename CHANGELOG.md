@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/HansKristoffer/orpc-fn/compare/v0.6.0...v0.6.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **cli:** restore the stream-manifest usage text on hanzio 3.3 ([#21](https://github.com/HansKristoffer/orpc-fn/issues/21)) ([b40396c](https://github.com/HansKristoffer/orpc-fn/commit/b40396ce9003e99f30ba1e2387f6a88f8667d062))
+
 ## [0.6.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.5.1...v0.6.0) (2026-10-21)
 
 
