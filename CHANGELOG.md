@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/HansKristoffer/orpc-fn/compare/v0.5.0...v0.5.1) (2026-10-21)
+
+
+### Miscellaneous Chores
+
+* release 0.5.1 ([6de3f4c](https://github.com/HansKristoffer/orpc-fn/commit/6de3f4ceac70657e0ea1e3ab2e049beffcf303b6))
+
 ## [0.5.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.4.0...v0.5.0) (2026-10-20)
 
 
