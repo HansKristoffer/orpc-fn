@@ -243,19 +243,22 @@ const defineChangeBus = defineScopedChangeBus(createPubSub, {
 	subscribe: (context) => context.user?.id ?? 'anonymous',
 	publish: (event: { tenantId: string }) => event.tenantId
 })
+// `inputSchema` defaults to z.object({}).
 const tenantChanges = defineChangeBus({
 	name: 'tenantChanges',
 	prefix: 'tenant',
-	inputSchema: z.object({}),
 	eventSchema: z.object({ tenantId: z.string(), kind: z.enum(['a', 'b']) })
 })
 tenantChanges.publish({ tenantId: 't', kind: 'a' })
 // @ts-expect-error kind is required
 tenantChanges.publish({ tenantId: 't' })
+// A scope's channel needs only the fields the scope reads.
+export const tenantChannel: string = tenantChanges.channelFor({ tenantId: 't' })
+// @ts-expect-error the scope reads tenantId
+tenantChanges.channelFor({ kind: 'a' })
 defineChangeBus({
 	name: 'unscopedChanges',
 	prefix: 'unscoped',
-	inputSchema: z.object({}),
 	// @ts-expect-error the scope reads tenantId from every event
 	eventSchema: z.object({ kind: z.string() })
 })

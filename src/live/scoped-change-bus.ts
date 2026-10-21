@@ -1,4 +1,4 @@
-import type { ZodType, z } from 'zod'
+import { type ZodType, z } from 'zod'
 import type {
 	AnyFnContext,
 	FnDefinition,
@@ -36,7 +36,14 @@ export type ScopedChangeBus<
 	TScopeEvent
 > = PubSub<TDef, TInputSchema, TEventSchema, TKey> & {
 	channel: ChangeBusChannel<AnyFnContext<TDef>, TScopeEvent>
+	/**
+	 * The full channel name for a scope, namespace included:
+	 * `backlogKey(bus.channelFor({ organizationId }))` reads its backlog.
+	 */
+	channelFor: (scope: TScopeEvent) => string
 }
+
+const noInput = z.object({})
 
 /**
  * Binds the app's `createPubSub` to one scope rule, for buses that tell every
@@ -52,7 +59,6 @@ export type ScopedChangeBus<
  * export const dealChanges = defineChangeBus({
  *   name: 'deal.subscribe',
  *   prefix: 'deal:change',
- *   inputSchema: z.object({}),
  *   eventSchema: z.object({ organizationId: z.string(), dealId: z.string() })
  * })
  * // fnLive({ live: { channel: dealChanges.channel, ... } }) shares the channel.
@@ -63,13 +69,13 @@ export function defineScopedChangeBus<TDef extends FnDefinition, TScopeEvent>(
 	scope: ChangeBusScope<AnyFnContext<TDef>, TScopeEvent>
 ) {
 	return <
-		TInputSchema extends ObjectSchema,
 		TEventSchema extends ZodType<TScopeEvent>,
+		TInputSchema extends ObjectSchema = typeof noInput,
 		TKey extends ProcedureKey<TDef> = TDef['default']
 	>(
 		options: Omit<
 			PubSubOptions<TDef, TInputSchema, TEventSchema, NoInfer<TKey>>,
-			'channel'
+			'channel' | 'inputSchema'
 		> &
 			GuardOptions<TDef['guards']> &
 			Pick<
@@ -79,6 +85,8 @@ export function defineScopedChangeBus<TDef extends FnDefinition, TScopeEvent>(
 			ProcedureOption<TDef, TKey> & {
 				/** Channel prefix; the scope key is appended as `${prefix}:${scope}`. */
 				prefix: string
+				/** What the subscriber provides (default: no input). */
+				inputSchema?: TInputSchema
 			}
 	): ScopedChangeBus<TDef, TInputSchema, TEventSchema, TKey, TScopeEvent> => {
 		const { prefix, ...pubsubOptions } = options
@@ -91,8 +99,13 @@ export function defineScopedChangeBus<TDef extends FnDefinition, TScopeEvent>(
 		const bus = (createPubSub as (options: object) => object)({
 			safePublish: true,
 			...pubsubOptions,
+			inputSchema: pubsubOptions.inputSchema ?? noInput,
 			channel
 		}) as PubSub<TDef, TInputSchema, TEventSchema, TKey>
-		return { ...bus, channel }
+		// The scope reads only its own fields, so a scope stands in for an event.
+		const channelFor = bus.getPublishChannelName as (
+			scope: TScopeEvent
+		) => string
+		return { ...bus, channel, channelFor }
 	}
 }

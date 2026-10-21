@@ -1,7 +1,15 @@
 import { describe, expect, expectTypeOf, test } from 'bun:test'
-import { call, ORPCError } from '@orpc/server'
+import { call, ORPCError, os } from '@orpc/server'
 import { z } from 'zod'
-import { createPubSub, fnLive, transport, user } from '../../tests/fixture.js'
+import {
+	createPubSub,
+	fnLive,
+	quiet,
+	transport,
+	user
+} from '../../tests/fixture.js'
+import { createFn } from '../index.js'
+import { memoryTransport } from './memory.js'
 import { defineScopedChangeBus } from './scoped-change-bus.js'
 
 const defineChangeBus = defineScopedChangeBus(createPubSub, {
@@ -17,7 +25,7 @@ const dealChanges = defineChangeBus({
 	name: 'test.dealChanges',
 	procedure: 'protected',
 	prefix: 'deal:change',
-	inputSchema: z.object({}),
+	// No inputSchema: a bus without input defaults to z.object({}).
 	eventSchema: z.object({ organizationId: z.string(), dealId: z.string() })
 })
 
@@ -47,6 +55,36 @@ describe('defineScopedChangeBus', () => {
 				context: supportContext('org_1')
 			})
 		).toBe('deal:change:org_1')
+	})
+
+	test('a bus without inputSchema takes no input', () => {
+		expectTypeOf<
+			Parameters<typeof dealChanges.getSubscriptionChannelName>[0]['input']
+		>().toEqualTypeOf<Record<string, never>>()
+	})
+
+	test('channelFor names the namespaced channel of a scope', async () => {
+		const memory = memoryTransport()
+		const app = createFn({
+			procedures: { public: os },
+			default: 'public',
+			logger: () => quiet,
+			pubsub: { transport: memory, namespace: 'app' }
+		})
+		const statusBus = defineScopedChangeBus(app.createPubSub, {
+			subscribe: () => 'org_1',
+			publish: (event: { organizationId: string }) => event.organizationId
+		})({
+			name: 'test.status',
+			prefix: 'status',
+			eventSchema: z.object({ organizationId: z.string(), stage: z.string() }),
+			useBacklog: true
+		})
+		await statusBus.publish({ organizationId: 'org_1', stage: 'ready' })
+		const channel = statusBus.channelFor({ organizationId: 'org_1' })
+		expect(channel).toBe('app:status:org_1')
+		expect(await memory.readBacklog(channel)).toHaveLength(1)
+		await app.shutdown()
 	})
 
 	test('a context without a scope is refused', async () => {

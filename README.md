@@ -132,7 +132,7 @@ The `subscribe` route runs builder middleware and the same fn guards/extras/meta
 
 **`createPubSub`** returns a typed `subscribe` route plus `publish`, `publishMany` (one atomic round-trip across channels) and typed `getSubscriptionChannelName({ input, context })` / `getPublishChannelName(event)` methods. The shared partial-input `getChannelName` method is deprecated. Publishers pass the event schema's input type; subscribers, filters and channel resolvers get its output type. The raw event travels in oRPC's JSON format, so `Date`, `Map`, `Set` and `BigInt` survive, and each receiver parses it once. Options include `filterFn`, `authFn`, `mirrorChannel`, `overflowMarker`, `procedure`, configured guards and `meta`. Channels may be static or use `channel: { subscribe: ({ input, context }) => key, publish: (parsedEvent) => key }`. Carry publishing tenant keys in the event. A factory `namespace` prefixes channels, mirrors and backlog keys. Each pub/sub definition subscribes to each channel once and parses each payload once for all local subscribers. Each subscriber then runs its filter in arrival order as it reads; its bounded queue holds events before filtering, so `onDrop` counts unfiltered events. Abort and drain release a subscription at once, even one that is not being read. A lost subscription is retried with exponential backoff and jitter. `safePublish` logs a failed publish (`pubsub.publish_failed`) instead of throwing, as on `fnLive`. **`createPublisher`** is the publish-only half.
 
-**`defineScopedChangeBus`** binds `createPubSub` to one scope rule, for buses that tell everyone in a scope (usually an organization) "this changed". Each bus names a channel `prefix`; events go to `${prefix}:${scope}`. Publishing is safe by default, since buses publish after committed writes. `bus.channel` lets an `fnLive` share the bus's events.
+**`defineScopedChangeBus`** binds `createPubSub` to one scope rule, for buses that tell everyone in a scope (usually an organization) "this changed". Each bus names a channel `prefix`; events go to `${prefix}:${scope}`. Publishing is safe by default, since buses publish after committed writes. `inputSchema` defaults to `z.object({})`. `bus.channel` lets an `fnLive` share the bus's events, and `bus.channelFor({ organizationId })` returns a scope's full channel name, namespace included, e.g. for `backlogKey(...)`.
 
 ```ts
 import { defineScopedChangeBus, invalidationStream } from 'orpc-fn/live'
@@ -144,7 +144,6 @@ const defineChangeBus = defineScopedChangeBus(createPubSub, {
 export const dealChanges = defineChangeBus({
   name: 'deal.subscribe',
   prefix: 'deal:change',
-  inputSchema: z.object({}),
   eventSchema: z.object({ organizationId: z.string(), dealId: z.string() })
 })
 ```
