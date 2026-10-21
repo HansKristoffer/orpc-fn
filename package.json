@@ -128,7 +128,7 @@
 		"test:client-bundle": "bun scripts/check-client-bundle.ts"
 	},
 	"dependencies": {
-		"hanzio": "^3.1.0"
+		"hanzio": "^3.3.0"
 	},
 	"peerDependencies": {
 		"@mastra/core": "^1.51.0",

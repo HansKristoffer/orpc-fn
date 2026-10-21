@@ -8,8 +8,13 @@ import { z } from 'zod'
 import { createStreamManifestAsync, renderStreamManifest } from './router.js'
 
 const streamManifest = defineCommand({
-	description:
-		"Write the paths of a router's streaming routes for createRpcLink({ streamPaths }), only when they change. Importing the router runs its module code: load .ts routers with bun, tsx or node >= 22.18.",
+	description: `Generate the stream manifest for createRpcLink({ streamPaths })
+
+Imports the router (export "default" unless #export is given) and writes the
+paths of its streaming routes for createRpcLink({ streamPaths }). The file is
+only written when its content changes. --check writes nothing and exits 1 when
+the file is missing or stale. Importing the router runs its module code; run
+TypeScript routers with a runtime that loads .ts (bun, tsx, node >= 22.18).`,
 	input: z.object({
 		module: z
 			.string()
