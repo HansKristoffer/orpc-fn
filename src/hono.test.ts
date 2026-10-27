@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from 'bun:test'
+import { beforeEach, describe, expect, mock, test } from 'bun:test'
 import { ORPCError } from '@orpc/server'
 import { Hono } from 'hono'
 import { z } from 'zod'
@@ -78,7 +78,22 @@ const ticks = fn({
 		yield 1
 	}
 })
-const router = createRouter({ echo, me, crash, missing, ticks })
+let releaseSlow = () => {}
+let slowGate = Promise.resolve()
+const fast = fn({
+	name: 'fast',
+	procedure: 'public',
+	handler: () => ({ items: Array(100).fill('unit') })
+})
+const slow = fn({
+	name: 'slow',
+	procedure: 'public',
+	handler: async () => {
+		await slowGate
+		return { done: true }
+	}
+})
+const router = createRouter({ echo, me, crash, missing, ticks, fast, slow })
 
 type Spec = { info: { title: string }; paths: Record<string, unknown> }
 
@@ -197,6 +212,93 @@ describe('mountOrpc', () => {
 		const app = createApp()
 		app.get('/api/custom', (c) => c.text('custom'))
 		expect(await (await app.request('/api/custom')).text()).toBe('custom')
+	})
+})
+
+describe('mountOrpc compression', () => {
+	beforeEach(() => {
+		slowGate = new Promise((resolve) => {
+			releaseSlow = resolve
+		})
+	})
+	const gzip = { 'accept-encoding': 'gzip, br' }
+	const batchRequest = (headers: Record<string, string> = gzip) =>
+		new Request('http://localhost/rpc/__batch__', {
+			method: 'POST',
+			headers: {
+				...headers,
+				'content-type': 'application/json',
+				'x-orpc-batch': 'streaming'
+			},
+			body: JSON.stringify([
+				{ url: 'http://localhost/rpc/fast', body: { json: null } },
+				{ url: 'http://localhost/rpc/slow', body: { json: null } }
+			])
+		})
+
+	test('a batch stream is gzipped and delivers a result before a slower one', async () => {
+		const response = await createApp().fetch(batchRequest())
+		expect(response.headers.get('content-encoding')).toBe('gzip')
+		expect(response.headers.get('vary')).toContain('accept-encoding')
+
+		const reader = response
+			.body!.pipeThrough(new DecompressionStream('gzip'))
+			.pipeThrough(new TextDecoderStream())
+			.getReader()
+		// The slow result is still pending, yet the fast one can be read already.
+		let received = ''
+		while (!received.includes('"unit"')) received += (await reader.read()).value
+		expect(received).not.toContain('"done"')
+
+		releaseSlow()
+		while (!received.includes('"done"')) {
+			const { value, done } = await reader.read()
+			if (done) break
+			received += value
+		}
+		expect(received).toContain('"done":true')
+	})
+
+	test('JSON is gzipped', async () => {
+		const response = await createApp().request('/rpc/fast', {
+			method: 'POST',
+			headers: { ...gzip, 'content-type': 'application/json' },
+			body: JSON.stringify({ json: null })
+		})
+		expect(response.headers.get('content-encoding')).toBe('gzip')
+		const text = new TextDecoder().decode(
+			Bun.gunzipSync(new Uint8Array(await response.arrayBuffer()))
+		)
+		expect(JSON.parse(text)).toMatchObject({
+			json: { items: expect.any(Array) }
+		})
+	})
+
+	test('a live event stream is not compressed', async () => {
+		const response = await createApp().request('/rpc/ticks', {
+			method: 'POST',
+			headers: { ...gzip, 'content-type': 'application/json' },
+			body: JSON.stringify({ json: null })
+		})
+		expect(response.headers.get('content-type')).toContain('text/event-stream')
+		expect(response.headers.get('content-encoding')).toBeNull()
+		await response.body?.cancel()
+	})
+
+	test('clients without gzip get the plain batch', async () => {
+		const response = await createApp().fetch(batchRequest({}))
+		expect(response.headers.get('content-encoding')).toBeNull()
+		releaseSlow()
+		const text = await response.text()
+		expect(text).toContain('"unit"')
+		expect(text).toContain('"done":true')
+	})
+
+	test('compress: false turns it off', async () => {
+		const response = await createApp({ compress: false }).fetch(batchRequest())
+		expect(response.headers.get('content-encoding')).toBeNull()
+		releaseSlow()
+		expect(await response.text()).toContain('"done":true')
 	})
 })
 

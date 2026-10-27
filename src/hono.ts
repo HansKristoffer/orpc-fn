@@ -1,3 +1,5 @@
+import { Readable, pipeline } from 'node:stream'
+import zlib from 'node:zlib'
 import { SmartCoercionPlugin } from '@orpc/json-schema'
 import type { OpenAPIGeneratorGenerateOptions } from '@orpc/openapi'
 import { OpenAPIHandler } from '@orpc/openapi/fetch'
@@ -69,6 +71,12 @@ export type MountOrpcOptions<
 	batch?: boolean | { maxSize: number }
 	/** Add a Server-Timing header from the request timing. Default: true */
 	serverTiming?: boolean
+	/**
+	 * gzip JSON responses and batch event streams for clients that accept it,
+	 * flushing after every batch result. Other event streams are left alone.
+	 * Default: true
+	 */
+	compress?: boolean
 	/** SSE keep-alive comments every N ms (default 15000), or false. */
 	sseKeepAlive?: boolean | number
 	/** Extra RPC plugins (e.g. `CORSPlugin`). */
@@ -153,6 +161,39 @@ export function finishOrpcHeaders(
 	return headers
 }
 
+const NO_TRANSFORM = /(?:^|,)\s*no-transform\s*(?:,|$)/i
+
+/**
+ * JSON, and the event stream oRPC answers a streaming batch with (one event
+ * per result). Other event streams are live: they stay open and carry little.
+ */
+function shouldCompress(request: Request, response: Response): boolean {
+	if (request.method === 'HEAD') return false
+	if (!request.headers.get('accept-encoding')?.includes('gzip')) return false
+	if (response.headers.has('content-encoding')) return false
+	if (NO_TRANSFORM.test(response.headers.get('cache-control') ?? '')) {
+		return false
+	}
+	const type = response.headers.get('content-type') ?? ''
+	if (type.startsWith('text/event-stream')) {
+		// BatchHandlerPlugin keys on this header too, whatever the URL.
+		return request.headers.has('x-orpc-batch')
+	}
+	return type.startsWith('application/json')
+}
+
+/**
+ * gzip that emits every chunk at once, so a fast batch result is not held
+ * back by a slow one. Cancelling the result cancels `body`.
+ */
+function gzipFlushingEachChunk(
+	body: ReadableStream<Uint8Array>
+): ReadableStream<Uint8Array> {
+	const gzip = zlib.createGzip({ flush: zlib.constants.Z_SYNC_FLUSH })
+	pipeline(Readable.fromWeb(body as never), gzip, () => {})
+	return Readable.toWeb(gzip) as unknown as ReadableStream<Uint8Array>
+}
+
 /** Mount oRPC's RPC and OpenAPI handlers on a Hono app. */
 export function mountOrpc<E extends Env, R extends AnyRouter>(
 	app: Hono<E>,
@@ -162,7 +203,8 @@ export function mountOrpc<E extends Env, R extends AnyRouter>(
 		router,
 		batch = true,
 		serverTiming = true,
-		sseKeepAlive = true
+		sseKeepAlive = true,
+		compress = true
 	} = options
 	const isExpectedError = options.isExpectedError ?? isExpectedClientError
 	const keepAlive =
@@ -221,10 +263,18 @@ export function mountOrpc<E extends Env, R extends AnyRouter>(
 						handler_ms: invocationTiming.procedureMs
 					})
 				: undefined
-			return c.newResponse(response.body, {
+			const responseHeaders = finishOrpcHeaders(response, timed)
+			let body = response.body
+			if (body && compress && shouldCompress(c.req.raw, response)) {
+				body = gzipFlushingEachChunk(body)
+				responseHeaders.set('content-encoding', 'gzip')
+				responseHeaders.delete('content-length')
+				responseHeaders.append('vary', 'accept-encoding')
+			}
+			return c.newResponse(body, {
 				// oRPC only produces valid HTTP status codes.
 				status: response.status as StatusCode,
-				headers: finishOrpcHeaders(response, timed)
+				headers: responseHeaders
 			})
 		})
 	}

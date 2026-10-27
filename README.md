@@ -288,6 +288,7 @@ Behaviour:
 - The response gets a `Server-Timing` header built from the request timing collector: app-recorded queue/auth/context metrics plus library-owned procedure time. Nested calls do not overwrite parent timing; batches aggregate their top-level procedure durations (which may overlap). `fn` does not mutate an arbitrary `context.timing` field. `formatServerTiming` and `finishOrpcHeaders` are available for composed Fetch adapters.
 - SSE responses get keep-alive comments (15 s) and anti-buffering headers.
 - RPC calls are batched (`BatchHandlerPlugin`).
+- JSON and batch responses are gzipped when the client accepts it (`compress: false` turns it off). A streaming batch sends each result as it finishes, so it is flushed after every result instead of buffered; Hono's `compress()` skips event streams entirely. Live event streams are never compressed. A response that already has a `content-encoding` is left alone.
 - Scalar docs are served at the OpenAPI prefix.
 - `onError` sees only unexpected errors.
 - `openapi.filter`, `openapi.smartCoercion` and `openapi.spec` (for security schemes) cover an external API with its own auth.
