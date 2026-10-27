@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.6.1...v0.7.0) (2026-10-27)
+
+
+### Features
+
+* **hono:** gzip JSON and batch streams in mountOrpc ([2259ded](https://github.com/HansKristoffer/orpc-fn/commit/2259deddefaa9a90ed92dcc3c6c871c04c40971f))
+* **hono:** gzip JSON and batch streams in mountOrpc ([fb247f6](https://github.com/HansKristoffer/orpc-fn/commit/fb247f6da57d9312ccd73db93e542188772264f5))
+
 ## [0.6.1](https://github.com/HansKristoffer/orpc-fn/compare/v0.6.0...v0.6.1) (2026-10-21)
 
 
