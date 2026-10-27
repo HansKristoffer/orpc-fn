@@ -88,6 +88,10 @@ A guard returned `unknown` and its result was ignored, so `permission: () => fal
 
 The client link used to keep a call out of a batch when its router path contained `subscribe`. A stream mounted as `watch` was batched with ordinary calls and the batch failed. **Decision:** a streaming route says so, with `stream: true` or oRPC's `eventIterator` output schema, and generated live routes declare it themselves. `createStreamManifest` lists the streaming paths of the actual router, aliases and nesting included, as data the client can import without server code. The name heuristic remains only as a fallback.
 
+## `mountOrpc` compresses its own responses
+
+oRPC answers a streaming batch as an event stream with one event per result, sent as each finishes. Hono's `compress()` skips `text/event-stream`, and `CompressionStream` or a default gzip buffer their output, so a fast result would wait behind a slow one. Apps served without a compressing proxy sent their largest responses raw. **Decision:** `mountOrpc` gzips JSON and batch event streams itself (`compress`, on by default) with `node:zlib`, flushing after every chunk. It recognises a batch by the `x-orpc-batch` request header, as `BatchHandlerPlugin` does. Other event streams stay uncompressed: they are long-lived and small. A response that already has a `content-encoding` is left alone, so an outer compressor still wins. Other routes on the app are the app's business (`hono/compress`).
+
 ## Route metadata lives in `meta`
 
 Unknown top-level `fn` options used to become metadata, so a typo or a spread object became metadata silently. **Decision:** app metadata goes in `fn({ meta })` and unknown top-level options throw. Guard keys stay at the top level because every route uses them.
