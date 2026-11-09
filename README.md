@@ -203,7 +203,7 @@ const tool = createMastraTool(getOrder, { requireApproval: true })
 // at run time: requestContext.set('orpcContext', context)
 ```
 
-Options: `id`, `description`, `requireApproval`, `allowMissingInputSchema`, `onExecuteFinish`, `contextKey` (default `'orpcContext'`). Execution goes through oRPC `call`, so middleware and guards apply.
+Options: `id`, `description`, `requireApproval`, `allowMissingInputSchema`, `onExecuteFinish`, `contextKey` (default `'orpcContext'`), or `context: (requestContext) => …` to read the oRPC context yourself. Mastra writes plain request-context values into run snapshots and spans, so a context holding a session belongs in a slot that serializes to nothing (better-mastra's `defineRequestContextHolder`), read through `context`. Execution goes through oRPC `call`, so middleware and guards apply.
 
 The tool takes the procedure's raw input and returns its parsed output, and `InferToolInput`/`InferToolOutput`/`InferUITools` see exactly those types. Mastra validates the input (coercing date strings) but passes the raw value on, and the procedure parses that raw value: transforms/refinements must be pure: SDK validation and procedure execution may run them more than once, always on raw input. Agent tools accept objects and unions of object shapes. Other inputs and streams are rejected. Finish-hook failures preserve execution outcomes.
 

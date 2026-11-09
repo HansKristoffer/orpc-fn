@@ -168,6 +168,26 @@ describe('createMastraTool runtime behavior', () => {
 		).resolves.toMatchObject({ sessionId: 's' })
 	})
 
+	test('reads the oRPC context through the context option, kept out of serialized values', async () => {
+		// A slot that serializes to nothing, as an app keeps a session out of
+		// Mastra's run snapshots and spans
+		const holder = {
+			value: { support: { sessionId: 's', organizationId: 'o' } },
+			toJSON: () => undefined
+		}
+		const tool = createMastraTool(supportProcedure, {
+			context: (requestContext) =>
+				(requestContext.get('held') as typeof holder | undefined)?.value
+		}) as unknown as typeof executableSupportTool
+		const requestContext = new RequestContext()
+		requestContext.set('held', holder)
+
+		await expect(
+			tool.execute({ echo: 'x' }, { requestContext })
+		).resolves.toMatchObject({ sessionId: 's', organizationId: 'o' })
+		expect(JSON.stringify(requestContext.toJSON())).not.toContain('"s"')
+	})
+
 	test('allowMissingInputSchema exposes no-input procedures', () => {
 		const tool = createMastraTool(noInputProcedure, {
 			allowMissingInputSchema: true

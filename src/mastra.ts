@@ -31,6 +31,13 @@ export type CreateMastraToolOptions = {
 	}) => void
 	/** Key holding the oRPC context in Mastra's `RequestContext`. Default 'orpcContext'. */
 	contextKey?: string
+	/**
+	 * Reads the oRPC context from the run's request context, in place of
+	 * `contextKey`. Mastra writes plain request-context values into run
+	 * snapshots and spans, so an app whose context holds a session keeps it
+	 * in a slot that serializes to nothing and reads it here.
+	 */
+	context?: (requestContext: RequestContext) => unknown
 }
 
 /** What the tool takes: the procedure's raw input, or `{}` without a schema. */
@@ -110,10 +117,16 @@ export function createMastraTool<TProc extends AnyProcedure>(
 			: {}),
 		execute: async (input, ctx) => {
 			const requestContext = ctx?.requestContext as RequestContext | undefined
-			const context = requestContext?.get(contextKey)
+			const context =
+				requestContext &&
+				(options.context
+					? options.context(requestContext)
+					: requestContext.get(contextKey))
 			if (!context) {
 				throw new Error(
-					`createMastraTool execution requires ${contextKey} in the Mastra request context`
+					options.context
+						? 'createMastraTool execution found no oRPC context through its context option'
+						: `createMastraTool execution requires ${contextKey} in the Mastra request context`
 				)
 			}
 			const startedAt = performance.now()
