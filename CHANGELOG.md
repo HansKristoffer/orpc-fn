@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.7.0...v0.8.0) (2026-11-09)
+
+
+### Features
+
+* **mastra:** createMastraTool reads the oRPC context through a context option ([d97ad1f](https://github.com/HansKristoffer/orpc-fn/commit/d97ad1f239828e6b8c888063434b2ce927b6362d))
+* **mastra:** createMastraTool reads the oRPC context through a context option ([57dacba](https://github.com/HansKristoffer/orpc-fn/commit/57dacba4a2ad36f617fb6ee6af039a9bcdee17e0))
+
 ## [0.7.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.6.1...v0.7.0) (2026-10-27)
 
 
