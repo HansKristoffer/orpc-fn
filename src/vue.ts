@@ -30,12 +30,13 @@ import {
 	type MaybeRefOrGetter,
 	onScopeDispose,
 	type Ref,
+	reactive,
 	ref,
 	shallowRef,
 	toValue,
 	watch
 } from 'vue'
-import { userFacingErrorMessage } from './client.js'
+import { streamCall, userFacingErrorMessage } from './client.js'
 import {
 	createInvalidationCoordinator,
 	createStreamScope,
@@ -93,17 +94,23 @@ const missingOrpc = () =>
 		'orpc-fn/vue: no oRPC client provided. Call provideOrpc(app, { client, utils }) or pass `orpc` to the composable.'
 	)
 
-/** The client and utils from {@link provideOrpc}. */
-export function useOrpc(): {
+type RegisteredOrpc = {
 	client: RegisteredOrpcClient
 	utils: RegisteredOrpcUtils
-} {
+}
+
+/**
+ * The client and utils from {@link provideOrpc}. Throws when none was
+ * provided, unless `optional`, which returns null instead.
+ */
+export function useOrpc(options: { optional: true }): RegisteredOrpc | null
+export function useOrpc(options?: { optional?: false }): RegisteredOrpc
+export function useOrpc(options?: {
+	optional?: boolean
+}): RegisteredOrpc | null {
 	const provided = hasInjectionContext() ? inject(orpcKey, null) : null
-	if (!provided) throw missingOrpc()
-	return provided as {
-		client: RegisteredOrpcClient
-		utils: RegisteredOrpcUtils
-	}
+	if (!provided && !options?.optional) throw missingOrpc()
+	return provided as RegisteredOrpc | null
 }
 
 /** Resolve the provided utils now; fail only when they are needed and missing. */
@@ -123,7 +130,7 @@ let documentVisible: Ref<boolean> | null = null
  * Whether the page is visible, from TanStack's `focusManager` (which follows
  * `visibilitychange` in browsers). Live streams pause while it is false.
  */
-function useDocumentVisible(): Ref<boolean> {
+export function useDocumentVisible(): Ref<boolean> {
 	if (!documentVisible) {
 		const visible = ref(focusManager.isFocused())
 		focusManager.subscribe((focused) => {
@@ -142,13 +149,15 @@ function resolveQueryEnabled(enabled: unknown): boolean {
 
 /**
  * Picks the stream to open from the utils. A procedure's `call` fits as is:
- * `(o) => o.order.watch.call`. The composable passes the input and an abort signal.
+ * `(o) => o.order.watch.call`. The composable passes the input, an abort
+ * signal and `streamCall` as the client context, which keeps the call out of
+ * `createRpcLink`'s batches.
  */
 export type OrpcSubscribeFn<TInput, TEvent, TOrpc = RegisteredOrpcUtils> = (
 	orpc: TOrpc
 ) => (
 	input: TInput,
-	options: { signal: AbortSignal }
+	options: { signal: AbortSignal; context: typeof streamCall }
 ) => Promise<AsyncIterable<TEvent>>
 
 export interface UseSubscriptionOptions<TEvent, TOrpc = RegisteredOrpcUtils> {
@@ -226,7 +235,8 @@ export function useOrpcSubscription<
 	const error = ref<Error | null>(null)
 
 	const runner = createSubscriptionRunner<TEvent>({
-		open: (signal) => subscribeFn(getUtils())(toValue(input), { signal }),
+		open: (signal) =>
+			subscribeFn(getUtils())(toValue(input), { signal, context: streamCall }),
 		canConnect: () => isStreamAllowed.value,
 		shouldReconnect: () => autoReconnectOnClose && shouldAutoConnect.value,
 		onStatus: (next) => {
@@ -393,7 +403,9 @@ function useBoundApiClient<TOrpc>(orpc: MaybeRefOrGetter<TOrpc> | undefined) {
 
 	/**
 	 * With `initialInput`, also returns `inputData`, a ref that `mutate()` and
-	 * `mutateAsync()` use when called without variables (form state).
+	 * `mutateAsync()` use when called without variables (form state). With
+	 * `invalidates`, a success invalidates those keys, awaited before the
+	 * options' own `onSuccess`: `{ invalidates: (o) => [o.order.key()] }`.
 	 */
 	// The input type comes from the route alone; `initialInput` is only checked
 	// against it. `unknown`, not `void`, lets `initialInput` pass the first
@@ -407,7 +419,10 @@ function useBoundApiClient<TOrpc>(orpc: MaybeRefOrGetter<TOrpc> | undefined) {
 		optionsFn: (
 			orpc: TOrpc
 		) => MutationObserverOptions<TData, TError, TVariables, TContext>,
-		config: { initialInput: NoInfer<TVariables> }
+		config: {
+			initialInput: NoInfer<TVariables>
+			invalidates?: (orpc: TOrpc) => readonly QueryKey[]
+		}
 	): UseMutationReturnType<TData, TError, TVariables, TContext> & {
 		inputData: Ref<TVariables>
 		mutate: (variables?: TVariables) => void
@@ -421,17 +436,41 @@ function useBoundApiClient<TOrpc>(orpc: MaybeRefOrGetter<TOrpc> | undefined) {
 	>(
 		optionsFn: (
 			orpc: TOrpc
-		) => MutationObserverOptions<TData, TError, TVariables, TContext>
+		) => MutationObserverOptions<TData, TError, TVariables, TContext>,
+		config?: { invalidates?: (orpc: TOrpc) => readonly QueryKey[] }
 	): UseMutationReturnType<TData, TError, TVariables, TContext>
 	function useMutation<TData, TError, TVariables, TContext>(
 		optionsFn: (
 			orpc: TOrpc
 		) => MutationObserverOptions<TData, TError, TVariables, TContext>,
-		config?: { initialInput: TVariables }
+		config?: {
+			initialInput?: TVariables
+			invalidates?: (orpc: TOrpc) => readonly QueryKey[]
+		}
 	) {
-		const mutation = useVueMutation(computed(() => optionsFn(getO())))
+		const invalidates = config?.invalidates
+		const mutation = useVueMutation(
+			computed(() => {
+				const options = optionsFn(getO())
+				if (!invalidates) return options
+				return {
+					...options,
+					onSuccess: async (
+						...args: Parameters<NonNullable<typeof options.onSuccess>>
+					) => {
+						await Promise.all(
+							invalidates(getO()).map((queryKey) =>
+								queryClient.invalidateQueries({ queryKey })
+							)
+						)
+						return options.onSuccess?.(...args)
+					}
+				}
+			})
+		)
 		if (config?.initialInput === undefined) return mutation
-		const inputData = ref(config.initialInput) as Ref<TVariables>
+		const initialInput = config.initialInput
+		const inputData = ref(initialInput) as Ref<TVariables>
 		return {
 			...mutation,
 			inputData,
@@ -794,5 +833,39 @@ export function useQueryErrorMessage(
 	return computed(() => {
 		const err = toValue(error)
 		return err ? userFacingErrorMessage(err, toValue(fallback)) : null
+	})
+}
+
+/** The parts of a query `useQueryState` reads. */
+export type QueryStateSource = {
+	status: Ref<'pending' | 'error' | 'success'>
+	error: Ref<unknown>
+	isFetching: Ref<boolean>
+	failureCount: Ref<number>
+	refetch: () => Promise<unknown>
+}
+
+/**
+ * A query as the props a list or loading component takes, in one reactive
+ * object: `<ListStates v-bind="useQueryState(query, { fallback })" />`.
+ * `errorMessage` follows {@link useQueryErrorMessage}.
+ */
+export function useQueryState(
+	query: QueryStateSource,
+	options: { fallback: MaybeRefOrGetter<string> }
+) {
+	const errorMessage = useQueryErrorMessage(query.error, options.fallback)
+	return reactive({
+		status: computed(() => query.status.value),
+		error: computed(() => query.error.value),
+		errorMessage,
+		isRetrying: computed(
+			() =>
+				query.isFetching.value &&
+				(query.status.value === 'error' || query.failureCount.value > 0)
+		),
+		retry: () => {
+			void query.refetch()
+		}
 	})
 }

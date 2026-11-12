@@ -2,10 +2,11 @@ export { type BoundCall, createBoundCall } from './bound-call.js'
 export {
 	type CreateFnOptions,
 	createFn,
-	type FnFactory
+	type FnFactory,
+	type RoutePolicyParams,
+	type TestCallExtras
 } from './create-fn.js'
 export { isExpectedClientError } from './expected-client-error.js'
-export { createBoundedEventQueue } from './live/pub-sub.js'
 export {
 	createDefaultLogger,
 	type FnLogger,

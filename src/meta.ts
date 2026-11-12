@@ -1,6 +1,20 @@
 import { getEventIteratorSchemaDetails, type AnySchema } from '@orpc/contract'
 import { type LibraryMeta, procedureDefinition } from './compatibility.js'
-import type { AnyProcedure } from '@orpc/server'
+import type {
+	AnyProcedure,
+	TraverseContractProcedureCallbackOptions
+} from '@orpc/server'
+
+/** Picks procedures; also fits oRPC's `OpenAPIHandler({ filter })`. */
+export type ProcedureFilter = (
+	options: TraverseContractProcedureCallbackOptions
+) => boolean
+
+/** Procedures whose route has `tag`: `listTools(router, { filter: hasTag('external') })`. */
+export const hasTag =
+	(tag: string): ProcedureFilter =>
+	({ contract }) =>
+		procedureDefinition(contract).route?.tags?.includes(tag) ?? false
 
 /**
  * Key under which `fn()` stores its metadata in oRPC's procedure meta
@@ -18,6 +32,10 @@ export type StoredFnMeta<
 	procedure: TKey
 	meta: TMeta
 	stream: boolean
+	/** Guard values set on the route. */
+	guards?: Record<string, unknown>
+	/** Guards decided per call through `guardResolvers`. */
+	dynamicGuards?: readonly string[]
 }
 
 export type FnMeta<
@@ -30,7 +48,7 @@ export type FnMeta<
 	procedure: TKey | undefined
 	/** The app's typed meta (`createFn({ meta })`) declared on this route. */
 	meta: Partial<TMeta>
-	/** Route summary, falling back to description, falling back to ''. */
+	/** Route description, falling back to summary, falling back to ''. */
 	description: string
 	summary: string | undefined
 	method: string | undefined
@@ -39,6 +57,10 @@ export type FnMeta<
 	tags: readonly string[]
 	inputSchema: AnySchema | undefined
 	outputSchema: AnySchema | undefined
+	/** Guard values set on the route (`permission: 'deal.read'`). */
+	guards: Record<string, unknown>
+	/** Guards the route decides per call through `guardResolvers`. */
+	dynamicGuards: readonly string[]
 }
 
 /** Read what `fn()` (and oRPC) recorded on a procedure. */
@@ -69,7 +91,7 @@ export function readFnMeta<T extends AnyProcedure>(
 		name: stored?.name,
 		procedure: stored?.procedure as KeyFrom<T> | undefined,
 		meta: (stored?.meta ?? {}) as Partial<MetaFrom<T>>,
-		description: route.summary ?? route.description ?? '',
+		description: route.description ?? route.summary ?? '',
 		summary: route.summary,
 		method: route.method,
 		path: route.path,
@@ -78,7 +100,9 @@ export function readFnMeta<T extends AnyProcedure>(
 			stored?.stream === true ||
 			getEventIteratorSchemaDetails(def.outputSchema) !== undefined,
 		inputSchema: def.inputSchema,
-		outputSchema: def.outputSchema
+		outputSchema: def.outputSchema,
+		guards: stored?.guards ?? {},
+		dynamicGuards: stored?.dynamicGuards ?? []
 	}
 }
 

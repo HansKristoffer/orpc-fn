@@ -3,8 +3,7 @@ import { type AnyProcedure, ORPCError } from '@orpc/server'
 import type { ZodType, z } from 'zod'
 import { RAW_INPUT } from '../timing.js'
 import { LIVE_GAP, positiveInteger } from './lifecycle.js'
-import type { FnLogger } from '../logger.js'
-import { errorMessageOf } from '../otel.js'
+import { snapshotKey } from './codec.js'
 import type {
 	FnContext,
 	FnDefinition,
@@ -102,6 +101,11 @@ export type FnLiveConfig<
 		authFn?: AuthFn<TInput, FnContext<TDef, TKey>>
 		/** Batch events arriving within this window into one snapshot update. */
 		coalesceMs?: number
+		/**
+		 * Without a transformer, skip a rerun's snapshot when it serializes the
+		 * same as the last one sent. Default: true.
+		 */
+		skipUnchanged?: boolean
 		/** Maximum events collected in one coalescing batch (default 1000). */
 		maxBatchSize?: number
 		/**
@@ -169,11 +173,6 @@ export type FnLiveReturn<
 		context: FnContext<TDef, TKey>
 	}) => string
 	getPublishChannelName: (event: z.output<TEventSchema>) => string
-	/** @deprecated Prefer the separate required-input resolver methods. */
-	getChannelName: (
-		params: Partial<z.output<TInput>> | Partial<z.output<TEventSchema>>,
-		context?: FnContext<TDef, TKey>
-	) => string
 }
 
 /**
@@ -265,32 +264,6 @@ export interface FnLive<TDef extends FnDefinition> {
 		TEmit,
 		TErrors
 	>
-}
-
-/**
- * Fail a live subscription whose initial snapshot could not be built.
- *
- * An expected client failure - an `ORPCError` with a 4xx status, e.g. the
- * subscribed resource was not found or access was refused - reaches the
- * subscriber unchanged and is NOT logged as a server fault. Only 5xx and
- * unknown failures are logged. Unknown errors are wrapped as
- * `INTERNAL_SERVER_ERROR`.
- */
-export function throwInitialSnapshotError(
-	err: unknown,
-	liveName: string,
-	logger: Pick<FnLogger, 'error'>,
-	/** `createFn`'s `isExpectedError`; default: a 4xx `ORPCError`. */
-	isExpected: (error: unknown) => boolean = (error) =>
-		error instanceof ORPCError && error.status < 500
-): never {
-	if (!isExpected(err)) {
-		logger.error('fnLive initial snapshot failed', {
-			name: liveName,
-			err: errorMessageOf(err)
-		})
-	}
-	throw toSnapshotError(err, liveName)
 }
 
 /** An `ORPCError` passes through; anything else becomes INTERNAL_SERVER_ERROR. */
@@ -426,7 +399,6 @@ type RuntimeParams = Record<string, unknown> & {
 	input: Record<string, unknown>
 	context: unknown
 	signal: AbortSignal | undefined
-	logger: FnLogger
 	call: (procedure: AnyProcedure, input: unknown) => Promise<unknown>
 	[RAW_INPUT]: unknown
 }
@@ -441,6 +413,7 @@ type RuntimeLiveConfig = Omit<ChannelOptions, 'name'> & {
 	shouldUpdate?: (params: RuntimeParams & Record<string, unknown>) => unknown
 	coalesceMs?: number
 	maxBatchSize?: number
+	skipUnchanged?: boolean
 	summary?: string
 	description?: string
 }
@@ -556,6 +529,7 @@ export function createFnLive(runtime: {
 							live.reauthorize !== true &&
 							!(await live.reauthorize({
 								input: params.input,
+								context: params.context,
 								ctx: params.context
 							}))
 						)
@@ -587,6 +561,8 @@ export function createFnLive(runtime: {
 						}
 						return validate(live.stateSchema as AnySchema, next)
 					}
+					// What the client last received, to skip a rerun that changed nothing.
+					let sent: string | undefined
 					const applyBatch = live.transformerFn
 						? undefined
 						: async (events: readonly unknown[], previous: unknown) => {
@@ -599,7 +575,14 @@ export function createFnLive(runtime: {
 										(await live.shouldUpdate({ ...params, event, previous }))
 									)
 										invalidated = true
-								return invalidated ? rerun() : undefined
+								if (!invalidated) return undefined
+								const next = await rerun()
+								if (live.skipUnchanged === false) return next
+								sent ??= snapshotKey(previous)
+								const key = snapshotKey(next)
+								if (key !== undefined && key === sent) return undefined
+								sent = key
+								return next
 							}
 
 					yield* streamLiveSnapshots({
@@ -622,7 +605,6 @@ export function createFnLive(runtime: {
 			procedure,
 			subscribe,
 			publish: channel.publish,
-			getChannelName: channel.getChannelName,
 			getSubscriptionChannelName: channel.getSubscriptionChannelName,
 			getPublishChannelName: channel.getPublishChannelName
 		}

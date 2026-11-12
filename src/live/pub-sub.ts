@@ -63,7 +63,12 @@ export type FilterFn<TInput, TEventData> = (params: {
  * everyone; a function returns false (or throws) to refuse with FORBIDDEN.
  */
 export type AuthFn<TInput, TContext> =
-	| ((params: { input: TInput; ctx: TContext }) => MaybePromise<boolean>)
+	| ((params: {
+			input: TInput
+			context: TContext
+			/** @deprecated Use `context`. */
+			ctx: TContext
+	  }) => MaybePromise<boolean>)
 	| true
 
 export type PublisherConfig = {
@@ -85,8 +90,9 @@ export type PublisherConfig = {
 	 */
 	mirrorChannel?: string
 	/**
-	 * Log publish failures (validation or broker) instead of throwing them, so
-	 * a publish after a committed write cannot fail the request. No retry.
+	 * Log publish failures (validation or broker) at `warn` instead of throwing
+	 * them, so a publish after a committed write cannot fail the request. No
+	 * retry. Default: `createFn({ pubsub: { safePublish } })`, else false.
 	 */
 	safePublish?: boolean
 }
@@ -128,7 +134,11 @@ export type PubSubOptions<
 		/** What gets published. */
 		eventSchema: TEventSchema
 		filterFn?: FilterFn<z.output<TInputSchema>, z.output<TEventSchema>>
-		authFn?: AuthFn<z.output<TInputSchema>, FnContext<TDef, TKey>>
+		/**
+		 * Who may subscribe. Required: `true` says on purpose that anyone who
+		 * passes the procedure builder may.
+		 */
+		authFn: AuthFn<z.output<TInputSchema>, FnContext<TDef, TKey>>
 		/**
 		 * When a slow subscriber's queue overflows (drop-oldest), enqueue this
 		 * marker INSTEAD of the new event so the subscriber resyncs from its
@@ -167,11 +177,24 @@ export type PubSub<
 		context: FnContext<TDef, TKey>
 	}) => string
 	getPublishChannelName: (event: z.output<TEventSchema>) => string
-	/** @deprecated Prefer the separate required-input resolver methods. */
-	getChannelName: (
-		params: Partial<z.output<TInputSchema>> | Partial<z.output<TEventSchema>>,
-		context?: FnContext<TDef, TKey>
-	) => string
+	/**
+	 * Read the bus on the server, without the route, its guards or `authFn`.
+	 * Resolves once subscribed; the events end when `signal` aborts.
+	 */
+	listen: (
+		input: z.output<TInputSchema>,
+		options?: ListenOptions<FnContext<TDef, TKey>>
+	) => Promise<AsyncGenerator<z.output<TEventSchema>, void, unknown>>
+	/** The parsed backlog of the channel an event goes to, oldest first. */
+	readBacklog: (
+		event: Partial<z.output<TEventSchema>>
+	) => Promise<z.output<TEventSchema>[]>
+}
+
+export type ListenOptions<TContext = unknown> = {
+	signal?: AbortSignal
+	/** For a channel resolver that reads the context. */
+	context?: TContext
 }
 
 export type CreatePubSub<TDef extends FnDefinition> = <
@@ -201,6 +224,15 @@ export type Publisher<TEventSchema extends ZodType> = {
 	publish: (data: z.input<TEventSchema>) => Promise<void>
 	publishMany: (items: readonly z.input<TEventSchema>[]) => Promise<void>
 	getChannelName: (params: Partial<z.output<TEventSchema>>) => string
+	/** Read the channel on the server. Resolves once subscribed. */
+	listen: (
+		params: Partial<z.output<TEventSchema>>,
+		options?: Omit<ListenOptions, 'context'>
+	) => Promise<AsyncGenerator<z.output<TEventSchema>, void, unknown>>
+	/** The channel's parsed backlog, oldest first. */
+	readBacklog: (
+		params: Partial<z.output<TEventSchema>>
+	) => Promise<z.output<TEventSchema>[]>
 }
 
 /**
@@ -236,6 +268,14 @@ export type PubSubRuntimeOptions = {
 	namespace?: string
 	/** Close this transport only when its ownership is explicitly transferred. */
 	ownsTransport?: boolean
+	/** Default `safePublish` for every definition of this factory. */
+	safePublish?: boolean
+	/**
+	 * End route streams this long after they opened (plus up to 10% jitter),
+	 * so a client reconnects and its context, and with it its authorization,
+	 * is built again. The client helpers reconnect on their own. Default: never.
+	 */
+	maxStreamAgeMs?: number
 }
 
 /** @internal */
@@ -463,9 +503,12 @@ export type Channel = {
 		context: unknown
 		signal: AbortSignal | undefined
 		recoverGaps?: boolean
+		/** An in-process reader: no `authFn`, no maximum age. */
+		server?: boolean
 	}) => Promise<LiveSubscription>
 	publish: (data: unknown) => Promise<void>
 	publishMany: (items: readonly unknown[]) => Promise<void>
+	readBacklog: (event: Input) => Promise<unknown[]>
 	getChannelName: (params: Input, context?: unknown) => string
 	getSubscriptionChannelName: (params: {
 		input: Input
@@ -512,6 +555,10 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 		options.pubsub?.initializationTimeoutMs ?? 10000,
 		'initializationTimeoutMs'
 	)
+	const maxStreamAge =
+		options.pubsub?.maxStreamAgeMs === undefined
+			? undefined
+			: positiveInteger(options.pubsub.maxStreamAgeMs, 'maxStreamAgeMs')
 	const metric = (event: PubSubMetric) =>
 		safely(() => options.pubsub?.onMetric?.(event))
 	const namespace = options.pubsub?.namespace
@@ -617,15 +664,16 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 				}
 			})
 
+		const safePublish = config.safePublish ?? options.pubsub?.safePublish
 		const guarded = async (
 			operation: 'publish' | 'publishMany',
 			items: readonly unknown[]
 		) => {
-			if (!config.safePublish) return send(operation, items)
+			if (!safePublish) return send(operation, items)
 			try {
 				await send(operation, items)
 			} catch (error) {
-				logger.error('pubsub.publish_failed', {
+				logger.warn('pubsub.publish_failed', {
 					name,
 					...errorAttributes(error)
 				})
@@ -910,7 +958,8 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			input,
 			context,
 			signal,
-			recoverGaps = false
+			recoverGaps = false,
+			server = false
 		}) => {
 			assertOpen()
 			signal?.throwIfAborted()
@@ -937,10 +986,11 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 
 			try {
 				if (
+					!server &&
 					authFn !== undefined &&
 					authFn !== true &&
 					!(await waitFor(
-						Promise.resolve(authFn({ input, ctx: context })),
+						Promise.resolve(authFn({ input, context, ctx: context })),
 						initializationTimeout,
 						initializing.signal
 					))
@@ -1006,16 +1056,14 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			let replaying: Array<{ data: unknown; id: string | undefined }> | null =
 				useBacklog ? [] : null
 			let replayGap = false
-			const seen = new Set<string>()
+			// Overlap exists only between the backlog and live events that arrive
+			// while it replays, so ids are recorded only then: at most twice
+			// `maxReplay`, and nothing at all without a backlog.
+			const seen = useBacklog ? new Set<string>() : null
 			const dedupe = (id: string | undefined) => {
-				if (!id) return false
+				if (!id || !seen) return false
 				if (seen.has(id)) return true
-				seen.add(id)
-				if (
-					seen.size >
-					Math.max(maxReplay, maxQueue, channelOptions.backlogSize ?? 50) * 2
-				)
-					seen.delete(seen.values().next().value as string)
+				if (replaying) seen.add(id)
 				return false
 			}
 			const push = (data: unknown, id?: string) => {
@@ -1067,9 +1115,11 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			// stream finishing, or `close()`. Releases everything at once, even
 			// while the stream is parked or not yet read.
 			let closed = false
+			let ageTimer: ReturnType<typeof setTimeout> | undefined
 			const close = (...error: [] | [unknown]) => {
 				if (closed) return
 				closed = true
+				clearTimeout(ageTimer)
 				initializing.abort(error[0] ?? new Error('Subscription closed'))
 				delivery.close(error[0])
 				activeSubscriberCleanups.delete(stop)
@@ -1097,6 +1147,10 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			activeSubscriberCleanups.add(stop)
 			signal?.addEventListener('abort', stop)
 			if (signal?.aborted) close()
+			if (maxStreamAge !== undefined && !server && !closed) {
+				ageTimer = setTimeout(stop, maxStreamAge * (1 + Math.random() * 0.1))
+				;(ageTimer as { unref?: () => void }).unref?.()
+			}
 
 			try {
 				await waitFor(local.ready, initializationTimeout, initializing.signal)
@@ -1182,6 +1236,25 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			getChannelName: getPublishChannel
 		})
 
+		const readBacklog = async (event: Input) => {
+			const channelName = getPublishChannel(event)
+			const events: unknown[] = []
+			for (const raw of await requireTransport().readBacklog(channelName)) {
+				try {
+					events.push(await eventSchema.parseAsync(decodeMessage(raw).value))
+				} catch (error) {
+					metric({
+						type: 'parseError',
+						stage: 'replay',
+						error,
+						name,
+						channel: channelName
+					})
+				}
+			}
+			return events
+		}
+
 		const open: Channel['open'] = (params) => {
 			const task = openInternal(params)
 			pendingOpens.add(task)
@@ -1195,6 +1268,7 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			open,
 			publish,
 			publishMany,
+			readBacklog,
 			getChannelName,
 			getSubscriptionChannelName: ({ input, context }) =>
 				getChannelName(input, context),
@@ -1212,6 +1286,10 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 		}
 	) {
 		const { name } = pubsubOptions
+		if (pubsubOptions.authFn === undefined)
+			throw new TypeError(
+				`orpc-fn: pub/sub ${name} needs an authFn; pass authFn: true to let every caller of its procedure subscribe`
+			)
 		const channel = createChannel(pubsubOptions)
 
 		const {
@@ -1251,26 +1329,36 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			}
 		})
 
-		const { publish, publishMany, getChannelName } = channel
 		return {
 			subscribe,
-			publish,
-			publishMany,
-			getChannelName,
+			publish: channel.publish,
+			publishMany: channel.publishMany,
 			getSubscriptionChannelName: channel.getSubscriptionChannelName,
-			getPublishChannelName: channel.getPublishChannelName
+			getPublishChannelName: channel.getPublishChannelName,
+			listen: listener(channel),
+			readBacklog: channel.readBacklog
 		}
 	}
 
 	function createPublisher(publisherOptions: PublisherOptions<ZodType>) {
-		const getChannelName = (params: Input) =>
-			qualify(resolveChannel(publisherOptions.channel, params, undefined, true))
-		const { publish, publishMany } = createChannelPublisher({
-			...publisherOptions,
-			getChannelName
-		})
-		return { publish, publishMany, getChannelName }
+		const channel = createChannel(publisherOptions)
+		return {
+			publish: channel.publish,
+			publishMany: channel.publishMany,
+			getChannelName: channel.getPublishChannelName,
+			listen: (params: Input, listenOptions: { signal?: AbortSignal } = {}) =>
+				listener(channel)(params, listenOptions),
+			readBacklog: channel.readBacklog
+		}
 	}
+
+	const listener =
+		(channel: Channel) =>
+		async (
+			input: Input,
+			{ signal, context }: { signal?: AbortSignal; context?: unknown } = {}
+		) =>
+			(await channel.open({ input, context, signal, server: true })).events
 
 	return {
 		createChannel,
@@ -1291,10 +1379,11 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 		/** Open subscriptions of this instance (drain progress, gauges). */
 		activePubSubSubscriberCount: () => activeSubscriberCleanups.size,
 		/** End every open subscription; returns how many were closed. */
-		drainPubSubSubscribers: () => {
+		drainPubSubSubscribers: (drain?: {
+			overMs: number
+		}): number | Promise<number> => {
 			const cleanups = [...activeSubscriberCleanups]
-			activeSubscriberCleanups.clear()
-			for (const cleanup of cleanups) {
+			const run = (cleanup: () => void) => {
 				try {
 					cleanup()
 				} catch (error) {
@@ -1304,7 +1393,23 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 					})
 				}
 			}
-			return cleanups.length
+			if (drain === undefined) {
+				activeSubscriberCleanups.clear()
+				for (const cleanup of cleanups) run(cleanup)
+				return cleanups.length
+			}
+			const { overMs } = drain
+			if (!Number.isFinite(overMs) || overMs < 0)
+				throw new RangeError('orpc-fn: overMs must be finite and nonnegative')
+			const step = overMs / Math.max(1, cleanups.length - 1)
+			return (async () => {
+				for (const [index, cleanup] of cleanups.entries()) {
+					if (index > 0)
+						await new Promise((resolve) => setTimeout(resolve, step))
+					run(cleanup)
+				}
+				return cleanups.length
+			})()
 		}
 	}
 }

@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test'
 import { RequestContext } from '@mastra/core/request-context'
+import { ORPCError } from '@orpc/server'
 import { z as zod } from 'zod'
 import { fn } from '../tests/fixture.js'
 import { createMastraTool } from './mastra.js'
@@ -193,5 +194,53 @@ describe('createMastraTool runtime behavior', () => {
 			allowMissingInputSchema: true
 		})
 		expect(tool.id).toBe('test-noinput')
+	})
+})
+
+describe('tool errors', () => {
+	const run = (tool: { execute?: unknown }) =>
+		(
+			tool.execute as (
+				input: unknown,
+				ctx: { requestContext: RequestContext }
+			) => Promise<unknown>
+		)({ userId: 'u', count: 1 }, { requestContext: withContext() })
+	const withContext = () => {
+		const requestContext = new RequestContext()
+		requestContext.set('orpcContext', {})
+		return requestContext
+	}
+
+	test('an expected error reads as CODE: message', async () => {
+		const refuse = fn({
+			name: 'test.refuse',
+			procedure: 'public',
+			input: InputSchema,
+			handler: () => {
+				throw new ORPCError('NOT_FOUND', { message: 'No such user' })
+			}
+		})
+		await expect(run(createMastraTool(refuse))).rejects.toThrow(
+			'NOT_FOUND: No such user'
+		)
+	})
+
+	test('an unexpected error is reported and hidden from the model', async () => {
+		const reported: unknown[] = []
+		const crash = fn({
+			name: 'test.crash',
+			procedure: 'public',
+			input: InputSchema,
+			handler: () => {
+				throw new Error('secret connection string')
+			}
+		})
+		const tool = createMastraTool(crash, {
+			onError: (error) => reported.push(error)
+		})
+		await expect(run(tool)).rejects.toThrow(
+			'test-crash failed unexpectedly. The error was reported.'
+		)
+		expect((reported[0] as Error).message).toBe('secret connection string')
 	})
 })

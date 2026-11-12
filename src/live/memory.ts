@@ -1,16 +1,26 @@
+import { decodePayload } from './codec.js'
 import type { PubSubTransport, PubSubTransportStats } from './transport.js'
+
+/** One message the memory transport carried, decoded. */
+export type PublishedEvent = { channel: string; event: unknown }
 
 /**
  * In-process transport for tests and single-process development. Delivery is
- * asynchronous (a microtask), like a real broker.
+ * asynchronous (a microtask), like a real broker. It records what was
+ * published, so a test asserts on `published()` instead of mocking a bus.
  */
 export function memoryTransport(): PubSubTransport & {
 	/** Active listeners per channel, for assertions. */
 	listenerCount(channel: string): number
 	stats(): PubSubTransportStats
+	/** Events published so far, oldest first, decoded; optionally on one channel. */
+	published(channel?: string): PublishedEvent[]
+	/** Forget the recorded events. */
+	clearPublished(): void
 } {
 	const listeners = new Map<string, Set<(payload: string) => void>>()
 	const backlogs = new Map<string, { items: string[]; expiresAt: number }>()
+	const log: { channel: string; payload: string }[] = []
 
 	return {
 		async close() {
@@ -19,6 +29,7 @@ export function memoryTransport(): PubSubTransport & {
 		},
 		async publish(messages, backlog) {
 			for (const { channel, payload } of messages) {
+				log.push({ channel, payload })
 				if (backlog) {
 					const current = backlogs.get(channel)
 					const items =
@@ -51,6 +62,16 @@ export function memoryTransport(): PubSubTransport & {
 			}
 		},
 		listenerCount: (channel) => listeners.get(channel)?.size ?? 0,
+		published: (channel) =>
+			log
+				.filter((entry) => channel === undefined || entry.channel === channel)
+				.map((entry) => ({
+					channel: entry.channel,
+					event: decodePayload(entry.payload)
+				})),
+		clearPublished: () => {
+			log.length = 0
+		},
 		stats: () => ({
 			channels: listeners.size,
 			listeners: [...listeners.values()].reduce(

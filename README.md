@@ -70,25 +70,41 @@ createFn({
   spanAttributes,  // ({ context, name, procedure, meta }) => extra span attributes
   onCompleted,     // (event) => extra attributes for the fn.completed log
   isExpectedError, // default: 4xx ORPCError or AbortError
-  pubsub           // { transport (or () => transport, created on first use), namespace?, ownsTransport?, maxQueueSize?, maxIngressSize?, maxReplaySize?, initializationTimeoutMs?, onDrop?, onMetric? } for fnLive / createPubSub
+  errorMessages,   // 'all' (default) | 'unexpected': leave expected errors' text out of fn.completed
+  routePolicy,     // ({ name, procedure, guards, dynamicGuards, meta, stream, tags }) => void; throw to reject a route
+  pubsub           // { transport (or () => transport, created on first use), namespace?, ownsTransport?, safePublish?, maxStreamAgeMs?, maxQueueSize?, maxIngressSize?, maxReplaySize?, initializationTimeoutMs?, onDrop?, onMetric? } for fnLive / createPubSub
 })
 ```
 
-It returns `fn`, `fnLive`, `createPubSub`, `createPublisher`, `createRouter`, `readMeta`, `createCall`, `shutdown`, `drainPubSubSubscribers` and `activePubSubSubscriberCount`.
+It returns `fn`, `fnLive`, `fnLivePatch`, `createPubSub`, `createPublisher`, `createRouter`, `readMeta`, `createCall`, `createTestCall`, `shutdown`, `drainPubSubSubscribers` and `activePubSubSubscriberCount`.
 
 Procedure builders must not set an input or output schema (`os.input(...)`); put schemas on routes. Guard keys cannot reuse route option names. Application metadata lives in a typed `meta` object and may share names with guards or route options. Unknown top-level route options and extras that shadow built-in handler params are rejected. Scoped extras replace matching shared keys, with handler types reflecting that precedence.
 
 **`fn(options)`** has four overloads (input and output schema, each given or inferred). Route options: `name` (required; operationId and span name), `procedure`, `path`, `method`, `summary`, `description`, `tags`, `deprecated`, `successStatus`, `successDescription`, `inputStructure`, `outputStructure`, configured guard keys, `guardResolvers`, `meta`, `stream` and native `errors` declarations. Core schemas use Standard Schema; Zod 4 remains the default for tool/live adapters. The handler receives `input`, `context`, `call`, `signal`, `span`, `logger`, native typed `errors`, `lastEventId` and your extras. With an output schema, the handler returns the schema's input type and callers receive its output type, so `output: z.string().transform(Number)` means the handler returns a string and callers get a number.
 
-**Guards** run inside the span, before the handler, and only on routes that set their option. Return `false` or throw an `ORPCError` to refuse; `true` and `undefined` allow. Static guards run sequentially in route declaration order, followed by resolved guards in resolver order. Unsupported return values fail types and runtime. For input-dependent checks use `guardResolvers: { permission: ({ input, context }) => requirement }`; these see parsed input. A guard cannot set both a static value and a resolver.
+**Guards** run inside the span, before the handler, and only on routes that set their option. A route's guard values are stored in its meta: `readMeta(route).guards` returns them typed (`{ permission: 'deal.read' }`) and `dynamicGuards` names the ones a resolver decides, so a tool list or an audit reads the route's own declaration. To require a decision on every route, reject the rest at definition with `routePolicy`:
 
-**`call(procedure, input)`** calls another procedure with the caller's context and abort signal, inside a `call: <name>` child span. Input and output are typed from the callee. Calling a procedure whose context the caller's context does not satisfy is a type error. Outside a handler (seeders, scripts, tests), use `createCall(context, signal?)` from `createFn`.
+```ts
+createFn({
+  guards: { permission },
+  routePolicy: ({ name, procedure, guards, dynamicGuards }) => {
+    if (procedure === 'protected' && !('permission' in guards) && !dynamicGuards.includes('permission'))
+      throw new Error(`${name}: declare permission (or permission: 'authenticated')`)
+  }
+})
+```
+
+It sees every route kind: `fn`, both `fnLive` routes and pub/sub subscriptions. Return `false` or throw an `ORPCError` to refuse; `true` and `undefined` allow. Static guards run sequentially in route declaration order, followed by resolved guards in resolver order. Unsupported return values fail types and runtime. For input-dependent checks use `guardResolvers: { permission: ({ input, context }) => requirement }`; these see parsed input. A guard cannot set both a static value and a resolver.
+
+**`call(procedure, input)`** calls another procedure with the caller's context and abort signal, inside a `call: <name>` child span. Input and output are typed from the callee. Calling a procedure whose context the caller's context does not satisfy is a type error. Outside a handler (seeders, scripts, tests), use `createCall(context, signal?)` from `createFn`. A test calls a real route with `createTestCall(context, { extras: { db: fakeDb } })`: middleware, guards and schemas run as in production, and the given extras replace the configured ones for that call and the calls it makes. Mocking `fn` to return its options skips all of that.
 
 **Meta** is stored in oRPC's own procedure meta. It survives `os.router()`, prefixes and lazy routers. Declare the contract with `defineMeta<AppMeta>()` (no runtime defaults), then use `fn({ meta: { readOnly: true }, ... })`. Both `readMeta(procedure)` and `readFnMeta(procedure)` infer metadata from the passed procedure, including procedures from another factory.
 
+**Errors.** `fn.completed` carries `error_type`, `error_code` (an `ORPCError`'s code) and `error_message`. An error `isExpectedError` accepts logs at `warn`, and its span keeps an unset status with no exception event, as OpenTelemetry asks of server spans; `fn.error_code` names it. Its message was written for the caller and may name what they asked for, so `errorMessages: 'unexpected'` leaves it out of the log too. `mountOrpc` and the tool adapters treat errors this factory classified as expected the same way without being told again. To turn the app's own error classes into `ORPCError`s, put one middleware on the base builder rather than a mapper in every route.
+
 Completion hooks discriminate by `procedure` and `handlerStarted`. Before handler context exists (auth/input failure), they receive the initial context. Logging, tracing, metrics and completion-hook failures preserve procedure results. Custom log fields cannot overwrite canonical completion fields. Stream completion runs once when the stream ends.
 
-Also exported: `defineMeta`, `createStreamManifest`, `createStreamManifestAsync`, `renderStreamManifest`, `isExpectedClientError`, `createBoundedEventQueue`, `createRouter`, `createBoundCall`, and the types `HandlerParams`, `RouteConfig`, `BoundCall`, `FnMeta`, `FnContext`, `FnCompletedEvent`, `ProcedureInput`, `ProcedureOutput`, `ProcedureContext`, `InitialContextOf`, `CurrentContextOf` and `GuardOptions`.
+Also exported: `defineMeta`, `createStreamManifest`, `createStreamManifestAsync`, `renderStreamManifest`, `isExpectedClientError`, `createRouter`, `createBoundCall`, and the types `HandlerParams`, `RouteConfig`, `BoundCall`, `FnMeta`, `FnContext`, `FnCompletedEvent`, `ProcedureInput`, `ProcedureOutput`, `ProcedureContext`, `InitialContextOf`, `CurrentContextOf` and `GuardOptions`.
 
 ## `orpc-fn/live`: pub/sub and live queries
 
@@ -122,17 +138,19 @@ await listOrders.publish({ organizationId, orderId }) // after a write
 
 The `subscribe` route runs builder middleware and the same fn guards/extras/meta/completion policy, then `authFn` and subscribes to the channel, then streams the initial snapshot, then reloads when invalidated (once per coalescing batch). Queue bounds (`maxQueueSize`, `maxIngressSize`, `maxReplaySize`) can be overridden per pub/sub definition or live config. `maxBatchSize` bounds a live coalescing batch (default 1000). `pubsub.onMetric` reports typed queue depths, drops, successful reconnects and parsing failures; keep this synchronous callback fast. Startup waits for a successful broker subscription, bounded by `initializationTimeoutMs` (10000ms by default) and cancellation. A refused subscriber receives nothing, and events published while the snapshot loads are not lost. Snapshots go through the output schema, like the route's own result. Options:
 
-- `shouldUpdate` skips an event.
+- `shouldUpdate` skips an event. It, `transformerFn` and `reauthorize` receive the same `context` object for every event of one subscription, so a `WeakMap` keyed on it holds per-subscription state.
 - `transformerFn` folds an event into initialized `previous`. It requires a `stateSchema` that validates parsed state. Patches returned by `fnLivePatch(state, emit)` additionally require `emitSchema`. These schemas should not transform already-parsed values. `rerun()` rechecks the current input through the procedure; it cannot change subscriber input.
+- Without a transformer, a rerun whose snapshot serializes the same as the last one sent is not sent again (`skipUnchanged: false` sends it anyway).
 - `coalesceMs` performs one rerun for an invalidation batch. Reducers process every event but emit their final full state; ordered patch payloads remain ordered. Batches are bounded (1000 events by default in `streamLiveSnapshots`).
 - `authFn` and `useBacklog`/`backlogSize`/`backlogTtl` work as on `createPubSub`.
 - Live queries reload a full snapshot after overflow or reconnect. Raw pub/sub streams fail with `SERVICE_UNAVAILABLE` after detected loss, or emit an application-provided `overflowMarker` that must trigger recovery.
-- `reauthorize` can check access before each live update. Initial authorization covers idle streams; apps that need immediate revocation should close those streams.
-- `safePublish` logs publish errors instead of throwing them; it does not retry or guarantee delivery.
+- `reauthorize` can check access before each live update. Initial authorization covers idle streams; `pubsub.maxStreamAgeMs` ends every route stream after that age (plus up to 10% jitter), and the client helpers reconnect with a freshly built context.
+- `safePublish` logs publish errors at `warn` instead of throwing them; it does not retry or guarantee delivery. `pubsub.safePublish` sets the default for every definition.
+- A route that only publishes needs no `createPublisher` beside it: `fnLive` returns `publish`.
 
-**`createPubSub`** returns a typed `subscribe` route plus `publish`, `publishMany` (one atomic round-trip across channels) and typed `getSubscriptionChannelName({ input, context })` / `getPublishChannelName(event)` methods. The shared partial-input `getChannelName` method is deprecated. Publishers pass the event schema's input type; subscribers, filters and channel resolvers get its output type. The raw event travels in oRPC's JSON format, so `Date`, `Map`, `Set` and `BigInt` survive, and each receiver parses it once. Options include `filterFn`, `authFn`, `mirrorChannel`, `overflowMarker`, `procedure`, configured guards and `meta`. Channels may be static or use `channel: { subscribe: ({ input, context }) => key, publish: (parsedEvent) => key }`. Carry publishing tenant keys in the event. A factory `namespace` prefixes channels, mirrors and backlog keys. Each pub/sub definition subscribes to each channel once and parses each payload once for all local subscribers. Each subscriber then runs its filter in arrival order as it reads; its bounded queue holds events before filtering, so `onDrop` counts unfiltered events. Abort and drain release a subscription at once, even one that is not being read. A lost subscription is retried with exponential backoff and jitter. `safePublish` logs a failed publish (`pubsub.publish_failed`) instead of throwing, as on `fnLive`. **`createPublisher`** is the publish-only half.
+**`createPubSub`** returns a typed `subscribe` route plus `publish`, `publishMany` (one atomic round-trip across channels) and typed `getSubscriptionChannelName({ input, context })` / `getPublishChannelName(event)` methods. `authFn` is required: return false to refuse with FORBIDDEN, or pass `true` to say that anyone who passes the procedure builder may subscribe. It receives `{ input, context }` (`ctx` is a deprecated alias). The server reads a bus without its route: `for await (const event of await bus.listen(input, { signal }))` resolves once subscribed and skips guards and `authFn`, and `await bus.readBacklog(event)` returns the parsed backlog of the channel an event goes to. Publishers pass the event schema's input type; subscribers, filters and channel resolvers get its output type. The raw event travels in oRPC's JSON format, so `Date`, `Map`, `Set` and `BigInt` survive, and each receiver parses it once. Options include `filterFn`, `authFn`, `mirrorChannel`, `overflowMarker`, `procedure`, configured guards and `meta`. Channels may be static or use `channel: { subscribe: ({ input, context }) => key, publish: (parsedEvent) => key }`. Carry publishing tenant keys in the event. A factory `namespace` prefixes channels, mirrors and backlog keys. Each pub/sub definition subscribes to each channel once and parses each payload once for all local subscribers. Each subscriber then runs its filter in arrival order as it reads; its bounded queue holds events before filtering, so `onDrop` counts unfiltered events. Abort and drain release a subscription at once, even one that is not being read. A lost subscription is retried with exponential backoff and jitter. `safePublish` logs a failed publish (`pubsub.publish_failed`) instead of throwing, as on `fnLive`. **`createPublisher`** is the publish-only half; it also has `listen` and `readBacklog`.
 
-**`defineScopedChangeBus`** binds `createPubSub` to one scope rule, for buses that tell everyone in a scope (usually an organization) "this changed". Each bus names a channel `prefix`; events go to `${prefix}:${scope}`. Publishing is safe by default, since buses publish after committed writes. `inputSchema` defaults to `z.object({})`. `bus.channel` lets an `fnLive` share the bus's events, and `bus.channelFor({ organizationId })` returns a scope's full channel name, namespace included, e.g. for `backlogKey(...)`.
+**`defineScopedChangeBus`** binds `createPubSub` to one scope rule, for buses that tell everyone in a scope (usually an organization) "this changed". Each bus names a channel `prefix`; events go to `${prefix}:${scope}`. Publishing is safe by default, since buses publish after committed writes. The scope is the access decision, so `authFn` defaults to `true`. `inputSchema` defaults to `z.object({})`. `bus.channel` lets an `fnLive` share the bus's events, and `bus.channelFor({ organizationId })` returns a scope's full channel name, namespace included, e.g. for `backlogKey(...)`.
 
 ```ts
 import { defineScopedChangeBus, invalidationStream } from 'orpc-fn/live'
@@ -167,7 +185,7 @@ export const subscribeChanges = fn({
 
 On the client, `useInvalidationStream` from `orpc-fn/vue` or `orpc-fn/react` consumes it; its `domains` map is typed from the route's domains.
 
-**Graceful shutdown:** `await shutdown()` stops new subscriptions/publication, cancels initialization/retries, ends existing streams and awaits cleanup. It closes a supplied transport only with `ownsTransport: true`, and a lazy `transport: () => …` only if it was ever created; it is never created during or after shutdown. A custom transport whose pending `subscribe` cannot be cancelled may resolve later; that late subscription is immediately released. `drainPubSubSubscribers()` remains a synchronous, nonterminal operation. Both are per factory.
+**Graceful shutdown:** `await shutdown()` stops new subscriptions/publication, cancels initialization/retries, ends existing streams and awaits cleanup. It closes a supplied transport only with `ownsTransport: true`, and a lazy `transport: () => …` only if it was ever created; it is never created during or after shutdown. A custom transport whose pending `subscribe` cannot be cancelled may resolve later; that late subscription is immediately released. `drainPubSubSubscribers()` remains a synchronous, nonterminal operation; `await drainPubSubSubscribers({ overMs: 5000 })` spreads the closes over the window so clients do not reconnect in one burst. Both are per factory, and both end `listen` streams too.
 
 Recent event IDs deduplicate replay/live overlap; legacy payloads remain readable. Replay is bounded and TTL-limited, so it is not durable resume. A snapshot may already include a queued delta: reducers must use revisions or idempotence. See [the revision example](examples/adoption/revisions.ts). Parsing ingress, replay staging and subscriber queues are bounded; positive queue/TTL/time options are validated.
 
@@ -175,9 +193,9 @@ Recent event IDs deduplicate replay/live overlap; legacy payloads remain readabl
 
 | Subpath | Client | Notes |
 |---|---|---|
-| `orpc-fn/live/redis-bun` | Bun `RedisClient` | Dedicated subscriber via `duplicate()`; re-subscribes after Bun's reconnects |
+| `orpc-fn/live/redis-bun` | Bun `RedisClient` | Dedicated subscriber via `duplicate()`, or pass `subscriber`; then the command client needs only `send` (a wrapper with timeouts fits). Re-subscribes after Bun's reconnects |
 | `orpc-fn/live/ioredis` | ioredis 5 | Dedicated subscriber via `duplicate()`; ioredis re-subscribes itself |
-| `orpc-fn/live/memory` | none | Tests and single-process dev |
+| `orpc-fn/live/memory` | none | Tests and single-process dev. `published(channel?)` returns what was published, decoded; `clearPublished()` resets it |
 
 A subscriber connection that is lost, or cannot restore its channels after a reconnect, is closed and replaced; nothing it still emits is delivered. The Redis transports publish and maintain backlogs with one Lua script, sent by SHA, with a fallback to `EVAL` when Redis returns `NOSCRIPT`. Await `transport.close()` when the app owns its lifecycle.
 
@@ -190,7 +208,9 @@ meter.createObservableGauge('pubsub_subscribed_channels').addCallback((g) => g.o
 meter.createObservableGauge('pubsub_redis_subscriber_connected').addCallback((g) => g.observe(transport.stats().subscriberConnected ? 1 : 0))
 ``` The Redis Lua batching adapter supports standalone Redis; Redis Cluster requires compatible key slots and is not promised by this adapter.
 
-`streamLiveSnapshots`, `fnLivePatch` and `throwInitialSnapshotError` are exported for custom streams.
+`streamLiveSnapshots`, `fnLivePatch` and `createBoundedEventQueue` are exported for custom streams.
+
+In tests, return `memoryTransport()` from the lazy `pubsub.transport` and assert on `transport.published()` instead of mocking bus modules.
 
 ## `orpc-fn/mastra`
 
@@ -203,7 +223,7 @@ const tool = createMastraTool(getOrder, { requireApproval: true })
 // at run time: requestContext.set('orpcContext', context)
 ```
 
-Options: `id`, `description`, `requireApproval`, `allowMissingInputSchema`, `onExecuteFinish`, `contextKey` (default `'orpcContext'`), or `context: (requestContext) => …` to read the oRPC context yourself. Mastra writes plain request-context values into run snapshots and spans, so a context holding a session belongs in a slot that serializes to nothing (better-mastra's `defineRequestContextHolder`), read through `context`. Execution goes through oRPC `call`, so middleware and guards apply.
+Options: `id`, `description` (default: the route's description, else its summary), `requireApproval`, `allowMissingInputSchema`, `onExecuteFinish`, `contextKey` (default `'orpcContext'`), or `context: (requestContext) => …` to read the oRPC context yourself. A failed call throws an `Error` whose message the model reads: `CODE: message`, plus one `path: message` line per validation issue, for an expected error; a fixed sentence for anything else, which goes to `onError(error, { tool })`. `isExpectedError` and `formatError(error, { tool, expected })` change the rule and the text. The same options exist on `registerMcpTools`. Mastra writes plain request-context values into run snapshots and spans, so a context holding a session belongs in a slot that serializes to nothing (better-mastra's `defineRequestContextHolder`), read through `context`. Execution goes through oRPC `call`, so middleware and guards apply.
 
 The tool takes the procedure's raw input and returns its parsed output, and `InferToolInput`/`InferToolOutput`/`InferUITools` see exactly those types. Mastra validates the input (coercing date strings) but passes the raw value on, and the procedure parses that raw value: transforms/refinements must be pure: SDK validation and procedure execution may run them more than once, always on raw input. Agent tools accept objects and unions of object shapes. Other inputs and streams are rejected. Finish-hook failures preserve execution outcomes.
 
@@ -236,13 +256,17 @@ const mcp = new McpServer({ name: 'api', version: '1.0.0' }, { capabilities: { t
 registerMcpTools(mcp.server, router, { filter: hasTag('external'), context })
 ```
 
-The adapter installs the SDK list/call handlers on a low-level `Server` (also accessible as `McpServer.server`). Use one registration per server; these handlers own its tool list. It forwards cancellation, validates/coerces arguments, applies procedure authorization, and formats results as JSON/text MCP content. Override `formatResult` for images, structured content or other presentation. Tool selection is required. Object unions are supported; streams are rejected. Resolve lazy routers first with oRPC's `unlazyRouter`.
+An app that builds a server per request lists and converts its tools once with `prepareMcpTools(router, { filter })` (from either entry) and registers the result with `registerPreparedMcpTools(server, prepared, { context })`. `prepared.names` lists the tool names without a server.
+
+The adapter installs the SDK list/call handlers on a low-level `Server` (also accessible as `McpServer.server`). Use one registration per server; these handlers own its tool list. It forwards cancellation, validates/coerces arguments, applies procedure authorization, and formats results as JSON/text MCP content. Override `formatResult` for images, structured content or other presentation. A failed call answers as on `orpc-fn/mastra`: expected errors as `CODE: message` with the paths of rejected arguments, anything else as a fixed sentence reported to `onError`. Tool selection is required. Object unions are supported; streams are rejected. Resolve lazy routers first with oRPC's `unlazyRouter`.
 
 Sanitized tool-name collisions between distinct procedures throw; identical aliases are deduplicated. Override `name` to resolve deliberate collisions. Tool names are the sanitized `fn` names (`user.me` becomes `user-me`). Input schemas carry the same JSON Schema as your OpenAPI docs (dates become `string`/`date-time`), and validation turns them back into `Date`s. Validation returns the raw arguments, and `call(procedure, args, { context })` parses those: transforms/refinements must be pure: SDK validation and procedure execution may run them more than once, always on raw input. `readOnlyHint` defaults to GET routes; pass `readOnly` to change it. `hasTag(tag)` also works as an oRPC `OpenAPIHandler` filter.
 
 ## `orpc-fn/cli`
 
-Uses `hanzio/cli`, which orpc-fn depends on (`hanzio` ^3.4.0). Your `defineCli` must come from the same `hanzio` copy, so keep your own `hanzio` on a matching major.
+Tool descriptions are the route's `description`, else its `summary`, for MCP, Mastra and `readFnMeta(...).description` alike.
+
+XX, which orpc-fn depends on (`hanzio` ^3.4.0). Your `defineCli` must come from the same `hanzio` copy, so keep your own `hanzio` on a matching major.
 
 ```ts
 import { defineCli } from 'hanzio/cli'
@@ -268,16 +292,21 @@ await defineCli({
 
 ## `orpc-fn/hono`
 
-Optional peers: `hono`, `@orpc/openapi`, `@orpc/zod`, `@orpc/json-schema`.
+Optional peers: `hono`; for `openapi` also `@orpc/openapi`, `@orpc/zod` and `@orpc/json-schema`, loaded on the first request to its prefix, so an RPC-only app does not install them.
 
 ```ts
-import { mountOrpc, normalizeExpoOrigin } from 'orpc-fn/hono'
+import { hasTag, mountOrpc, normalizeExpoOrigin, timed } from 'orpc-fn/hono'
 
 mountOrpc(app, {
   router,
   rpcPrefix: '/rpc',
-  openapi: { prefix: '/api', info: { title: 'API', version: '1.0.0' } },
-  context: async (c, { headers, timing }) => ({ headers, timing, session: await getSession(headers) }),
+  // Only routes tagged 'external' get a REST endpoint and appear in the docs.
+  openapi: { prefix: '/api', filter: hasTag('external'), info: { title: 'API', version: '1.0.0' } },
+  context: async (c, { headers, timing }) => ({
+    headers,
+    timing,
+    session: await timed(timing, 'auth_ms', () => getSession(headers))
+  }),
   normalizeHeaders: normalizeExpoOrigin,
   onError: (error, request) => errorTracker.capture(error, request)
 })
@@ -289,11 +318,13 @@ Behaviour:
 - SSE responses get keep-alive comments (15 s) and anti-buffering headers.
 - RPC calls are batched (`BatchHandlerPlugin`).
 - JSON and batch responses are gzipped when the client accepts it (`compress: false` turns it off). A streaming batch sends each result as it finishes, so it is flushed after every result instead of buffered; Hono's `compress()` skips event streams entirely. Live event streams are never compressed. A response that already has a `content-encoding` is left alone.
-- Scalar docs are served at the OpenAPI prefix.
-- `onError` sees only unexpected errors.
-- `openapi.filter`, `openapi.smartCoercion` and `openapi.spec` (for security schemes) cover an external API with its own auth.
+- `openapi.filter` is required and decides which routes get a REST endpoint and a place in the spec; `() => true` publishes all of them. Scalar docs are served at the OpenAPI prefix and the spec at `/spec.json`, unless `docs: false`.
+- `onError` sees only unexpected errors: by default those `isExpectedClientError` rejects, which includes errors the route's `createFn({ isExpectedError })` classified as expected.
+- `openapi.smartCoercion` and `openapi.spec` (for security schemes) cover an external API with its own auth.
+- CORS belongs to Hono's `cors()` on the app, once. A cross-origin client that batches needs `x-orpc-batch` in `allowHeaders`.
+- `timed(timing, key, work)` adds the duration of `work` to the request timing, which `Server-Timing` reports.
 - `markRequestArrival(request)` at the front door (`Bun.serve({ fetch })`, before routing) makes `queue_ms` the time until the procedure runs: in-process queueing no handler timer sees. Pass `queueMs` to measure it another way.
-- `context` builds the router's context and is checked against it: it is required when `{ headers, timing }` alone does not satisfy the router. It may return a `Response`, for example a 401.
+- `context` builds the router's context and is checked against it: it is required when `{ headers, timing }` alone does not satisfy the router. It may return a `Response`, for example a 401. Any field the app's auth middleware trusts when it is already set (a `user`) must only come from here: `createCall`, `createMastraTool({ context })` and `registerMcpTools({ context })` take a ready-made context too, so build a context that acts for someone in one app function.
 
 ## `orpc-fn/client`
 
@@ -317,7 +348,9 @@ if (hasOrpcErrorCode(error, 'NOT_FOUND')) { /* … */ }
 toast(userFacingErrorMessage(error, t('errors.generic'))) // server text only when it opts in
 ```
 
-Route error messages are developer text, so `userFacingErrorMessage` shows your localized fallback unless the server opted in with `new ORPCError('BAD_REQUEST', { message, data: { userMessage } })`. `queryCacheSerializer` is a `serialize`/`deserialize` pair for TanStack Query persisters that round-trips `Date`s and the other types oRPC sends.
+Route error messages are developer text, so `userFacingErrorMessage` shows your localized fallback unless the server opted in with `new ORPCError('BAD_REQUEST', { message, data: { userMessage } })`. `formatClientError(error, fallback)` does the same but lists the rejected fields of a failed input validation (`lines.0.sku: Required`) before falling back.
+
+Streams cannot be batched. The Vue and React helpers mark the streams they open (`streamCall` as the client context), so `createRpcLink` keeps them out of batches without a stream manifest; pass `context: streamCall` when you iterate a stream by hand. The manifest (`streamPaths`) remains for streams opened without either. `queryCacheSerializer` is a `serialize`/`deserialize` pair for TanStack Query persisters that round-trips `Date`s and the other types oRPC sends.
 
 `createRpcLink` takes every `RPCLink` option. It also batches parallel calls into one request, matching `mountOrpc`'s server-side batching (`batch: { maxSize, exclude, groups }`, or `false` to turn it off). A batch is one request with one client context, so by default only calls without a client context are batched; pass `groups` to batch calls that share one. A streaming response cannot be batched, and the request doesn't say whether the response will stream, so pass `streamPaths` generated from the actual router with `createStreamManifest` (or `createStreamManifestAsync` for lazy routers). Serialize it to a frontend module; importing that data needs no server runtime. The `orpc-fn` CLI does that, resolving lazy routers, sorting paths and writing only on change:
 
@@ -366,7 +399,8 @@ declare module 'orpc-fn/vue' {
 ```ts
 const { useQuery, useMutation, invalidate } = useApiClient()
 const orders = useQuery((o) => o.order.list.queryOptions({ input: { search: search.value } }))
-const save = useMutation((o) => o.order.update.mutationOptions({ onSuccess: () => invalidate((o) => o.order.key()) }))
+// `invalidates` runs after a success, before the options' own onSuccess.
+const save = useMutation((o) => o.order.update.mutationOptions(), { invalidates: (o) => [o.order.key()] })
 
 // Form state: `inputData` is typed from the route; `initialInput` is checked against it.
 const { inputData: form, mutate } = useMutation((o) => o.order.update.mutationOptions(), {
@@ -385,6 +419,10 @@ const order = useLiveQuery(
   (o) => o.order.watch.call // the composable passes the input and an abort signal
 )
 
+// A query as the props of a list or loading component.
+const list = useQueryState(orders, { fallback: t('orders.loadFailed') })
+// <ListStates v-bind="list" />: status, error, errorMessage, isRetrying, retry()
+
 // Once, in the signed-in shell: one stream of `{ domain }` events invalidates list queries.
 useInvalidationStream({}, (o) => o.realtime.subscribeChanges.call, {
   domains: { order: { debounceMs: 100, queryKeys: [orpc.order.key()] } },
@@ -392,7 +430,7 @@ useInvalidationStream({}, (o) => o.realtime.subscribeChanges.call, {
 })
 ```
 
-`useApiClient()` also returns the utils as `orpc`, for calls outside a composable such as `queryClient.fetchQuery(orpc.unit.list.queryOptions({ input }))`. `useOrpcSubscription` (also `useApiClient().useSubscription`) reconnects with jittered backoff and closes while the page is hidden (`respectVisibility: false` keeps it). `useLiveQuery` writes each stream event under the key it was opened for, so an event in flight from a previous input is dropped. A stream whose events are not the cached type (an `fnLive` patch route, or a `select`ed cache) does not compile without `applyEvent`, and the stream's input must match the query's unless you pass `subscriptionInput`. Use `mergeSeed` when the seed can resolve after stream events. For large live payloads such as chat timelines, pass vue-query's `shallow: true` in the query options so the data is not made deeply reactive; mutate it only through `setQueryData`. Live queries carry `meta.live`, so invalidation streams skip them. Leave `refetchType` at TanStack's `'active'`: `'all'` refetches every cached query of a domain on each event, including screens nobody has open, which refetch on their next visit anyway. `useSubscriptionInvalidates` treats a stream as a "something changed" ping, and `useQueryErrorMessage` is `userFacingErrorMessage` as a computed. A surface that talks to another API passes `orpc` to each composable instead of using `provideOrpc`.
+`useApiClient()` also returns the utils as `orpc`, for calls outside a composable such as `queryClient.fetchQuery(orpc.unit.list.queryOptions({ input }))`. `useOrpcSubscription` (also `useApiClient().useSubscription`) reconnects with jittered backoff and closes while the page is hidden (`respectVisibility: false` keeps it). `useLiveQuery` writes each stream event under the key it was opened for, so an event in flight from a previous input is dropped. A stream whose events are not the cached type (an `fnLive` patch route, or a `select`ed cache) does not compile without `applyEvent`, and the stream's input must match the query's unless you pass `subscriptionInput`. Use `mergeSeed` when the seed can resolve after stream events. For large live payloads such as chat timelines, pass vue-query's `shallow: true` in the query options so the data is not made deeply reactive; mutate it only through `setQueryData`. Live queries carry `meta.live`, so invalidation streams skip them. Leave `refetchType` at TanStack's `'active'`: `'all'` refetches every cached query of a domain on each event, including screens nobody has open, which refetch on their next visit anyway. `useSubscriptionInvalidates` treats a stream as a "something changed" ping, and `useQueryErrorMessage` is `userFacingErrorMessage` as a computed. A surface that talks to another API passes `orpc` to each composable instead of using `provideOrpc`; `useOrpc({ optional: true })` returns null instead of throwing when nothing was provided. `useDocumentVisible()` is the visibility ref the streams pause on.
 
 `orpc-fn/vue/testing` runs composables in a real app without a DOM: `withOrpcApp(setup, { utils })`, `createTestStream()` for a subscription the test drives (`await stream.push(event)` resolves once it was handled), and `createOrpcMock({ fn: mock })` for a deep stand-in of the utils.
 

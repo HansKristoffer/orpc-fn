@@ -6,8 +6,10 @@ import {
 	useApiClient,
 	useInvalidationStream,
 	useLiveQuery,
+	useOrpc,
 	useOrpcSubscription,
-	useQueryErrorMessage
+	useQueryErrorMessage,
+	useQueryState
 } from './vue.js'
 import { createOrpcMock, createTestStream, withOrpcApp } from './vue/testing.js'
 
@@ -258,4 +260,69 @@ describe('createOrpcMock', () => {
 		orpc.$reset()
 		expect(orpc.order.get.call).toHaveBeenCalledTimes(0)
 	})
+})
+
+describe('useMutation invalidates', () => {
+	test('invalidates the keys before the options run their own onSuccess', async () => {
+		const order: string[] = []
+		const utils = {
+			order: {
+				key: () => ['order'],
+				save: {
+					mutationOptions: () => ({
+						mutationFn: async (title: string) => title,
+						onSuccess: () => {
+							order.push(
+								`onSuccess:${String(app.queryClient.getQueryState(['order', 'list'])?.isInvalidated)}`
+							)
+						}
+					})
+				}
+			}
+		}
+		const app = withOrpcApp(
+			() =>
+				useApiClient<typeof utils>().useMutation(
+					(o) => o.order.save.mutationOptions(),
+					{ invalidates: (o) => [o.order.key()] }
+				),
+			{ utils }
+		)
+		app.queryClient
+			.getQueryCache()
+			.build(app.queryClient, { queryKey: ['order', 'list'] })
+		await app.result.mutateAsync('x')
+		expect(order).toEqual(['onSuccess:true'])
+		app.stop()
+	})
+})
+
+describe('useQueryState', () => {
+	test('turns a query into status, message and retry props', async () => {
+		const query = {
+			status: ref<'pending' | 'error' | 'success'>('error'),
+			error: ref<unknown>(new Error('boom')),
+			isFetching: ref(true),
+			failureCount: ref(1),
+			refetch: mock(async () => {})
+		}
+		const { result } = withOrpcApp(() =>
+			useQueryState(query, { fallback: 'Could not load deals' })
+		)
+		expect(result.status).toBe('error')
+		expect(result.errorMessage).toBe('Could not load deals')
+		expect(result.isRetrying).toBe(true)
+		result.retry()
+		expect(query.refetch).toHaveBeenCalledTimes(1)
+		query.status.value = 'success'
+		query.error.value = null
+		query.isFetching.value = false
+		expect(result.errorMessage).toBeNull()
+		expect(result.isRetrying).toBe(false)
+	})
+})
+
+test('useOrpc({ optional: true }) returns null without a provider', () => {
+	expect(useOrpc({ optional: true })).toBeNull()
+	expect(() => useOrpc()).toThrow('no oRPC client provided')
 })

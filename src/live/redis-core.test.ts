@@ -190,3 +190,25 @@ test('successful Redis restoration reports a possible event gap', async () => {
 	await stop()
 	transport.close()
 })
+
+test('bunRedisTransport takes a send-only command client with a given subscriber', async () => {
+	const { bunRedisTransport } = await import('./redis-bun.js')
+	expect(() => bunRedisTransport({ send: async () => null })).toThrow(
+		'needs a client with duplicate() or a subscriber'
+	)
+	const subscriber = {
+		send: async () => null,
+		subscribe: async () => 1,
+		unsubscribe: async () => 0,
+		duplicate: async () => subscriber,
+		close: () => {},
+		onconnect: null,
+		onclose: null
+	}
+	const transport = bunRedisTransport(
+		{ send: async () => null },
+		{ subscriber }
+	)
+	const unsubscribe = await transport.subscribe('c', () => {})
+	await unsubscribe()
+})

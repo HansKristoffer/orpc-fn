@@ -83,7 +83,15 @@ export type Tracing = {
 	end(span: SpanLike | undefined, error?: unknown): void
 }
 
-export function createTracing(otel: OtelApiLike | undefined): Tracing {
+export function createTracing(
+	otel: OtelApiLike | undefined,
+	/**
+	 * Errors the caller drives (4xx, aborts). Their span keeps an unset status
+	 * and no exception event, as OpenTelemetry asks of server spans, so the
+	 * caller's text stays out of the trace; `fn.error_code` still names them.
+	 */
+	isExpectedError: (error: unknown) => boolean = () => false
+): Tracing {
 	let tracer: TracerLike<SpanLike> | undefined
 	try {
 		tracer = otel?.trace.getTracer('orpc-fn')
@@ -96,11 +104,21 @@ export function createTracing(otel: OtelApiLike | undefined): Tracing {
 		if (error.length === 0) {
 			span.setStatus({ code: otel.SpanStatusCode.OK })
 		} else {
-			span.setStatus({
-				code: otel.SpanStatusCode.ERROR,
-				message: errorMessageOf(error[0])
-			})
-			if (error[0] instanceof Error) span.recordException(error[0])
+			const code = errorCodeOf(error[0])
+			if (code !== undefined) span.setAttribute('fn.error_code', code)
+			let expected = false
+			try {
+				expected = isExpectedError(error[0])
+			} catch {
+				/* A failing classifier treats the error as unexpected. */
+			}
+			if (!expected) {
+				span.setStatus({
+					code: otel.SpanStatusCode.ERROR,
+					message: errorMessageOf(error[0])
+				})
+				if (error[0] instanceof Error) span.recordException(error[0])
+			}
 		}
 		span.end()
 	}
@@ -195,11 +213,25 @@ export function errorMessageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error)
 }
 
-/** Error fields for a log line, named like the `fn.completed` ones. */
-export function errorAttributes(error: unknown) {
+/** An error's string `code` (`ORPCError`'s `NOT_FOUND`, Node's `ECONNRESET`). */
+export function errorCodeOf(error: unknown): string | undefined {
+	const code =
+		typeof error === 'object' && error !== null
+			? (error as { code?: unknown }).code
+			: undefined
+	return typeof code === 'string' ? code : undefined
+}
+
+/**
+ * Error fields for a log line, named like the `fn.completed` ones. Without
+ * `message`, the error's text (written for the caller) is left out.
+ */
+export function errorAttributes(error: unknown, message = true) {
+	const code = errorCodeOf(error)
 	return {
 		error_type: error instanceof Error ? error.name : typeof error,
-		error_message: errorMessageOf(error)
+		...(code === undefined ? {} : { error_code: code }),
+		...(message ? { error_message: errorMessageOf(error) } : {})
 	}
 }
 

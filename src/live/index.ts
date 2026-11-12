@@ -5,8 +5,7 @@ export {
 	type FnLivePatch,
 	type FnLiveReturn,
 	fnLivePatch,
-	streamLiveSnapshots,
-	throwInitialSnapshotError
+	streamLiveSnapshots
 } from './fn-live.js'
 export {
 	type InvalidationEvent,
@@ -21,6 +20,7 @@ export {
 	type CreatePubSub,
 	createBoundedEventQueue,
 	type FilterFn,
+	type ListenOptions,
 	type ObjectSchema,
 	type Publisher,
 	type PublisherConfig,

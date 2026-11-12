@@ -290,17 +290,14 @@ test('misdeclared streams fail and resume cursors reach native handlers', async 
 		default: 'public',
 		logger: () => quiet
 	})
-	await expect(
-		call(
-			fn({
-				name: 'missingStreamDeclaration',
-				handler: async function* () {
-					yield 1
-				}
-			}),
-			undefined
-		)
-	).rejects.toThrow('inconsistent with stream')
+	expect(() =>
+		fn({
+			name: 'missingStreamDeclaration',
+			handler: async function* () {
+				yield 1
+			}
+		})
+	).toThrow('declare stream: true')
 	await expect(
 		call(
 			fn({ name: 'wrongStreamDeclaration', stream: true, handler: () => 42 }),

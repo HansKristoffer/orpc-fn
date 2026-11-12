@@ -74,6 +74,7 @@ test('events present in both replay and live buffers are delivered once', async 
 		pubsub: { transport }
 	})
 	const feed = factory.createPubSub({
+		authFn: true,
 		name: 'replay',
 		channel: 'replay',
 		useBacklog: true,
@@ -176,6 +177,7 @@ test('pubsub guards, extras and completion run through the common policy', async
 		pubsub: { transport: memoryTransport() }
 	})
 	const feed = factory.createPubSub({
+		authFn: true,
 		name: 'guarded',
 		channel: 'guarded',
 		...schemas,
@@ -199,6 +201,7 @@ test('namespace and separate resolvers support different tenant input/event shap
 		pubsub: { transport, namespace: 'app:dev' }
 	})
 	const feed = factory.createPubSub({
+		authFn: true,
 		name: 'tenant',
 		inputSchema: z.object({ room: z.string() }),
 		eventSchema: z.object({
@@ -253,6 +256,7 @@ test('terminal shutdown is awaitable, idempotent and respects transport ownershi
 		pubsub: { transport, ownsTransport: true }
 	})
 	const feed = factory.createPubSub({
+		authFn: true,
 		name: 'shutdown',
 		channel: 'shutdown',
 		...schemas
@@ -297,6 +301,7 @@ test('lazy transports start on first use, once, and close only if started', asyn
 		pubsub: { transport: lazy, ownsTransport: true }
 	})
 	const late = unused.createPubSub({
+		authFn: true,
 		name: 'lazy',
 		channel: 'lazy',
 		...schemas
@@ -312,6 +317,7 @@ test('lazy transports start on first use, once, and close only if started', asyn
 		pubsub: { transport: lazy, ownsTransport: true }
 	})
 	const feed = factory.createPubSub({
+		authFn: true,
 		name: 'lazy',
 		channel: 'lazy',
 		...schemas
@@ -465,6 +471,7 @@ test('per-definition queue limits and throwing metrics preserve recovery', async
 		}
 	})
 	const feed = factory.createPubSub({
+		authFn: true,
 		name: 'boundedDefinition',
 		channel: 'boundedDefinition',
 		...schemas,
@@ -504,6 +511,7 @@ test('per-definition queue limits and throwing metrics preserve recovery', async
 	}
 	expect(() =>
 		factory.createPubSub({
+			authFn: true,
 			name: 'invalidBounds',
 			channel: 'invalidBounds',
 			...schemas,

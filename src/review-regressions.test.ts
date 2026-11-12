@@ -167,6 +167,7 @@ describe('#5 call() checks the callee context', () => {
 
 describe('#7 pub/sub publishes schema input and keeps non-JSON values', () => {
 	const events = createPubSub({
+		authFn: true,
 		name: 'review.events',
 		procedure: 'public',
 		channel: 'review:events',
@@ -240,6 +241,7 @@ describe('#11 extras: unions narrow, index signatures are rejected', () => {
 describe('#12 pub/sub keeps the whole input schema', () => {
 	test('catchall keys stay in the subscribe input', () => {
 		const events = createPubSub({
+			authFn: true,
 			name: 'review.catchall',
 			procedure: 'public',
 			channel: 'x',
@@ -266,6 +268,7 @@ describe('#16 a throwing filter does not starve other subscribers', () => {
 			pubsub: { transport }
 		})
 		const feed = createPubSub({
+			authFn: true,
 			name: 'review.filter',
 			channel: 'review:filter',
 			inputSchema: z.object({ bad: z.boolean() }),

@@ -8,11 +8,10 @@ import { ioredisTransport } from 'orpc-fn/live/ioredis'
 import { z } from 'zod'
 
 // Root and live entries work with only the required peers installed.
-for (const name of ['createFn', 'readFnMeta', 'isExpectedClientError', 'createBoundedEventQueue', 'createRouter']) {
+for (const name of ['createFn', 'readFnMeta', 'isExpectedClientError', 'createRouter']) {
 	assert.equal(typeof root[name], 'function', name)
 }
-assert.equal(root.createBoundedEventQueue, live.createBoundedEventQueue)
-for (const name of ['streamLiveSnapshots', 'fnLivePatch', 'throwInitialSnapshotError', 'backlogKey']) {
+for (const name of ['streamLiveSnapshots', 'fnLivePatch', 'createBoundedEventQueue', 'backlogKey']) {
 	assert.equal(typeof live[name], 'function', name)
 }
 assert.equal(typeof bunRedisTransport, 'function')
@@ -78,7 +77,7 @@ if (process.env.WITH_OPTIONAL_PEERS) {
 	assert.equal(typeof hasTag('x'), 'function')
 	assert.equal(createMastraTool(inner).id, 'inner')
 	const app = new Hono()
-	mountOrpc(app, { router: { inner }, rpcPrefix: '/rpc', openapi: { prefix: '/api' } })
+	mountOrpc(app, { router: { inner }, rpcPrefix: '/rpc', openapi: { prefix: '/api', filter: () => true } })
 	const response = await app.request('/api/inner', {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },

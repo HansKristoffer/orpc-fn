@@ -8,7 +8,11 @@ import {
 import { os, ORPCError } from '@orpc/server'
 import { z } from 'zod'
 import { createFn } from '../index.js'
-import { registerMcpTools } from './server.js'
+import {
+	prepareMcpTools,
+	registerMcpTools,
+	registerPreparedMcpTools
+} from './server.js'
 import { quiet } from '../../tests/fixture.js'
 
 async function connect(server: Pick<Server, 'connect' | 'close'>) {
@@ -128,5 +132,63 @@ test('MCP SDK v2 registration works through McpServer.server', async () => {
 	} finally {
 		await client.close()
 		await mcp.close()
+	}
+})
+
+test('MCP tools answer expected errors with code and fields, and hide the rest', async () => {
+	const { fn } = createFn({
+		procedures: { public: os },
+		default: 'public',
+		logger: () => quiet
+	})
+	const routes = {
+		create: fn({
+			name: 'item.create',
+			input: z.object({ item: z.object({ title: z.string() }) }),
+			handler: () => 'ok'
+		}),
+		refuse: fn({
+			name: 'item.refuse',
+			handler: () => {
+				throw new ORPCError('FORBIDDEN', { message: 'Not your vault' })
+			}
+		}),
+		crash: fn({
+			name: 'item.crash',
+			handler: () => {
+				throw new Error('connection to db-7 refused')
+			}
+		})
+	}
+	const reported: Array<[unknown, string]> = []
+	const prepared = prepareMcpTools(routes, { filter: () => true })
+	expect(prepared.names).toEqual(['item-create', 'item-refuse', 'item-crash'])
+	const server = new Server(
+		{ name: 'test', version: '1' },
+		{ capabilities: { tools: {} } }
+	)
+	registerPreparedMcpTools(server, prepared, {
+		context: () => ({}),
+		onError: (error, { tool }) => reported.push([error, tool])
+	})
+	const client = await connect(server)
+	const text = async (name: string, args?: Record<string, unknown>) =>
+		(
+			(await client.callTool({ name, arguments: args ?? {} })).content as {
+				text: string
+			}[]
+		)[0]?.text
+	try {
+		expect(await text('item-create', { item: {} })).toBe(
+			'BAD_REQUEST: Invalid tool input\nitem.title: Invalid input: expected string, received undefined'
+		)
+		expect(await text('item-refuse')).toBe('FORBIDDEN: Not your vault')
+		expect(await text('item-crash')).toBe(
+			'item-crash failed unexpectedly. The error was reported.'
+		)
+		expect(reported.map(([, tool]) => tool)).toEqual(['item-crash'])
+	} finally {
+		await client.close()
+		await server.close()
 	}
 })

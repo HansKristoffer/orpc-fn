@@ -7,8 +7,8 @@ import { normalizeRoute } from './route-options.js'
 import { type AnyProcedure, ORPCError, os } from '@orpc/server'
 import { procedureDefinition } from './compatibility.js'
 import { type BoundCall, createBoundCall } from './bound-call.js'
-import { isExpectedClientError } from './expected-client-error.js'
-import { createFnLive, type FnLive } from './live/fn-live.js'
+import { isExpectedClientError, markExpected } from './expected-client-error.js'
+import { createFnLive, type FnLive, fnLivePatch } from './live/fn-live.js'
 import {
 	type CreatePublisher,
 	type CreatePubSub,
@@ -21,7 +21,7 @@ import {
 	type FnLogger,
 	type LogAttributes
 } from './logger.js'
-import { readFnMeta } from './meta.js'
+import { type FnMeta, readFnMeta } from './meta.js'
 import {
 	type AttributeValue,
 	createTracing,
@@ -31,7 +31,12 @@ import {
 	type SpanLike,
 	type SpanOf
 } from './otel.js'
-import { RAW_INPUT, REQUEST_TIMING, type InvocationTiming } from './timing.js'
+import {
+	EXTRAS_OVERRIDE,
+	RAW_INPUT,
+	REQUEST_TIMING,
+	type InvocationTiming
+} from './timing.js'
 import { createRouter } from './router.js'
 import {
 	type ProcedureHookParams,
@@ -44,6 +49,7 @@ import {
 	type FnCompletedEvent,
 	type FnDefinition,
 	type Guard,
+	type GuardOptions,
 	type GuardParams,
 	type MaybePromise,
 	type RejectKeys,
@@ -74,7 +80,27 @@ type RuntimeOptions = {
 	}) => Record<string, AttributeValue | undefined>
 	onCompleted?: (event: FnCompletedEvent) => LogAttributes | undefined
 	isExpectedError?: (error: unknown) => boolean
+	errorMessages?: 'all' | 'unexpected'
+	routePolicy?: (route: Record<string, unknown>) => void
 	pubsub?: PubSubRuntimeOptions
+}
+
+/** What `routePolicy` sees of each route when it is defined. */
+export type RoutePolicyParams<
+	TKey extends string = string,
+	TGuards = Record<string, unknown>,
+	TMeta extends object = Record<string, unknown>,
+	TTag extends string = string
+> = {
+	name: string
+	procedure: TKey
+	/** Guard values set on the route itself. */
+	guards: GuardOptions<TGuards>
+	/** Guards the route decides per call through `guardResolvers`. */
+	dynamicGuards: readonly (keyof TGuards & string)[]
+	meta: Partial<TMeta>
+	stream: boolean
+	tags: readonly TTag[]
 }
 
 export type CreateFnOptions<
@@ -160,8 +186,31 @@ export type CreateFnOptions<
 		event: CompletedHookEvent<TProcedures, SpanOf<TOtel>>
 		// biome-ignore lint/suspicious/noConfusingVoidType: lets hooks that return nothing type-check
 	) => LogAttributes | undefined | void
-	/** Errors that are the caller's fault, logged at `warn`. Default: 4xx `ORPCError` or `AbortError`. */
+	/**
+	 * Errors that are the caller's fault: logged at `warn`, and their span keeps
+	 * an unset status. `mountOrpc` and the tool adapters follow it for errors
+	 * a route threw. Default: 4xx `ORPCError` or `AbortError`.
+	 */
 	isExpectedError?: (error: unknown) => boolean
+	/**
+	 * `'unexpected'` leaves the message of expected errors out of `fn.completed`
+	 * (it was written for the caller and may name what they asked for);
+	 * `error_code` and `error_type` stay. Default: `'all'`.
+	 */
+	errorMessages?: 'all' | 'unexpected'
+	/**
+	 * Sees every route (`fn`, `fnLive`, pub/sub subscriptions) when it is
+	 * defined; throw to reject it, e.g. a protected route with no permission:
+	 * `if (procedure === 'protected' && !('permission' in guards)) throw ...`.
+	 */
+	routePolicy?: (
+		route: RoutePolicyParams<
+			keyof TProcedures & string,
+			NoInfer<TGuards>,
+			NoInfer<TMeta>,
+			NoInfer<TTag>
+		>
+	) => void
 	/** Needed for `fnLive` and `createPubSub`. */
 	pubsub?: PubSubRuntimeOptions
 }
@@ -191,13 +240,31 @@ type Definition<
 	logger: TLogger
 }
 
+/** Extras a test call may replace: any shared or scoped extra. */
+export type TestCallExtras<TDef extends FnDefinition> = Partial<
+	TDef['extras']
+> &
+	(TDef extends { extrasByProcedure: infer E }
+		? [keyof E] extends [never]
+			? object
+			: Partial<NonNullable<E[keyof E]>>
+		: object)
+
 export type FnFactory<TDef extends FnDefinition> = {
 	fn: Fn<TDef>
 	fnLive: FnLive<TDef>
+	/** Same as `fnLivePatch` from `orpc-fn/live`. */
+	fnLivePatch: typeof fnLivePatch
 	createPubSub: CreatePubSub<TDef>
 	createPublisher: CreatePublisher
 	createRouter: typeof createRouter
-	readMeta: typeof readFnMeta
+	/** `readFnMeta`, with guard values typed by this factory's guards. */
+	readMeta: <T extends AnyProcedure>(
+		procedure: T
+	) => Omit<ReturnType<typeof readFnMeta<T>>, 'guards' | 'dynamicGuards'> & {
+		guards: GuardOptions<TDef['guards']>
+		dynamicGuards: readonly (keyof TDef['guards'] & string)[]
+	}
 	/**
 	 * A `call` outside any handler (seeders, scripts, tests), traced with this
 	 * instance's OpenTelemetry.
@@ -206,9 +273,26 @@ export type FnFactory<TDef extends FnDefinition> = {
 		context: TContext,
 		signal?: AbortSignal
 	) => BoundCall<TContext>
+	/**
+	 * `createCall` for tests: middleware, guards and schemas run as in
+	 * production, and `extras` replace the configured ones (`{ db: fakeDb }`)
+	 * for this call and the calls it makes.
+	 */
+	createTestCall: <TContext>(
+		context: TContext,
+		options?: { extras?: TestCallExtras<TDef>; signal?: AbortSignal }
+	) => BoundCall<TContext>
 	/** Terminal, idempotent shutdown: close streams and await owned resources. */
 	shutdown: () => Promise<void>
-	drainPubSubSubscribers: () => number
+	/**
+	 * End every open subscription and return how many were closed. With
+	 * `overMs`, spread the closes evenly over that window so clients do not
+	 * reconnect in one burst; the promise resolves after the last one.
+	 */
+	drainPubSubSubscribers: {
+		(): number
+		(options: { overMs: number }): Promise<number>
+	}
 	activePubSubSubscriberCount: () => number
 }
 
@@ -256,7 +340,18 @@ export function createFn<
 	>
 > {
 	const runtime = options as unknown as RuntimeOptions
-	const tracing = createTracing(runtime.otel)
+	const configuredExpected = runtime.isExpectedError ?? isExpectedClientError
+	const isExpectedError = (error: unknown) => {
+		let expected: boolean
+		try {
+			expected = configuredExpected(error)
+		} catch {
+			expected = isExpectedClientError(error)
+		}
+		if (expected) markExpected(error)
+		return expected
+	}
+	const tracing = createTracing(runtime.otel, isExpectedError)
 	const defaultLogger = protectLogger(createDefaultLogger('fn'))
 	const createLogger = (
 		scope: string,
@@ -271,7 +366,12 @@ export function createFn<
 			return defaultLogger
 		}
 	}
-	const isExpectedError = runtime.isExpectedError ?? isExpectedClientError
+	if (
+		runtime.errorMessages !== undefined &&
+		runtime.errorMessages !== 'all' &&
+		runtime.errorMessages !== 'unexpected'
+	)
+		throw new TypeError("orpc-fn: errorMessages must be 'all' or 'unexpected'")
 	const guards = runtime.guards ?? {}
 	const isGuard = (option: string) => Object.hasOwn(guards, option)
 	for (const guard of Object.keys(guards)) {
@@ -334,11 +434,24 @@ export function createFn<
 			guardChecks
 		} = normalizeRoute(routeOptions, isGuard)
 		const key = resolveKey(procedure, name)
+		const staticGuards = Object.fromEntries(guardChecks)
+		const dynamicGuards = Object.keys(guardResolvers)
+		runtime.routePolicy?.({
+			name,
+			procedure: key,
+			guards: staticGuards,
+			dynamicGuards,
+			meta,
+			stream,
+			tags: (route.tags as string[] | undefined) ?? []
+		})
 		const built = buildProcedure({
 			name,
 			procedure: key,
 			route,
 			meta,
+			guards: staticGuards,
+			dynamicGuards,
 			input,
 			output,
 			stream,
@@ -346,7 +459,11 @@ export function createFn<
 			handler: async (params) => {
 				const { context, signal } = params
 				const state = context[invocation] as Invocation
-				const { [invocation]: _invocation, ...observedContext } = context
+				const {
+					[invocation]: _invocation,
+					[EXTRAS_OVERRIDE]: overrides,
+					...observedContext
+				} = context
 				state.context = observedContext
 				state.input = params.input
 				state.handlerStarted = true
@@ -398,7 +515,8 @@ export function createFn<
 				const scoped = await runtime.extrasByProcedure?.[key]?.(extraParams)
 				const extras = {
 					...(shared as object | undefined),
-					...(scoped as object | undefined)
+					...(scoped as object | undefined),
+					...(overrides as object | undefined)
 				}
 				if (extras && typeof extras === 'object') {
 					for (const reserved of [
@@ -510,12 +628,7 @@ export function createFn<
 				error: errorMessageOf(hookError)
 			})
 		}
-		let expected = false
-		try {
-			expected = isExpectedError(error)
-		} catch {
-			expected = isExpectedClientError(error)
-		}
+		const expected = !success && isExpectedError(error)
 		const level = success ? 'info' : expected ? 'warn' : 'error'
 		logger[level]('fn.completed', {
 			...extra,
@@ -524,7 +637,12 @@ export function createFn<
 			procedure: event.procedure,
 			duration_ms: event.durationMs,
 			status: success ? 'success' : 'failed',
-			...(error === undefined ? {} : errorAttributes(error))
+			...(success
+				? {}
+				: errorAttributes(
+						error,
+						!(expected && runtime.errorMessages === 'unexpected')
+					))
 		})
 	}
 
@@ -535,6 +653,8 @@ export function createFn<
 		pubsub: runtime.pubsub
 	})
 
+	const readMeta = (procedure: AnyProcedure): FnMeta => readFnMeta(procedure)
+
 	// The runtimes are untyped; `Fn`, `FnLive`, `CreatePubSub` and
 	// `CreatePublisher` are their typed surface.
 	return {
@@ -544,12 +664,22 @@ export function createFn<
 			createChannel: live.createChannel,
 			isGuard
 		}),
+		fnLivePatch,
 		createPubSub: live.createPubSub,
 		createPublisher: live.createPublisher,
 		createRouter,
-		readMeta: readFnMeta,
+		readMeta,
 		createCall: <TContext>(context: TContext, signal?: AbortSignal) =>
 			createBoundCall(context, signal, tracing),
+		createTestCall: <TContext>(
+			context: TContext,
+			{ extras, signal }: { extras?: object; signal?: AbortSignal } = {}
+		) =>
+			createBoundCall(
+				extras ? { ...context, [EXTRAS_OVERRIDE]: extras } : context,
+				signal,
+				tracing
+			),
 		shutdown: live.shutdown,
 		drainPubSubSubscribers: live.drainPubSubSubscribers,
 		activePubSubSubscriberCount: live.activePubSubSubscriberCount

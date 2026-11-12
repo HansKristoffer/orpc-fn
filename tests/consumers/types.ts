@@ -210,6 +210,9 @@ fn({
 
 // ── Meta ────────────────────────────────────────────────────────────────────
 const readOnly: boolean | undefined = readMeta(inOut).meta.readOnly
+// Guard values set on a route read back typed by the factory's guards.
+const flagsOf: string[] | undefined = readMeta(inOut).guards.neededFeatureFlags
+void flagsOf
 const name: string | undefined = readFnMeta(inOut).name
 void [readOnly, name]
 
@@ -220,12 +223,26 @@ const events = createPubSub({
 	channel: ({ room }) => `room:${room}`,
 	inputSchema: z.object({ room: z.string() }),
 	eventSchema: z.object({ room: z.string(), text: z.string() }),
-	authFn: ({ ctx }) => {
+	authFn: ({ context }) => {
 		// @ts-expect-error public context: user may be missing
-		const id: string = ctx.user.id
+		const id: string = context.user.id
 		return id.length > 0
 	}
 })
+// @ts-expect-error who may subscribe is an explicit choice (authFn: true for anyone)
+createPubSub({
+	name: 'unguarded',
+	procedure: 'public',
+	channel: 'x',
+	inputSchema: z.object({}),
+	eventSchema: z.object({})
+})
+// A bus reads on the server without its route, and replays its backlog typed.
+export const roomEvents: Promise<
+	AsyncGenerator<{ room: string; text: string }>
+> = events.listen({ room: 'a' })
+export const roomBacklog: Promise<{ room: string; text: string }[]> =
+	events.readBacklog({ room: 'a' })
 events.publish({ room: 'a', text: 'hi' })
 events.publishMany([{ room: 'a', text: 'hi' }])
 // @ts-expect-error text is required
@@ -235,7 +252,7 @@ createPubSub({
 	channel: 'x',
 	inputSchema: z.object({}),
 	eventSchema: z.object({}),
-	authFn: ({ ctx }) => ctx.user.id.length > 0
+	authFn: ({ context }) => context.user.id.length > 0
 })
 
 // Change buses partition one scope rule across many buses.
@@ -362,6 +379,8 @@ const transports: PubSubTransport[] = [
 void transports
 const stats: PubSubTransportStats = memoryTransport().stats()
 const redisStats: PubSubTransportStats = bunRedisTransport(bunClient).stats()
+// A command client with only `send` works when the subscriber is given.
+bunRedisTransport({ send: async () => null }, { subscriber: bunClient })
 void [stats, redisStats]
 
 // ── Adapters ────────────────────────────────────────────────────────────────
@@ -399,6 +418,15 @@ const strict = os
 	.handler(({ context }) => context.tenant)
 // @ts-expect-error `context` is required when the base context is not enough
 mountOrpc(new Hono(), { router: { strict }, rpcPrefix: '/rpc' })
+mountOrpc(new Hono(), {
+	router,
+	// @ts-expect-error which routes the REST API publishes is an explicit choice
+	openapi: { prefix: '/api' }
+})
+mountOrpc(new Hono(), {
+	router,
+	openapi: { prefix: '/api', filter: () => true, docs: false }
+})
 
 // ── Client ──────────────────────────────────────────────────────────────────
 const client: RouterClient<typeof router> = createORPCClient(
@@ -453,6 +481,7 @@ export type Transformed = [
 // @ts-expect-error the handler returns the output schema's input (string)
 fn({ name: 'badMeasured', output: lengthOut, handler: () => 3 })
 const transformedEvents = createPubSub({
+	authFn: true,
 	name: 'transformedEvents',
 	channel: 'x',
 	inputSchema: z.object({}),
@@ -817,10 +846,11 @@ export function useConsumerHooks() {
 	form.inputData.value.note = 'rush'
 	form.inputData.value.status = 'held'
 	form.mutate({ id: '1', status: 'held', note: 'rush' })
-	api.useMutation((o) => o.order.update.mutationOptions(), {
-		// @ts-expect-error `initialInput` is checked against the route input
-		initialInput: { id: '1', status: 'closed' }
-	})
+	// `initialInput` is checked against the route input. TypeScript 5.7 reports
+	// it at the call and later versions at the property, so it stays on one line.
+	// biome-ignore format: the expected error must stay on one line
+	// @ts-expect-error status 'closed' is not a route input
+	api.useMutation((o) => o.order.update.mutationOptions(), { initialInput: { id: '1', status: 'closed' } })
 	// Callback options see the route output.
 	const stats = api.useQuery((o) =>
 		o.order.stats.queryOptions({

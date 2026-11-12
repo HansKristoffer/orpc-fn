@@ -135,6 +135,7 @@ describe.skipIf(!url).each(adapters)('$name transport', (adapter) => {
 			pubsub: { transport }
 		})
 		const feed = createPubSub({
+			authFn: true,
 			name: 'test.redis.feed',
 			channel: ({ room }) => `${prefix}:room:${room}`,
 			inputSchema: z.object({ room: z.string() }),

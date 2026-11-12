@@ -6,10 +6,12 @@ import {
 	completed,
 	fn,
 	type PublicContext,
+	quiet,
 	readMeta,
 	user
 } from '../tests/fixture.js'
-import { createFn, readFnMeta } from './index.js'
+import { createFn, isExpectedClientError, readFnMeta } from './index.js'
+import { memoryTransport } from './live/memory.js'
 
 beforeEach(() => {
 	completed.length = 0
@@ -388,6 +390,7 @@ describe('createFn without a default procedure', () => {
 		expect(() =>
 			// @ts-expect-error also for pub/sub
 			createPubSub({
+				authFn: true,
 				name: 'test.noProcedurePubSub',
 				channel: 'x',
 				inputSchema: z.object({}),
@@ -556,5 +559,250 @@ describe('stream steps run inside their span', async () => {
 		expect(
 			spans.map(({ name, parent }) => `${parent ?? '-'} > ${name}`)
 		).toEqual(['- > outer', 'outer > call: inner', 'call: inner > inner'])
+	})
+})
+
+describe('expected errors in logs and spans', () => {
+	const capture = () => {
+		const lines: Array<[string, Record<string, unknown> | undefined]> = []
+		const log =
+			(level: string) =>
+			(_message: string, attributes?: Record<string, unknown>) =>
+				lines.push([level, attributes])
+		const logger = () => ({
+			debug: log('debug'),
+			info: log('info'),
+			warn: log('warn'),
+			error: log('error')
+		})
+		const spans: Array<{
+			name: string
+			status: { code: number; message?: string } | undefined
+			exceptions: number
+			attributes: Record<string, unknown>
+		}> = []
+		const makeSpan = (name: string) => {
+			const span = {
+				name,
+				status: undefined as { code: number; message?: string } | undefined,
+				exceptions: 0,
+				attributes: {} as Record<string, unknown>
+			}
+			spans.push(span)
+			return {
+				setAttribute: (key: string, value: unknown) => {
+					span.attributes[key] = value
+				},
+				setStatus: (status: { code: number; message?: string }) => {
+					span.status = status
+				},
+				recordException: () => {
+					span.exceptions++
+				},
+				end: () => {}
+			}
+		}
+		const fakeOtel = {
+			...otel,
+			trace: {
+				getTracer: () => ({
+					startActiveSpan: (
+						name: string,
+						_options: unknown,
+						run: (span: ReturnType<typeof makeSpan>) => unknown
+					) => run(makeSpan(name)),
+					startSpan: (name: string) => makeSpan(name)
+				})
+			}
+		} as unknown as typeof otel
+		return { lines, logger, spans, fakeOtel }
+	}
+
+	test('an expected error logs its code, keeps its text out of the span, and errorMessages hides it from the log', async () => {
+		const { lines, logger, spans, fakeOtel } = capture()
+		const { fn } = createFn({
+			procedures: { public: os },
+			default: 'public',
+			logger,
+			otel: fakeOtel,
+			errorMessages: 'unexpected'
+		})
+		const notFound = fn({
+			name: 'doc.get',
+			handler: () => {
+				throw new ORPCError('NOT_FOUND', { message: 'No document /secret.md' })
+			}
+		})
+		const crash = fn({
+			name: 'doc.crash',
+			handler: () => {
+				throw new Error('db down')
+			}
+		})
+		await call(notFound, undefined).catch(() => {})
+		await call(crash, undefined).catch(() => {})
+		expect(lines[0]).toEqual([
+			'warn',
+			expect.objectContaining({ error_code: 'NOT_FOUND' })
+		])
+		expect(JSON.stringify(lines[0])).not.toContain('secret')
+		expect(lines[1]?.[1]).toMatchObject({ error_message: 'db down' })
+		const [expected, unexpected] = spans
+		expect(expected?.attributes['fn.error_code']).toBe('NOT_FOUND')
+		expect(expected?.status).toBeUndefined()
+		expect(expected?.exceptions).toBe(0)
+		expect(unexpected?.status).toEqual({
+			code: otel.SpanStatusCode.ERROR,
+			message: 'db down'
+		})
+		expect(unexpected?.exceptions).toBe(1)
+	})
+
+	test('the default keeps the message of expected errors in the log', async () => {
+		const { lines, logger } = capture()
+		const { fn } = createFn({
+			procedures: { public: os },
+			default: 'public',
+			logger
+		})
+		const refused = fn({
+			name: 'doc.refused',
+			handler: () => {
+				throw new ORPCError('FORBIDDEN', { message: 'Not yours' })
+			}
+		})
+		await call(refused, undefined).catch(() => {})
+		expect(lines[0]?.[1]).toMatchObject({
+			error_code: 'FORBIDDEN',
+			error_message: 'Not yours'
+		})
+	})
+
+	test('an error the factory classifies as expected is expected everywhere', async () => {
+		class DomainError extends Error {}
+		const { fn } = createFn({
+			procedures: { public: os },
+			default: 'public',
+			logger: () => quiet,
+			isExpectedError: (error) => error instanceof DomainError
+		})
+		const error = new DomainError('archived')
+		const route = fn({
+			name: 'doc.archived',
+			handler: () => {
+				throw error
+			}
+		})
+		await call(route, undefined).catch(() => {})
+		expect(isExpectedClientError(error)).toBe(true)
+		expect(isExpectedClientError(new DomainError('other'))).toBe(false)
+	})
+})
+
+describe('route policy and guard metadata', () => {
+	test('readMeta returns the guard values and resolver-driven guards', () => {
+		const { fn, readMeta } = createFn({
+			procedures: { public: os, protected: os.$context<{ userId: string }>() },
+			guards: {
+				permission: (_value: 'read' | 'write' | 'authenticated') => {},
+				flags: (_value: string[]) => {}
+			}
+		})
+		const route = fn({
+			name: 'deal.get',
+			procedure: 'protected',
+			permission: 'read',
+			guardResolvers: { flags: () => ['deals'] },
+			handler: () => 1
+		})
+		const meta = readMeta(route)
+		expect(meta.guards).toEqual({ permission: 'read' })
+		expect(meta.dynamicGuards).toEqual(['flags'])
+		const permission: 'read' | 'write' | 'authenticated' | undefined =
+			meta.guards.permission
+		void permission
+	})
+
+	test('routePolicy sees every route kind at definition and may reject it', () => {
+		const seen: string[] = []
+		const { fn, fnLive, createPubSub } = createFn({
+			procedures: { public: os, protected: os.$context<{ userId: string }>() },
+			guards: { permission: (_value: string) => {} },
+			pubsub: { transport: memoryTransport() },
+			routePolicy: ({ name, procedure, guards, dynamicGuards }) => {
+				seen.push(name)
+				if (
+					procedure === 'protected' &&
+					!('permission' in guards) &&
+					!dynamicGuards.includes('permission')
+				)
+					throw new Error(`${name}: declare permission`)
+			}
+		})
+		expect(() =>
+			fn({ name: 'open.route', procedure: 'protected', handler: () => 1 })
+		).toThrow('open.route: declare permission')
+		fn({
+			name: 'ok.route',
+			procedure: 'protected',
+			permission: 'x',
+			handler: () => 1
+		})
+		fnLive({
+			name: 'live.route',
+			procedure: 'protected',
+			permission: 'x',
+			input: z.object({}),
+			handler: () => 1,
+			live: { eventSchema: z.object({}), channel: 'c' }
+		})
+		createPubSub({
+			name: 'bus.route',
+			procedure: 'public',
+			authFn: true,
+			channel: 'c',
+			inputSchema: z.object({}),
+			eventSchema: z.object({})
+		})
+		expect(seen).toEqual([
+			'open.route',
+			'ok.route',
+			'live.route',
+			'live.route.live',
+			'bus.route'
+		])
+	})
+})
+
+describe('createTestCall', () => {
+	test('runs guards and schemas, and replaces extras through nested calls', async () => {
+		const { fn, createTestCall } = createFn({
+			procedures: { public: os.$context<{ admin: boolean }>() },
+			default: 'public',
+			logger: () => quiet,
+			extras: () => ({ db: { name: 'real' } }),
+			guards: {
+				admin: (_value: true, { context }) =>
+					(context as { admin: boolean }).admin
+			}
+		})
+		const inner = fn({ name: 'inner', handler: ({ db }) => db.name })
+		const outer = fn({
+			name: 'outer',
+			admin: true,
+			input: z.object({ id: z.string() }),
+			handler: ({ call }) => call(inner)
+		})
+		const fake = { db: { name: 'fake' } }
+		await expect(
+			createTestCall({ admin: true }, { extras: fake })(outer, { id: '1' })
+		).resolves.toBe('fake')
+		await expect(
+			createTestCall({ admin: false }, { extras: fake })(outer, { id: '1' })
+		).rejects.toThrow('denied')
+		await expect(
+			// @ts-expect-error the input schema still applies
+			createTestCall({ admin: true }, { extras: fake })(outer, { id: 1 })
+		).rejects.toThrow('Input validation failed')
 	})
 })

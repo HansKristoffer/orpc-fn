@@ -16,6 +16,13 @@ export interface BunRedisClientLike {
 }
 
 /**
+ * What the command client must offer: `send`, and `duplicate` unless a
+ * `subscriber` is given. A wrapper with timeouts around Bun's client fits.
+ */
+export type BunRedisCommandClientLike = Pick<BunRedisClientLike, 'send'> &
+	Partial<Pick<BunRedisClientLike, 'duplicate'>>
+
+/**
  * `PubSubTransport` for Bun's built-in `RedisClient`. Subscriptions use a
  * dedicated connection (`client.duplicate()` unless `subscriber` is given)
  * that re-subscribes its channels after every reconnect; configure retries on
@@ -24,14 +31,15 @@ export interface BunRedisClientLike {
  * Call `close()` on shutdown to close the subscriber connection it created.
  */
 export function bunRedisTransport(
-	client: BunRedisClientLike,
+	client: BunRedisCommandClientLike,
 	options: { subscriber?: BunRedisClientLike } = {}
 ) {
+	const openSubscriber = subscriberSource(client, options.subscriber)
 	return createRedisTransport({
 		send: (command, args) => client.send(command, args),
 		async connectSubscriber(handlers) {
 			const owned = !options.subscriber
-			const subscriber = options.subscriber ?? (await client.duplicate())
+			const subscriber = await openSubscriber()
 			const dispatch: Listener = (message, channel) =>
 				handlers.onMessage(channel, message)
 			const ours = new Set<string>()
@@ -78,4 +86,17 @@ export function bunRedisTransport(
 			}
 		}
 	})
+}
+
+function subscriberSource(
+	client: BunRedisCommandClientLike,
+	given: BunRedisClientLike | undefined
+): () => Promise<BunRedisClientLike> {
+	if (given) return async () => given
+	const { duplicate } = client
+	if (typeof duplicate !== 'function')
+		throw new TypeError(
+			'orpc-fn: bunRedisTransport needs a client with duplicate() or a subscriber'
+		)
+	return () => duplicate.call(client)
 }
