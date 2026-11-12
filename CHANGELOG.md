@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.8.0...v0.9.0) (2026-11-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* createPubSub requires authFn (authFn: true keeps a bus open). mountOrpc's openapi requires filter (() => true publishes every route). Expected errors no longer set ERROR span status or record an exception. Tool adapters hide unexpected error text from the model (MCP result text, Mastra thrown message). An async generator handler without stream: true throws at definition. readFnMeta().description prefers description over summary (Mastra tool and CLI help text). Removed: getChannelName on PubSub and fnLive returns, throwInitialSnapshotError, createBoundedEventQueue from the root entry (still in orpc-fn/live). safePublish failures log at warn.
+
+### Features
+
+* explicit pub/sub access and REST exposure, safe tool errors, server-side bus reads ([#29](https://github.com/HansKristoffer/orpc-fn/issues/29)) ([9f8e0d7](https://github.com/HansKristoffer/orpc-fn/commit/9f8e0d7b2dd5d095d9a1ac8959001c047430d805))
+
 ## [0.8.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.7.0...v0.8.0) (2026-11-09)
 
 
