@@ -52,12 +52,16 @@ export type PreparedMcpTools<R extends AnyRouter> = {
 
 /**
  * List and convert a router's tools once, for an app that builds an MCP
- * server per request: `registerMcpTools(server, prepared, { context })`.
+ * server per request: `registerPreparedMcpTools(server, prepared, { context })`.
  */
 export function prepareMcpTools<R extends AnyRouter>(
 	router: R,
 	options: McpToolSelection
 ): PreparedMcpTools<R> {
+	if (typeof options.filter !== 'function')
+		throw new TypeError(
+			'orpc-fn: MCP tools need a filter; tool exposure is an explicit choice'
+		)
 	const tools = listTools(router, {
 		filter: options.filter,
 		...(options.readOnly ? { readOnly: options.readOnly } : {}),
@@ -102,25 +106,11 @@ const errorResult = (text: string): TextToolResult => ({
 	isError: true
 })
 
-const isPrepared = <R extends AnyRouter>(
-	source: R | PreparedMcpTools<R>
-): source is PreparedMcpTools<R> =>
-	'descriptions' in source && Array.isArray(source.descriptions)
-
 /** @internal SDK-independent `tools/list` and `tools/call` behind both adapters. */
 export function createToolHandlers<R extends AnyRouter, TResult>(
-	source: R | PreparedMcpTools<R>,
-	options: McpCallOptions<R, TResult> & Partial<McpToolSelection>
+	prepared: PreparedMcpTools<R>,
+	options: McpCallOptions<R, TResult>
 ) {
-	let prepared: PreparedMcpTools<R>
-	if (isPrepared(source)) prepared = source
-	else {
-		if (typeof options.filter !== 'function')
-			throw new TypeError(
-				'orpc-fn: registerMcpTools needs a filter; tool exposure is an explicit choice'
-			)
-		prepared = prepareMcpTools(source, options as McpToolSelection)
-	}
 	const tools = new Map(prepared.tools.map((tool) => [tool.name, tool]))
 	return {
 		names: prepared.names,

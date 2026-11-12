@@ -31,21 +31,28 @@ export type RegisterPreparedMcpToolsOptions<R extends AnyRouter> =
  */
 export function registerMcpTools<R extends AnyRouter>(
 	server: Pick<Server, 'setRequestHandler'>,
-	tools: PreparedMcpTools<R>,
-	options: RegisterPreparedMcpToolsOptions<R>
-): readonly string[]
-export function registerMcpTools<R extends AnyRouter>(
-	server: Pick<Server, 'setRequestHandler'>,
 	router: R,
 	options: RegisterMcpToolsOptions<R>
-): readonly string[]
-export function registerMcpTools<R extends AnyRouter>(
-	server: Pick<Server, 'setRequestHandler'>,
-	source: R | PreparedMcpTools<R>,
-	options: RegisterPreparedMcpToolsOptions<R> &
-		Partial<RegisterMcpToolsOptions<R>>
 ): readonly string[] {
-	const handlers = createToolHandlers(source, options)
+	return install(
+		server,
+		createToolHandlers(prepareMcpTools(router, options), options)
+	)
+}
+
+/** Register tools listed once with {@link prepareMcpTools}, e.g. on a server built per request. */
+export function registerPreparedMcpTools<R extends AnyRouter>(
+	server: Pick<Server, 'setRequestHandler'>,
+	tools: PreparedMcpTools<R>,
+	options: RegisterPreparedMcpToolsOptions<R>
+): readonly string[] {
+	return install(server, createToolHandlers(tools, options))
+}
+
+function install(
+	server: Pick<Server, 'setRequestHandler'>,
+	handlers: ReturnType<typeof createToolHandlers<AnyRouter, CallToolResult>>
+): readonly string[] {
 	server.setRequestHandler(ListToolsRequestSchema, handlers.list)
 	server.setRequestHandler(CallToolRequestSchema, (request, extra) =>
 		handlers.call(request.params.name, request.params.arguments, extra.signal)

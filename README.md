@@ -256,7 +256,7 @@ const mcp = new McpServer({ name: 'api', version: '1.0.0' }, { capabilities: { t
 registerMcpTools(mcp.server, router, { filter: hasTag('external'), context })
 ```
 
-An app that builds a server per request lists and converts its tools once with `prepareMcpTools(router, { filter })` (from either entry) and registers the result: `registerMcpTools(server, prepared, { context })`. `prepared.names` lists the tool names without a server.
+An app that builds a server per request lists and converts its tools once with `prepareMcpTools(router, { filter })` (from either entry) and registers the result with `registerPreparedMcpTools(server, prepared, { context })`. `prepared.names` lists the tool names without a server.
 
 The adapter installs the SDK list/call handlers on a low-level `Server` (also accessible as `McpServer.server`). Use one registration per server; these handlers own its tool list. It forwards cancellation, validates/coerces arguments, applies procedure authorization, and formats results as JSON/text MCP content. Override `formatResult` for images, structured content or other presentation. A failed call answers as on `orpc-fn/mastra`: expected errors as `CODE: message` with the paths of rejected arguments, anything else as a fixed sentence reported to `onError`. Tool selection is required. Object unions are supported; streams are rejected. Resolve lazy routers first with oRPC's `unlazyRouter`.
 

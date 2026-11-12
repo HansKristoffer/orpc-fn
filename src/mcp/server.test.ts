@@ -8,7 +8,11 @@ import {
 import { os, ORPCError } from '@orpc/server'
 import { z } from 'zod'
 import { createFn } from '../index.js'
-import { prepareMcpTools, registerMcpTools } from './server.js'
+import {
+	prepareMcpTools,
+	registerMcpTools,
+	registerPreparedMcpTools
+} from './server.js'
 import { quiet } from '../../tests/fixture.js'
 
 async function connect(server: Pick<Server, 'connect' | 'close'>) {
@@ -163,7 +167,7 @@ test('MCP tools answer expected errors with code and fields, and hide the rest',
 		{ name: 'test', version: '1' },
 		{ capabilities: { tools: {} } }
 	)
-	registerMcpTools(server, prepared, {
+	registerPreparedMcpTools(server, prepared, {
 		context: () => ({}),
 		onError: (error, { tool }) => reported.push([error, tool])
 	})

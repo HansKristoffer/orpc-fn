@@ -846,10 +846,11 @@ export function useConsumerHooks() {
 	form.inputData.value.note = 'rush'
 	form.inputData.value.status = 'held'
 	form.mutate({ id: '1', status: 'held', note: 'rush' })
-	api.useMutation((o) => o.order.update.mutationOptions(), {
-		// @ts-expect-error `initialInput` is checked against the route input
-		initialInput: { id: '1', status: 'closed' }
-	})
+	// `initialInput` is checked against the route input. TypeScript 5.7 reports
+	// it at the call and later versions at the property, so it stays on one line.
+	// biome-ignore format: the expected error must stay on one line
+	// @ts-expect-error status 'closed' is not a route input
+	api.useMutation((o) => o.order.update.mutationOptions(), { initialInput: { id: '1', status: 'closed' } })
 	// Callback options see the route output.
 	const stats = api.useQuery((o) =>
 		o.order.stats.queryOptions({
