@@ -24,7 +24,9 @@ export function createProcedureAssembler(
 			name: route.name,
 			procedure: key,
 			meta: route.meta,
-			stream: route.stream ?? false
+			stream: route.stream ?? false,
+			guards: route.guards ?? {},
+			dynamicGuards: route.dynamicGuards ?? []
 		}
 		builder = builder
 			.route({

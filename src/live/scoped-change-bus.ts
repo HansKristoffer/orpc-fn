@@ -50,6 +50,8 @@ const noInput = z.object({})
  * subscriber in a scope "something changed". Each bus then names only its
  * channel prefix: events go to `${prefix}:${scope}`. Publishing is safe by
  * default (`safePublish: true`), because buses publish after committed writes.
+ * The scope is the access decision (a subscriber hears only its own scope),
+ * so `authFn` defaults to `true`.
  *
  * ```ts
  * const defineChangeBus = defineScopedChangeBus(createPubSub, {
@@ -75,8 +77,14 @@ export function defineScopedChangeBus<TDef extends FnDefinition, TScopeEvent>(
 	>(
 		options: Omit<
 			PubSubOptions<TDef, TInputSchema, TEventSchema, NoInfer<TKey>>,
-			'channel' | 'inputSchema'
+			'channel' | 'inputSchema' | 'authFn'
 		> &
+			Partial<
+				Pick<
+					PubSubOptions<TDef, TInputSchema, TEventSchema, NoInfer<TKey>>,
+					'authFn'
+				>
+			> &
 			GuardOptions<TDef['guards']> &
 			Pick<
 				FnRouteOptions<TDef, TKey, z.output<TInputSchema>>,
@@ -98,6 +106,7 @@ export function defineScopedChangeBus<TDef extends FnDefinition, TScopeEvent>(
 		// signature of createPubSub cannot see.
 		const bus = (createPubSub as (options: object) => object)({
 			safePublish: true,
+			authFn: true,
 			...pubsubOptions,
 			inputSchema: pubsubOptions.inputSchema ?? noInput,
 			channel

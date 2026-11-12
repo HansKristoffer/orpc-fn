@@ -122,6 +122,8 @@ export type BuildProcedure = (options: {
 	procedure: string | undefined
 	route: Record<string, unknown>
 	meta: Record<string, unknown>
+	guards?: Record<string, unknown>
+	dynamicGuards?: readonly string[]
 	input?: AnySchema | undefined
 	output?: AnySchema | undefined
 	stream?: boolean

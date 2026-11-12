@@ -64,6 +64,7 @@ const { createPubSub, drainPubSubSubscribers, activePubSubSubscriberCount } =
 	})
 
 const orderUpdates = createPubSub({
+	authFn: true,
 	name: 'test.order.updates',
 	channel: 'test:orders',
 	inputSchema: z.object({ orderId: z.string() }),
@@ -296,6 +297,7 @@ describe('createPubSub subscribe lifecycle', () => {
 			}
 		})
 		const feed = small.createPubSub({
+			authFn: true,
 			name: 'test.overflow',
 			channel: 'test:overflow',
 			inputSchema: z.object({}),
@@ -351,6 +353,7 @@ describe('pubsub logs', () => {
 			pubsub: { transport }
 		})
 		const feed = app.createPubSub({
+			authFn: true,
 			name: 'test.logs',
 			channel: {
 				subscribe: ({ input }) => `test:logs:${input.id}`,
@@ -407,6 +410,7 @@ describe('pubsub logs', () => {
 
 describe('publish (ported from gey-mono mirrorChannel/publishMany)', () => {
 	const shards = createPubSub({
+		authFn: true,
 		name: 'test.mirror',
 		channel: ({ shardId }) => `test:shard:${shardId}`,
 		mirrorChannel: 'test:broadcast',
@@ -455,6 +459,7 @@ describe('publish (ported from gey-mono mirrorChannel/publishMany)', () => {
 
 	test('a mirror equal to the channel is not published twice', async () => {
 		const same = createPubSub({
+			authFn: true,
 			name: 'test.sameMirror',
 			channel: 'test:same',
 			mirrorChannel: 'test:same',

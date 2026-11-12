@@ -6,16 +6,11 @@ import {
 } from '@orpc/server'
 import { procedureDefinition } from './compatibility.js'
 import { rawInputSchema, type ToolSchema } from './json-schema.js'
-import { readFnMeta, toToolName } from './meta.js'
+import { hasTag, type ProcedureFilter, readFnMeta, toToolName } from './meta.js'
 
-export { toToolName }
+export { hasTag, toToolName }
 export { rawInputSchema as toolInputSchema }
-export type { ToolSchema }
-
-/** Picks procedures; also fits oRPC's `OpenAPIHandler({ filter })`. */
-export type ProcedureFilter = (
-	options: TraverseContractProcedureCallbackOptions
-) => boolean
+export type { ProcedureFilter, ToolSchema }
 
 export type McpTool = {
 	/** Tool name: the sanitized `fn` name (`user.me` becomes `user-me`). */
@@ -31,12 +26,6 @@ export type McpTool = {
 		annotations: { readOnlyHint: boolean }
 	}
 }
-
-/** Procedures whose route has `tag`: `listTools(router, { filter: hasTag('external') })`. */
-export const hasTag =
-	(tag: string): ProcedureFilter =>
-	({ contract }) =>
-		procedureDefinition(contract).route?.tags?.includes(tag) ?? false
 
 const isGet: ProcedureFilter = ({ contract }) =>
 	procedureDefinition(contract).route?.method === 'GET'
@@ -80,8 +69,8 @@ export function listTools(
 					`orpc-fn: MCP tool name collision: ${name}; provide a name override`
 				)
 			names.set(name, procedure)
-			const { inputSchema, route = {} } = procedureDefinition(procedure)
-			const description = route.description ?? route.summary
+			const { inputSchema } = procedureDefinition(procedure)
+			const description = meta.description || undefined
 			tools.push({
 				name,
 				procedure,

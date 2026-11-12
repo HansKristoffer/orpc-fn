@@ -1,6 +1,7 @@
 import type { AnySchema } from '@orpc/contract'
 import { JsonSchemaCoercer } from '@orpc/json-schema'
 import { ZodToJsonSchemaConverter } from '@orpc/zod/zod4'
+import type { SchemaIssue } from './issues.js'
 
 export type JsonSchema = Record<string, unknown>
 
@@ -16,10 +17,10 @@ export type ToolSchema<TIn = unknown, TOut = TIn> = {
 			value: unknown
 		) =>
 			| { value: TOut; issues?: undefined }
-			| { issues: ReadonlyArray<{ message: string }> }
+			| { issues: ReadonlyArray<SchemaIssue> }
 			| Promise<
 					| { value: TOut; issues?: undefined }
-					| { issues: ReadonlyArray<{ message: string }> }
+					| { issues: ReadonlyArray<SchemaIssue> }
 			  >
 		types?: { input: TIn; output: TOut }
 		jsonSchema: {
@@ -32,11 +33,16 @@ export type ToolSchema<TIn = unknown, TOut = TIn> = {
 const converter = new ZodToJsonSchemaConverter()
 const coercer = new JsonSchemaCoercer()
 
-function toJsonSchema(
+/** Converted on first use: an app building many tools at import pays per tool used. */
+function lazyJsonSchema(
 	schema: AnySchema,
 	strategy: 'input' | 'output'
-): JsonSchema {
-	return converter.convert(schema, { strategy })[1] as JsonSchema
+): () => JsonSchema {
+	let converted: JsonSchema | undefined
+	return () => {
+		converted ??= converter.convert(schema, { strategy })[1] as JsonSchema
+		return converted
+	}
 }
 
 /**
@@ -48,20 +54,20 @@ function toJsonSchema(
  * so values are coerced back before validating.
  */
 export function rawInputSchema<TIn>(schema: AnySchema): ToolSchema<TIn> {
-	const jsonSchema = toJsonSchema(schema, 'input')
+	const jsonSchema = lazyJsonSchema(schema, 'input')
 	return {
 		'~standard': {
 			version: 1,
 			vendor: 'orpc-fn',
 			validate: (value) => {
-				const coerced = coercer.coerce(jsonSchema, value) as TIn
+				const coerced = coercer.coerce(jsonSchema(), value) as TIn
 				const finish = (
 					result: Awaited<ReturnType<AnySchema['~standard']['validate']>>
 				) => (result.issues ? { issues: result.issues } : { value: coerced })
 				const result = schema['~standard'].validate(coerced)
 				return result instanceof Promise ? result.then(finish) : finish(result)
 			},
-			jsonSchema: { input: () => jsonSchema, output: () => jsonSchema }
+			jsonSchema: { input: jsonSchema, output: jsonSchema }
 		}
 	}
 }
@@ -70,13 +76,13 @@ export function rawInputSchema<TIn>(schema: AnySchema): ToolSchema<TIn> {
 export function passThroughOutputSchema<TOut>(
 	schema: AnySchema
 ): ToolSchema<TOut> {
-	const jsonSchema = toJsonSchema(schema, 'output')
+	const jsonSchema = lazyJsonSchema(schema, 'output')
 	return {
 		'~standard': {
 			version: 1,
 			vendor: 'orpc-fn',
 			validate: (value) => ({ value: value as TOut }),
-			jsonSchema: { input: () => jsonSchema, output: () => jsonSchema }
+			jsonSchema: { input: jsonSchema, output: jsonSchema }
 		}
 	}
 }

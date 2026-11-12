@@ -8,7 +8,9 @@ import {
 	createRpcLink,
 	hasOrpcErrorCode,
 	isSubscriptionPath,
+	formatClientError,
 	queryCacheSerializer,
+	streamCall,
 	userFacingErrorMessage
 } from './client.js'
 import {
@@ -251,6 +253,35 @@ test('manifest excludes aliased streaming routes with ordinary names from batche
 	abort.abort()
 })
 
+test('a stream call marked with streamCall stays out of batches without a manifest', async () => {
+	const mixed = { watch: counter.subscribe, health: echo }
+	const mixedApp = new Hono()
+	let requests = 0
+	mixedApp.use('*', async (_c, next) => {
+		requests++
+		await next()
+	})
+	mountOrpc(mixedApp, { router: mixed, rpcPrefix: '/rpc' })
+	const mixedClient: RouterClient<typeof mixed> = createORPCClient(
+		createRpcLink({
+			url,
+			fetch: (request) => Promise.resolve(mixedApp.fetch(request))
+		})
+	)
+	const abort = new AbortController()
+	const [stream, result] = await Promise.all([
+		mixedClient.watch(
+			{ id: 'marked' },
+			{ signal: abort.signal, context: streamCall }
+		),
+		mixedClient.health({ text: 'healthy' })
+	])
+	expect(result.text).toBe('healthy')
+	expect((await stream.next()).value).toEqual({ count: 0 })
+	expect(requests).toBe(2)
+	abort.abort()
+})
+
 test('generic Expo headers support async context and browser fetch injection', async () => {
 	const { createExpoLink } = await import('./expo.js')
 	let seen: Headers | undefined
@@ -302,6 +333,27 @@ describe('userFacingErrorMessage', () => {
 			)
 		).toBe('Choose a stage first.')
 	})
+})
+
+test('formatClientError prefers userMessage, then lists rejected fields', () => {
+	const invalid = new ORPCError('BAD_REQUEST', {
+		data: {
+			issues: [
+				{ message: 'Required', path: ['lines', 0, 'sku'] },
+				{ message: 'Too long', path: [{ key: 'title' }] }
+			]
+		}
+	})
+	expect(formatClientError(invalid, 'Could not save')).toBe(
+		'lines.0.sku: Required\ntitle: Too long'
+	)
+	const safe = new ORPCError('BAD_REQUEST', {
+		data: { userMessage: 'Pick a stage first.' }
+	})
+	expect(formatClientError(safe, 'Could not save')).toBe('Pick a stage first.')
+	expect(formatClientError(new Error('boom'), 'Could not save')).toBe(
+		'Could not save'
+	)
 })
 
 describe('queryCacheSerializer', () => {

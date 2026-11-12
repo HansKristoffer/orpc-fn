@@ -1,15 +1,17 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test'
-import { ORPCError } from '@orpc/server'
+import { ORPCError, os } from '@orpc/server'
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { createRouter, fn, user } from '../tests/fixture.js'
+import { createRouter, fn, quiet, user } from '../tests/fixture.js'
+import { createFn } from './index.js'
 import {
 	formatServerTiming,
 	markRequestArrival,
 	mountOrpc,
-	normalizeExpoOrigin
+	normalizeExpoOrigin,
+	timed
 } from './hono.js'
-import { hasTag } from './mcp.js'
+import { hasTag } from './meta.js'
 
 describe('normalizeExpoOrigin (ported from orpc-context-headers.test.ts)', () => {
 	test('copies expo-origin to origin when origin is missing', () => {
@@ -107,7 +109,8 @@ function createApp(
 		...(rpcPrefix ? { rpcPrefix } : {}),
 		openapi: {
 			prefix: '/api',
-			info: { title: 'Test API', version: '1.0.0' }
+			info: { title: 'Test API', version: '1.0.0' },
+			filter: () => true
 		},
 		normalizeHeaders: normalizeExpoOrigin,
 		...overrides
@@ -189,6 +192,32 @@ describe('mountOrpc', () => {
 		])
 	})
 
+	test("skips errors the route's factory classified as expected", async () => {
+		class ArchivedError extends Error {}
+		const factory = createFn({
+			procedures: { public: os },
+			default: 'public',
+			logger: () => quiet,
+			isExpectedError: (error) => error instanceof ArchivedError
+		})
+		const archived = factory.fn({
+			name: 'archived',
+			handler: () => {
+				throw new ArchivedError('archived')
+			}
+		})
+		const onError = mock(() => {})
+		const app = new Hono()
+		mountOrpc(app, { router: { archived }, rpcPrefix: '/rpc', onError })
+		const response = await app.request('/rpc/archived', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: '{}'
+		})
+		expect(response.status).toBe(500)
+		expect(onError).toHaveBeenCalledTimes(0)
+	})
+
 	test('SSE responses disable proxy buffering', async () => {
 		const response = await createApp().request('/api/ticks')
 		expect(response.headers.get('content-type')).toContain('text/event-stream')
@@ -206,6 +235,31 @@ describe('mountOrpc', () => {
 		expect((await app.request('/ext/crash')).status).toBe(404)
 		const spec = (await (await app.request('/ext/spec.json')).json()) as Spec
 		expect(Object.keys(spec.paths)).toEqual(['/echo'])
+	})
+
+	test('openapi requires a filter and can leave out the docs', async () => {
+		expect(() =>
+			// @ts-expect-error publishing routes over REST is an explicit choice
+			mountOrpc(new Hono(), { router, openapi: { prefix: '/api' } })
+		).toThrow('needs a filter')
+		const app = createApp(
+			{ openapi: { prefix: '/ext', filter: () => true, docs: false } },
+			null
+		)
+		expect((await app.request('/ext/echo?text=x')).status).toBe(200)
+		expect((await app.request('/ext/spec.json')).status).toBe(404)
+		expect((await app.request('/ext')).status).toBe(404)
+	})
+
+	test('timed adds the duration of work to the request timing', async () => {
+		const timing: Record<string, number> = {}
+		expect(await timed(timing, 'auth_ms', async () => 'user')).toBe('user')
+		await expect(
+			timed(timing, 'auth_ms', () => {
+				throw new Error('no session')
+			})
+		).rejects.toThrow('no session')
+		expect(timing.auth_ms).toBeGreaterThanOrEqual(0)
 	})
 
 	test('unmatched paths fall through to the app', async () => {

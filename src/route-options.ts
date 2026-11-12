@@ -72,6 +72,14 @@ export function normalizeRoute(
 		throw new TypeError(
 			'orpc-fn: an event iterator schema cannot declare stream: false'
 		)
+	if (
+		stream !== true &&
+		!iterator &&
+		handler.constructor?.name === 'AsyncGeneratorFunction'
+	)
+		throw new TypeError(
+			`orpc-fn: ${name} has an async generator handler; declare stream: true`
+		)
 	for (const [guard, resolver] of Object.entries(guardResolvers)) {
 		if (!isGuard(guard))
 			throw new TypeError(`orpc-fn: unknown guard resolver "${guard}"`)

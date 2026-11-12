@@ -18,13 +18,17 @@ import {
 	type SubscriptionRunner,
 	seedQueryFn
 } from './realtime.js'
+import { streamCall } from './stream-call.js'
 
 export type { InvalidationDomain, LiveConnectionStatus } from './realtime.js'
 
-/** An oRPC client procedure fits: `client.order.watch`. */
+/**
+ * An oRPC client procedure fits: `client.order.watch`. It gets `streamCall`
+ * as its client context, which keeps it out of `createRpcLink`'s batches.
+ */
 export type SubscribeFn<TInput, TEvent> = (
 	input: TInput,
-	options: { signal: AbortSignal }
+	options: { signal: AbortSignal; context: typeof streamCall }
 ) => Promise<AsyncIterable<TEvent>>
 
 export type UseOrpcSubscriptionOptions<TInput, TEvent> = {
@@ -78,7 +82,10 @@ export function useOrpcSubscription<TInput, TEvent>(
 		runnerRef.current = createSubscriptionRunner<TEvent>({
 			open: (signal) => {
 				openedInput = latest.current.input
-				return latest.current.subscribe(openedInput, { signal })
+				return latest.current.subscribe(openedInput, {
+					signal,
+					context: streamCall
+				})
 			},
 			canConnect: () => latest.current.shouldRun,
 			shouldReconnect: () => latest.current.shouldRun,

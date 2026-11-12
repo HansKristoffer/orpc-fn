@@ -127,9 +127,9 @@ describe('fnLive inference', () => {
 
 	test('channel function derives channel names', () => {
 		expect(
-			liveList.getChannelName({
+			liveList.getPublishChannelName({
 				organizationId: 'org_1'
-			})
+			} as never)
 		).toBe('test.liveList:org:org_1')
 	})
 })
@@ -195,6 +195,35 @@ describe('fnLive runtime (memory transport)', () => {
 		const invalid = {} as Parameters<typeof safe.publish>[0]
 		await expect(safe.publish(invalid)).resolves.toBeUndefined()
 		await expect(live.publish(invalid)).rejects.toThrow()
+	})
+
+	test('a rerun that changes nothing sends nothing', async () => {
+		let version = 0
+		let runs = 0
+		let reran = () => {}
+		const firstRerun = new Promise<void>((resolve) => {
+			reran = resolve
+		})
+		const rerunning = fnLive({
+			name: 'test.liveRerun',
+			procedure: 'public',
+			input: z.object({}),
+			handler: () => {
+				if (++runs === 2) reran()
+				return { version }
+			},
+			live: { eventSchema, channel: 'rerun' }
+		})
+		const stream = await call(rerunning.subscribe, {}, { context: {} })
+		expect((await stream.next()).value).toEqual({ version: 0 })
+		const next = stream.next()
+		const event = { organizationId: 'o', itemId: 'i', kind: 'updated' } as const
+		await rerunning.publish(event)
+		await firstRerun
+		version = 1
+		await rerunning.publish(event)
+		expect((await next).value).toEqual({ version: 1 })
+		await stream.return(undefined)
 	})
 
 	test('a failing initial snapshot releases the subscription', async () => {

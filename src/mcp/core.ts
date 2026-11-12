@@ -3,8 +3,10 @@ import {
 	type InferRouterInitialContext,
 	call
 } from '@orpc/server'
+import { formatIssue } from '../issues.js'
 import { isObjectJsonSchema } from '../json-schema.js'
 import { listTools, type McpTool, type ProcedureFilter } from '../mcp.js'
+import { type ToolErrorOptions, toolErrorText } from '../tool-errors.js'
 
 /** Text-only tool result: the shape both MCP SDK majors accept. */
 export type TextToolResult = {
@@ -12,16 +14,76 @@ export type TextToolResult = {
 	isError?: boolean
 }
 
-export type RegisterMcpToolsOptions<R extends AnyRouter, TResult> = {
+/** Which procedures become tools, and their names and hints. */
+export type McpToolSelection = {
 	/** Tool exposure must be an explicit application choice. */
 	filter: ProcedureFilter
+	readOnly?: ProcedureFilter
+	name?: NonNullable<Parameters<typeof listTools>[1]>['name']
+}
+
+/** How a registered tool is called and how its outcome reads. */
+export type McpCallOptions<R extends AnyRouter, TResult> = ToolErrorOptions & {
 	context: (request: {
 		name: string
 		signal: AbortSignal
 	}) => InferRouterInitialContext<R> | Promise<InferRouterInitialContext<R>>
-	readOnly?: ProcedureFilter
-	name?: NonNullable<Parameters<typeof listTools>[1]>['name']
 	formatResult?: (value: unknown, tool: McpTool) => TResult | Promise<TResult>
+}
+
+export type RegisterMcpToolsOptions<
+	R extends AnyRouter,
+	TResult
+> = McpToolSelection & McpCallOptions<R, TResult>
+
+type ToolDescription = Omit<McpTool['config'], 'inputSchema'> & {
+	name: string
+	inputSchema: Record<string, unknown> & { type: 'object' }
+}
+
+/** Tools listed and converted once, then registered per server or request. */
+export type PreparedMcpTools<R extends AnyRouter> = {
+	readonly router: R
+	readonly names: readonly string[]
+	readonly tools: readonly McpTool[]
+	/** @internal The `tools/list` answer. */
+	readonly descriptions: readonly ToolDescription[]
+}
+
+/**
+ * List and convert a router's tools once, for an app that builds an MCP
+ * server per request: `registerMcpTools(server, prepared, { context })`.
+ */
+export function prepareMcpTools<R extends AnyRouter>(
+	router: R,
+	options: McpToolSelection
+): PreparedMcpTools<R> {
+	const tools = listTools(router, {
+		filter: options.filter,
+		...(options.readOnly ? { readOnly: options.readOnly } : {}),
+		...(options.name ? { name: options.name } : {})
+	})
+	const descriptions = tools.map((tool) => {
+		const inputSchema = tool.config.inputSchema?.[
+			'~standard'
+		].jsonSchema.input() ?? { type: 'object', properties: {} }
+		if (!isObjectJsonSchema(inputSchema))
+			throw new TypeError(
+				`orpc-fn: MCP tool ${tool.name} needs an object input`
+			)
+		// MCP requires a top-level object; object unions retain their constraints.
+		return {
+			name: tool.name,
+			...tool.config,
+			inputSchema: { ...inputSchema, type: 'object' as const }
+		}
+	})
+	return {
+		router,
+		names: tools.map((tool) => tool.name),
+		tools,
+		descriptions
+	}
 }
 
 /** Default protocol result: JSON/text. Provide formatResult for other MCP content. */
@@ -40,35 +102,29 @@ const errorResult = (text: string): TextToolResult => ({
 	isError: true
 })
 
+const isPrepared = <R extends AnyRouter>(
+	source: R | PreparedMcpTools<R>
+): source is PreparedMcpTools<R> =>
+	'descriptions' in source && Array.isArray(source.descriptions)
+
 /** @internal SDK-independent `tools/list` and `tools/call` behind both adapters. */
 export function createToolHandlers<R extends AnyRouter, TResult>(
-	router: R,
-	options: RegisterMcpToolsOptions<R, TResult>
+	source: R | PreparedMcpTools<R>,
+	options: McpCallOptions<R, TResult> & Partial<McpToolSelection>
 ) {
-	const definitions = listTools(router, {
-		filter: options.filter,
-		...(options.readOnly ? { readOnly: options.readOnly } : {}),
-		...(options.name ? { name: options.name } : {})
-	})
-	const tools = new Map(definitions.map((tool) => [tool.name, tool]))
-	const descriptions = definitions.map((tool) => {
-		const inputSchema = tool.config.inputSchema?.[
-			'~standard'
-		].jsonSchema.input() ?? { type: 'object', properties: {} }
-		if (!isObjectJsonSchema(inputSchema))
+	let prepared: PreparedMcpTools<R>
+	if (isPrepared(source)) prepared = source
+	else {
+		if (typeof options.filter !== 'function')
 			throw new TypeError(
-				`orpc-fn: MCP tool ${tool.name} needs an object input`
+				'orpc-fn: registerMcpTools needs a filter; tool exposure is an explicit choice'
 			)
-		// MCP requires a top-level object; object unions retain their constraints.
-		return {
-			name: tool.name,
-			...tool.config,
-			inputSchema: { ...inputSchema, type: 'object' as const }
-		}
-	})
+		prepared = prepareMcpTools(source, options as McpToolSelection)
+	}
+	const tools = new Map(prepared.tools.map((tool) => [tool.name, tool]))
 	return {
-		names: [...tools.keys()] as readonly string[],
-		list: () => ({ tools: descriptions }),
+		names: prepared.names,
+		list: () => ({ tools: [...prepared.descriptions] }),
 		call: async (
 			name: string,
 			args: Record<string, unknown> | undefined,
@@ -83,7 +139,10 @@ export function createToolHandlers<R extends AnyRouter, TResult>(
 				].validate(args ?? {})
 				if (validation?.issues)
 					return errorResult(
-						validation.issues.map((issue) => issue.message).join('; ')
+						[
+							'BAD_REQUEST: Invalid tool input',
+							...validation.issues.map(formatIssue)
+						].join('\n')
 					)
 				const context = await options.context({ name: tool.name, signal })
 				const result = await call(tool.procedure, validation?.value, {
@@ -93,9 +152,7 @@ export function createToolHandlers<R extends AnyRouter, TResult>(
 				return await (options.formatResult ?? formatMcpResult)(result, tool)
 			} catch (error) {
 				if (signal.aborted) throw error
-				return errorResult(
-					error instanceof Error ? error.message : String(error)
-				)
+				return errorResult(toolErrorText(error, tool.name, options))
 			}
 		}
 	}

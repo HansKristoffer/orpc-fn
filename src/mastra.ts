@@ -8,14 +8,15 @@ import {
 	type ToolSchema
 } from './json-schema.js'
 import { readFnMeta, toToolName } from './meta.js'
+import { type ToolErrorOptions, toolErrorText } from './tool-errors.js'
 import type { ProcedureInput, ProcedureOutput } from './types.js'
 
-export { toToolName }
+export { toToolName, type ToolErrorOptions }
 
-export type CreateMastraToolOptions = {
+export type CreateMastraToolOptions = ToolErrorOptions & {
 	/** Override the tool id (defaults to the sanitized `fn` name). */
 	id?: string
-	/** Override the tool description (defaults to the route summary). */
+	/** Override the tool description (defaults to the route description, else its summary). */
 	description?: string
 	/** Gate execution behind the AI SDK tool-approval flow. */
 	requireApproval?: boolean
@@ -66,6 +67,10 @@ type ObjectInputCheck<TProc> =
  * Mastra checks the input against the procedure's schema (with dates coerced
  * from strings) but passes the raw input on for the procedure to parse;
  * the output is the procedure's parsed result, passed through unchanged.
+ *
+ * A failed call throws an `Error` whose message is what the model reads:
+ * `CODE: message` with validation paths for an expected error, a fixed
+ * sentence for anything else (reported to `onError`).
  */
 export function createMastraTool<TProc extends AnyProcedure>(
 	procedure: TProc & ObjectInputCheck<TProc>,
@@ -151,7 +156,8 @@ export function createMastraTool<TProc extends AnyProcedure>(
 				return result
 			} catch (error) {
 				finish('error')
-				throw error
+				if (ctx?.abortSignal?.aborted) throw error
+				throw new Error(toolErrorText(error, id, options))
 			}
 		}
 	})

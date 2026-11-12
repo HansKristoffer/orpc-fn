@@ -20,17 +20,15 @@ export function encodePayload(
 	return JSON.stringify({ [MARKER]: 2, id, json, meta })
 }
 
+/** A comparable serialization of a snapshot; undefined when it holds files. */
+export function snapshotKey(value: unknown): string | undefined {
+	const [json, meta, maps, blobs] = serializer.serialize(value)
+	if (maps.length > 0 || blobs.length > 0) return undefined
+	return JSON.stringify([json, meta])
+}
+
 export function decodePayload(payload: string): unknown {
-	const parsed: unknown = JSON.parse(payload)
-	if (
-		typeof parsed === 'object' &&
-		parsed !== null &&
-		[1, 2].includes(Number((parsed as Record<string, unknown>)[MARKER]))
-	) {
-		const { json, meta } = parsed as { json: unknown; meta: [] }
-		return serializer.deserialize(json, meta)
-	}
-	return parsed
+	return decodeMessage(payload).value
 }
 
 /** IDs distinguish replay/live overlap; legacy payloads remain readable. */
@@ -38,13 +36,17 @@ export function decodeMessage(payload: string): {
 	id: string | undefined
 	value: unknown
 } {
-	const envelope = JSON.parse(payload) as unknown
-	const id =
-		typeof envelope === 'object' &&
-		envelope !== null &&
-		(envelope as Record<string, unknown>)[MARKER] === 2 &&
-		typeof (envelope as Record<string, unknown>).id === 'string'
-			? (envelope as { id: string }).id
-			: undefined
-	return { id, value: decodePayload(payload) }
+	const parsed: unknown = JSON.parse(payload)
+	if (typeof parsed !== 'object' || parsed === null)
+		return { id: undefined, value: parsed }
+	const envelope = parsed as Record<string, unknown>
+	const version = Number(envelope[MARKER])
+	if (version !== 1 && version !== 2) return { id: undefined, value: parsed }
+	return {
+		id:
+			version === 2 && typeof envelope.id === 'string'
+				? envelope.id
+				: undefined,
+		value: serializer.deserialize(envelope.json, envelope.meta as [])
+	}
 }

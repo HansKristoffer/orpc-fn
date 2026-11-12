@@ -17,6 +17,7 @@ type AsyncIterableItem<T> = T extends AsyncIterable<infer U> ? U : never
 
 // Basic pubsub with dynamic channel
 const orderUpdates = createPubSub({
+	authFn: true,
 	name: 'order.updates',
 	channel: ({ orderId }) => `order:${orderId}`,
 	inputSchema: z.object({ orderId: z.string() }),
@@ -30,6 +31,7 @@ const orderUpdates = createPubSub({
 
 // Static channel pubsub
 const systemAlerts = createPubSub({
+	authFn: true,
 	name: 'system.alerts',
 	channel: 'system:alerts',
 	inputSchema: z.object({}),
@@ -42,6 +44,7 @@ const systemAlerts = createPubSub({
 
 // With backlog enabled
 const chatMessages = createPubSub({
+	authFn: true,
 	name: 'chat.messages',
 	channel: ({ roomId }) => `chat:${roomId}`,
 	inputSchema: z.object({ roomId: z.string() }),
@@ -248,44 +251,27 @@ describe('publish function types', () => {
 	})
 })
 
-describe('getChannelName function types', () => {
-	test('orderUpdates getChannelName accepts input params', () => {
-		type Param = Parameters<typeof orderUpdates.getChannelName>[0]
-
-		expectTypeOf<{ orderId: string }>().toMatchTypeOf<Param>()
-	})
-
-	test('getChannelName returns string', () => {
-		type ReturnType = globalThis.ReturnType<typeof orderUpdates.getChannelName>
-		expectTypeOf<ReturnType>().toEqualTypeOf<string>()
-	})
-})
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Functional Tests (getChannelName - no Redis needed)
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe('getChannelName functionality', () => {
-	test('dynamic channel resolves correctly', () => {
-		const channel = orderUpdates.getChannelName({ orderId: '123' })
-		expect(channel).toBe('order:123')
-	})
-
-	test('getChannelName accepts event-shaped object', () => {
-		const channel = orderUpdates.getChannelName({
-			orderId: '123',
-			status: 'pending',
-			updatedAt: 'now'
-		})
-		expect(channel).toBe('order:123')
+describe('channel name resolvers', () => {
+	test('dynamic channel resolves from subscriber input or event', () => {
+		expect(
+			orderUpdates.getSubscriptionChannelName({
+				input: { orderId: '123' },
+				context: { requestId: 'r' } as never
+			})
+		).toBe('order:123')
+		expect(
+			orderUpdates.getPublishChannelName({
+				orderId: '123',
+				status: 'pending',
+				updatedAt: 'now'
+			} as never)
+		).toBe('order:123')
 	})
 
 	test('static channel always returns same value', () => {
-		const channel1 = systemAlerts.getChannelName({})
-		const channel2 = systemAlerts.getChannelName({ level: 'info' })
-
-		expect(channel1).toBe('system:alerts')
-		expect(channel2).toBe('system:alerts')
+		expect(
+			systemAlerts.getPublishChannelName({ level: 'info', message: 'x' })
+		).toBe('system:alerts')
 	})
 })
 
@@ -398,6 +384,7 @@ describe('authFn with routers', () => {
 describe('filterFn configuration', () => {
 	test('async filterFn is valid', () => {
 		const pubsub = createPubSub({
+			authFn: true,
 			name: 'test.async.filter',
 			channel: 'test:asyncfilter',
 			inputSchema: z.object({ userId: z.string() }),
@@ -413,6 +400,7 @@ describe('filterFn configuration', () => {
 
 	test('filterFn receives correct types', () => {
 		createPubSub({
+			authFn: true,
 			name: 'test.filter.types',
 			channel: 'test:filtertypes',
 			inputSchema: z.object({
@@ -445,6 +433,7 @@ describe('filterFn configuration', () => {
 describe('complex schema handling', () => {
 	test('optional fields in schemas', () => {
 		const pubsub = createPubSub({
+			authFn: true,
 			name: 'test.optional.fields',
 			channel: 'test:optional',
 			inputSchema: z.object({
@@ -470,6 +459,7 @@ describe('complex schema handling', () => {
 
 	test('union types in event schema', () => {
 		const pubsub = createPubSub({
+			authFn: true,
 			name: 'test.union.event',
 			channel: 'test:union',
 			inputSchema: z.object({}),

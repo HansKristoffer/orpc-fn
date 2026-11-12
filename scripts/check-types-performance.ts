@@ -4,14 +4,45 @@ import { join } from 'node:path'
 const root = new URL('../', import.meta.url).pathname
 const temporary = await mkdtemp(join(root, '.type-benchmark-'))
 const count = 300
-const fixture = (entry: string) => `import { createFn } from '${entry}'
-import { os } from '@orpc/server'
+/** Allowed growth in instantiations over HEAD before the check fails. */
+const maxGrowth = Number(process.env.TYPES_PERF_MAX_GROWTH ?? 0.05)
+// App-shaped: two builders, shared and scoped extras, two guards, typed meta,
+// explicit and inferred outputs, all read back through RouterClient.
+const route = (i: number) => {
+	const procedure = i % 3 === 0 ? 'public' : 'protected'
+	const guards =
+		procedure === 'protected' ? "permission: true, flags: ['beta'], " : ''
+	const output = i % 2 === 0 ? 'output: z.object({ id: z.string() }), ' : ''
+	const handler =
+		procedure === 'protected'
+			? '({ input, db, userId }) => ({ id: db.query(input.id) + userId })'
+			: '({ input, db }) => ({ id: db.query(input.id) })'
+	return `const route${i} = fn({ name: 'route${i}', procedure: '${procedure}', ${guards}meta: { audit: ${i % 2 === 0} }, input: z.object({ id: z.string() }), ${output}handler: ${handler} })`
+}
+const fixture = (
+	entry: string
+) => `import { createFn, defineMeta } from '${entry}'
+import { os, type RouterClient } from '@orpc/server'
 import { z } from 'zod'
 const base = os.$context<{ user?: { id: string } }>()
-const { fn } = createFn({ procedures: { public: base }, default: 'public', extras: () => ({ db: { query: (id: string) => id } }), guards: { permission: (value: boolean) => { if (!value) throw new Error('denied') } } })
-${Array.from({ length: count }, (_, i) => `const route${i} = fn({ name: 'route${i}', permission: true, input: z.object({ id: z.string() }), output: z.object({ id: z.string() }), handler: ({ input, db }) => ({ id: db.query(input.id) }) })`).join('\n')}
+const authed = base.use(({ context, next }) => next({ context: { user: context.user ?? { id: 'anonymous' } } }))
+const { fn } = createFn({
+	procedures: { public: base, protected: authed },
+	extras: () => ({ db: { query: (id: string) => id } }),
+	extrasByProcedure: { protected: ({ context }) => ({ userId: context.user.id }) },
+	guards: {
+		permission: (value: boolean) => { if (!value) throw new Error('denied') },
+		flags: (value: string[]) => value.length > 0
+	},
+	meta: defineMeta<{ audit?: boolean }>()
+})
+${Array.from({ length: count }, (_, i) => route(i)).join('\n')}
 export const router = { ${Array.from({ length: count }, (_, i) => `route${i}`).join(', ')} }
+declare const client: RouterClient<typeof router>
+export const ids = [${Array.from({ length: count }, (_, i) => `client.route${i}({ id: '${i}' }).then((output) => output.id)`).join(', ')}]
 `
+const instantiations = (report: string) =>
+	Number(/^Instantiations:\s+(\d+)/m.exec(report)?.[1] ?? Number.NaN)
 async function check(path: string) {
 	const config = `${path}.json`
 	await writeFile(
@@ -57,12 +88,17 @@ try {
 	if ((await archive.exited) || (await extract.exited))
 		throw new Error('Unable to prepare baseline sources')
 	await writeFile(join(temporary, 'baseline.ts'), fixture('./src/index.js'))
-	console.log(
-		`Baseline (${count} routes)\n${await check(join(temporary, 'baseline.ts'))}`
-	)
-	console.log(
-		`Current (${count} routes)\n${await check(join(temporary, 'current.ts'))}`
-	)
+	const baseline = await check(join(temporary, 'baseline.ts'))
+	const current = await check(join(temporary, 'current.ts'))
+	console.log(`Baseline (${count} routes)\n${baseline}`)
+	console.log(`Current (${count} routes)\n${current}`)
+	const growth = instantiations(current) / instantiations(baseline) - 1
+	if (!(growth <= maxGrowth)) {
+		console.error(
+			`Instantiations grew ${(growth * 100).toFixed(1)}% (limit ${(maxGrowth * 100).toFixed(0)}%)`
+		)
+		process.exitCode = 1
+	}
 } finally {
 	await rm(temporary, { recursive: true, force: true })
 }

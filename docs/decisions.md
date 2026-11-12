@@ -12,7 +12,7 @@ It does not give us:
 - the `call: <name>` child span for nested calls, which is what makes a trace readable;
 - the `fn.completed` wide event, with timing write-back and the expected/unexpected error split.
 
-**Decision:** keep our spans, built through `createFn({ otel })`. They use `startActiveSpan`, so `@orpc/otel`'s spans nest under them when an app enables both. `@opentelemetry/api` stays an optional peer: the root entry never imports it, the app passes the module in, and without it `span` is `undefined` and nothing else changes.
+**Decision:** keep our spans, built through `createFn({ otel })`. An error `isExpectedError` accepts leaves its span with an unset status and no exception event, as OpenTelemetry asks of server spans; `fn.error_code` names it. Its message is written for the caller and often names what they asked for, so it has no place in a trace, and a 404 is not a failed span. They use `startActiveSpan`, so `@orpc/otel`'s spans nest under them when an app enables both. `@opentelemetry/api` stays an optional peer: the root entry never imports it, the app passes the module in, and without it `span` is `undefined` and nothing else changes.
 
 ## `@orpc/experimental-publisher` vs `/live`
 
@@ -66,7 +66,7 @@ Mastra 1.51 accepts any Standard Schema with JSON Schema attached, so `createMas
 
 ## Schema input and output
 
-oRPC parses a handler's return value through the output schema, so the handler returns the schema's input type and callers receive its output type. The same split applies to pub/sub: publishers pass the event schema's input type; subscribers, filters and channel resolvers receive its output type. The raw event travels in oRPC's own JSON format (`StandardRPCJsonSerializer`, from `@orpc/client`, which `@orpc/server` already depends on) and each receiver parses it once. Payloads without the envelope are read as plain JSON, so mixed versions keep working during a rolling deploy.
+oRPC parses a handler's return value through the output schema, so the handler returns the schema's input type and callers receive its output type. The same split applies to pub/sub: publishers pass the event schema's input type; subscribers, filters and channel resolvers receive its output type. The raw event travels in oRPC's own JSON format (`StandardRPCJsonSerializer`, from `@orpc/client`, which `@orpc/server` already depends on) and each receiver parses it once. Payloads without the envelope are read as plain JSON, so mixed versions keep working during a rolling deploy. A rerun-mode `fnLive` skips a snapshot that serializes the same as the last one it sent, so an organization-wide bus does not resend every subscriber's unchanged list.
 
 ## Live subscriptions open eagerly
 
@@ -86,15 +86,23 @@ A guard returned `unknown` and its result was ignored, so `permission: () => fal
 
 ## Streams are declared, not guessed from the path
 
-The client link used to keep a call out of a batch when its router path contained `subscribe`. A stream mounted as `watch` was batched with ordinary calls and the batch failed. **Decision:** a streaming route says so, with `stream: true` or oRPC's `eventIterator` output schema, and generated live routes declare it themselves. `createStreamManifest` lists the streaming paths of the actual router, aliases and nesting included, as data the client can import without server code. The name heuristic remains only as a fallback.
+The client link used to keep a call out of a batch when its router path contained `subscribe`. A stream mounted as `watch` was batched with ordinary calls and the batch failed. **Decision:** a streaming route says so, with `stream: true` or oRPC's `eventIterator` output schema, and generated live routes declare it themselves; an `async function*` handler without it throws when the route is defined. On the client the caller knows best: the Vue and React helpers open streams with `streamCall` as the client context (a `Symbol.for` key, so copies agree), and `createRpcLink` never batches such a call. `createStreamManifest` lists the streaming paths of the actual router, aliases and nesting included, for streams opened without a helper. The name heuristic remains only as a fallback.
 
 ## `mountOrpc` compresses its own responses
 
 oRPC answers a streaming batch as an event stream with one event per result, sent as each finishes. Hono's `compress()` skips `text/event-stream`, and `CompressionStream` or a default gzip buffer their output, so a fast result would wait behind a slow one. Apps served without a compressing proxy sent their largest responses raw. **Decision:** `mountOrpc` gzips JSON and batch event streams itself (`compress`, on by default) with `node:zlib`, flushing after every chunk. It recognises a batch by the `x-orpc-batch` request header, as `BatchHandlerPlugin` does. Other event streams stay uncompressed: they are long-lived and small. A response that already has a `content-encoding` is left alone, so an outer compressor still wins. Other routes on the app are the app's business (`hono/compress`).
 
+## Exposure and access are explicit
+
+`mountOrpc`'s OpenAPI mount used to publish every route when its optional `filter` was left out, which the README example did. A pub/sub definition without `authFn` let through anyone who passed its procedure builder, and a bus meant only for the server was one router line away from that. **Decision:** `openapi.filter` is required, as `registerMcpTools`'s already was; `() => true` says "everything". `createPubSub` requires `authFn`; `true` says "anyone". A scoped change bus defaults it to `true`, because its scope, read from the context, is the access decision. The server reads a bus with `listen`, which needs no route. The OpenAPI modules load on the first request to the prefix, so an RPC-only app does not install those peers.
+
+## Tools tell the model what it can fix, and nothing else
+
+The tool adapters sent any error's text to the model: a database or provider message reached its context, and validation issues lost their paths. **Decision:** an expected error (`isExpectedClientError`, which includes what the route's factory classified as expected) reads `CODE: message` plus `path: message` per validation issue; anything else reads as a fixed sentence and goes to `onError`. Both adapters share the rule. `formatError` replaces the text for an app with its own policy. The factory remembers its classification per error object, so `mountOrpc` and the adapters agree with `isExpectedError` without being passed it; two installed copies of the package do not share that memory.
+
 ## Route metadata lives in `meta`
 
-Unknown top-level `fn` options used to become metadata, so a typo or a spread object became metadata silently. **Decision:** app metadata goes in `fn({ meta })` and unknown top-level options throw. Guard keys stay at the top level because every route uses them.
+Unknown top-level `fn` options used to become metadata, so a typo or a spread object became metadata silently. **Decision:** app metadata goes in `fn({ meta })` and unknown top-level options throw. Guard keys stay at the top level because every route uses them. Their values are stored in the route's meta too (`readMeta(route).guards`), and `routePolicy` sees them when a route is defined, so an app can require a guard decision on every route of a procedure without a source-grep audit. Requiring it in the types was left out: it would add a conditional to every `fn` overload, which the type-performance budget and readable errors argue against, and the definition-time throw fails at import.
 
 ## One execution policy, and completion tells the truth
 
@@ -117,7 +125,7 @@ These limits are deliberate; changing one needs a consumer that requires it.
 - Replay is capped and expires. It covers short reconnects, not durable resume.
 - Event IDs deduplicate overlap between backlog and live delivery. They do not give exactly-once delivery or snapshot/delta consistency, so full-snapshot invalidation is the default. Reducers must use revisions or be idempotent ([example](../examples/adoption/revisions.ts)).
 - After a lost connection or a queue overflow, live queries reload a snapshot. Raw event streams throw `SERVICE_UNAVAILABLE` instead of continuing with a silent gap.
-- A stream keeps the authorization it had when it opened. `reauthorize` checks before updates, and an app that needs immediate revocation closes the affected streams itself.
+- A stream keeps the authorization it had when it opened. `reauthorize` checks before updates; `maxStreamAgeMs` bounds how long that lasts by ending streams, which the client helpers reopen with a fresh context. Immediate revocation closes the affected streams in the app.
 - `safePublish` suppresses a broker error. It does not retry or make publication durable: reliable notification is an app-owned outbox.
 - `shutdown()` closes the transport only with `ownsTransport: true`, because apps share transports. A custom transport that cannot be cancelled may finish initializing after shutdown; its late subscription is released.
 - Redis Lua batching targets standalone Redis. Cluster needs its own adapter, a hash-slot contract and integration tests.

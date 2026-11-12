@@ -76,7 +76,11 @@ const app = new Hono()
 mountOrpc(app, {
 	router,
 	rpcPrefix: '/rpc',
-	openapi: { prefix: '/api', info: { title: 'Todo API', version: '1.0.0' } },
+	openapi: {
+		prefix: '/api',
+		info: { title: 'Todo API', version: '1.0.0' },
+		filter: () => true
+	},
 	// Demo auth: `x-user-id` header. Real apps resolve a session here.
 	context: (c, base) => {
 		const userId = c.req.header('x-user-id')
