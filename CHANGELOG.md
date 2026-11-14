@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.1](https://github.com/HansKristoffer/orpc-fn/compare/v0.9.0...v0.9.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* ship CHANGELOG.md in the npm package ([5717b3e](https://github.com/HansKristoffer/orpc-fn/commit/5717b3e827e49dcca782540de58143c5c150a287))
+* ship CHANGELOG.md in the npm package ([64396b5](https://github.com/HansKristoffer/orpc-fn/commit/64396b567e03301ece9e5a26471ef8ca0b21bc9b))
+
 ## [0.9.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.8.0...v0.9.0) (2026-11-12)
 
 
