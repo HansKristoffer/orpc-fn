@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/HansKristoffer/orpc-fn/compare/v0.9.1...v0.9.2) (2026-11-23)
+
+
+### Bug Fixes
+
+* shrink emitted types, speed up hot paths, and fix live/client/adapter bugs ([#33](https://github.com/HansKristoffer/orpc-fn/issues/33)) ([8bec0db](https://github.com/HansKristoffer/orpc-fn/commit/8bec0dbf9c9786998e4bde00a1759e98d3b14648))
+
 ## [0.9.1](https://github.com/HansKristoffer/orpc-fn/compare/v0.9.0...v0.9.1) (2026-11-14)
 
 
