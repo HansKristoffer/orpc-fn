@@ -25,6 +25,7 @@ import {
 import { createMastraTool } from 'orpc-fn/mastra'
 import { hasTag, listTools } from 'orpc-fn/mcp'
 import { mountOrpc } from 'orpc-fn/hono'
+import { procedureCommands } from 'orpc-fn/cli'
 import { createRpcLink, hasOrpcErrorCode } from 'orpc-fn/client'
 import { createBetterAuthExpoLink } from 'orpc-fn/expo'
 import { createTanstackQueryUtils } from '@orpc/tanstack-query'
@@ -220,7 +221,11 @@ void [readOnly, name]
 const events = createPubSub({
 	name: 'events',
 	procedure: 'public',
-	channel: ({ room }) => `room:${room}`,
+	// Shared required keys across inputSchema and eventSchema are non-optional.
+	channel: ({ room }) => {
+		const id: string = room
+		return `room:${id}`
+	},
 	inputSchema: z.object({ room: z.string() }),
 	eventSchema: z.object({ room: z.string(), text: z.string() }),
 	authFn: ({ context }) => {
@@ -228,6 +233,14 @@ const events = createPubSub({
 		const id: string = context.user.id
 		return id.length > 0
 	}
+})
+const roomAlerts = createPubSub({
+	name: 'roomAlerts',
+	procedure: 'public',
+	channel: 'room:alerts',
+	inputSchema: z.object({}),
+	eventSchema: z.object({ room: z.string(), text: z.string() }),
+	authFn: true
 })
 // @ts-expect-error who may subscribe is an explicit choice (authFn: true for anyone)
 createPubSub({
@@ -289,11 +302,42 @@ const changes = fn({
 		invalidationStream({
 			context,
 			signal,
-			sources: { tenant: tenantChanges.subscribe, room: events.subscribe },
+			sources: { tenant: tenantChanges.subscribe, room: roomAlerts.subscribe },
 			events: {
 				tenant: (event) =>
 					event.kind === 'a' ? { kind: event.kind } : undefined
 			}
+		})
+})
+fn({
+	name: 'badChangesInput',
+	stream: true,
+	input: z.object({}),
+	handler: ({ context, signal }) =>
+		invalidationStream({
+			context,
+			signal,
+			// @ts-expect-error events.subscribe requires `{ room: string }` input
+			sources: { room: events.subscribe }
+		})
+})
+const tenantStream = os
+	.$context<{ tenant: string }>()
+	.input(z.object({}))
+	.handler(async function* () {
+		yield { id: '1' }
+	})
+fn({
+	name: 'badChangesContext',
+	procedure: 'public',
+	stream: true,
+	input: z.object({}),
+	handler: ({ context, signal }) =>
+		invalidationStream({
+			context,
+			signal,
+			// @ts-expect-error tenantStream requires `{ tenant: string }` initial context
+			sources: { alerts: tenantStream }
 		})
 })
 type ChangeEvent =
@@ -677,6 +721,19 @@ shop.fn({
 		return none
 	}
 })
+// Scoped extras that override a key across procedures remain overridable in createTestCall.
+shop.createTestCall(
+	{},
+	{ extras: { shopify: { surface: 'admin', shop: 'a' }, db: 2 } }
+)
+procedureCommands(
+	{ tenantOnly },
+	{
+		// @ts-expect-error the router requires tenant in its initial context
+		context: () => ({})
+	}
+)
+procedureCommands({ tenantOnly }, { context: () => ({ tenant: 't' }) })
 createFn({
 	procedures: { public: shopPublic, admin: shopAdmin },
 	extrasByProcedure: {
@@ -846,6 +903,7 @@ export function useConsumerHooks() {
 	form.inputData.value.note = 'rush'
 	form.inputData.value.status = 'held'
 	form.mutate({ id: '1', status: 'held', note: 'rush' })
+	form.mutate(undefined, { onSuccess: (result) => void result.total })
 	// `initialInput` is checked against the route input. TypeScript 5.7 reports
 	// it at the call and later versions at the property, so it stays on one line.
 	// biome-ignore format: the expected error must stay on one line

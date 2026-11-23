@@ -212,3 +212,93 @@ test('bunRedisTransport takes a send-only command client with a given subscriber
 	const unsubscribe = await transport.subscribe('c', () => {})
 	await unsubscribe()
 })
+
+test('bunRedisTransport resubscribe only removes its own dispatch listener', async () => {
+	const { bunRedisTransport } = await import('./redis-bun.js')
+	const unsubscribeArgs: unknown[][] = []
+	const subscriber = {
+		send: async () => null,
+		subscribe: async () => 1,
+		unsubscribe: async (...args: unknown[]) => {
+			unsubscribeArgs.push(args)
+			return 0
+		},
+		duplicate: async () => subscriber,
+		close: () => {},
+		onconnect: null as (() => void) | null,
+		onclose: null as ((err?: unknown) => void) | null
+	}
+	const transport = bunRedisTransport(
+		{ send: async () => null },
+		{ subscriber }
+	)
+	const stop = await transport.subscribe('c', () => {})
+	// Simulate reconnect (second onconnect)
+	subscriber.onconnect?.()
+	subscriber.onconnect?.()
+	await Bun.sleep(0)
+	expect(unsubscribeArgs.length).toBeGreaterThanOrEqual(1)
+	expect(unsubscribeArgs[0]?.[0]).toBe('c')
+	expect(typeof unsubscribeArgs[0]?.[1]).toBe('function')
+	await stop()
+})
+
+test('ioredisTransport skips redundant resubscribe unless autoResubscribe is false', async () => {
+	const subscribeCalls: string[] = []
+	const subscriber = Object.assign(new EventEmitter(), {
+		subscribe: async (ch: string) => {
+			subscribeCalls.push(ch)
+			return 1
+		},
+		unsubscribe: async () => 1,
+		disconnect: () => {}
+	}) as unknown as IORedisLike & EventEmitter
+	const client = {
+		call: async () => null,
+		duplicate: () => subscriber
+	} as unknown as IORedisLike
+	const transport = ioredisTransport(client, { subscriber })
+	await transport.subscribe('a', () => {})
+	// Default autoResubscribe is true, so ready does not issue a duplicate SUBSCRIBE.
+	subscriber.emit('ready')
+	await Bun.sleep(0)
+	expect(subscribeCalls).toEqual(['a'])
+})
+
+test('subscribe during a failing unsubscribe still succeeds cleanly', async () => {
+	let releaseUnsub!: () => void
+	let markUnsubStarted!: () => void
+	const unsubStarted = new Promise<void>((r) => {
+		markUnsubStarted = r
+	})
+	let unsubCalls = 0
+	const transport = createRedisTransport({
+		send: async () => null,
+		async connectSubscriber() {
+			return {
+				subscribe: async () => 1,
+				unsubscribe: async () => {
+					unsubCalls++
+					if (unsubCalls === 1) {
+						markUnsubStarted()
+						await new Promise<void>((r) => {
+							releaseUnsub = r
+						})
+						throw new Error('transient unsub failure')
+					}
+					return 1
+				},
+				close: () => {}
+			}
+		}
+	})
+	const stop1 = await transport.subscribe('ch', () => {})
+	const stopping = stop1().catch(() => {})
+	await unsubStarted
+	const resub = transport.subscribe('ch', () => {})
+	releaseUnsub()
+	await stopping
+	const stop2 = await resub
+	expect(transport.stats().channels).toBe(1)
+	await stop2()
+})

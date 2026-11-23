@@ -9,7 +9,7 @@ import {
 } from './json-schema.js'
 import { readFnMeta, toToolName } from './meta.js'
 import { type ToolErrorOptions, toolErrorText } from './tool-errors.js'
-import type { ProcedureInput, ProcedureOutput } from './types.js'
+import type { MaybePromise, ProcedureInput, ProcedureOutput } from './types.js'
 
 export { toToolName, type ToolErrorOptions }
 
@@ -38,7 +38,7 @@ export type CreateMastraToolOptions = ToolErrorOptions & {
 	 * snapshots and spans, so an app whose context holds a session keeps it
 	 * in a slot that serializes to nothing and reads it here.
 	 */
-	context?: (requestContext: RequestContext) => unknown
+	context?: (requestContext: RequestContext) => MaybePromise<unknown>
 }
 
 /** What the tool takes: the procedure's raw input, or `{}` without a schema. */
@@ -121,19 +121,6 @@ export function createMastraTool<TProc extends AnyProcedure>(
 			? { outputSchema: passThroughOutputSchema(meta.outputSchema) }
 			: {}),
 		execute: async (input, ctx) => {
-			const requestContext = ctx?.requestContext as RequestContext | undefined
-			const context =
-				requestContext &&
-				(options.context
-					? options.context(requestContext)
-					: requestContext.get(contextKey))
-			if (!context) {
-				throw new Error(
-					options.context
-						? 'createMastraTool execution found no oRPC context through its context option'
-						: `createMastraTool execution requires ${contextKey} in the Mastra request context`
-				)
-			}
 			const startedAt = performance.now()
 			const finish = (outcome: 'success' | 'error') => {
 				try {
@@ -145,6 +132,28 @@ export function createMastraTool<TProc extends AnyProcedure>(
 				} catch {
 					/* A telemetry hook cannot change tool execution. */
 				}
+			}
+			const requestContext = ctx?.requestContext as RequestContext | undefined
+			let context: unknown
+			if (requestContext) {
+				if (options.context) {
+					try {
+						context = await options.context(requestContext)
+					} catch (error) {
+						finish('error')
+						if (ctx?.abortSignal?.aborted) throw error
+						throw new Error(toolErrorText(error, id, options))
+					}
+				} else {
+					context = requestContext.get(contextKey)
+				}
+			}
+			if (!context) {
+				throw new Error(
+					options.context
+						? 'createMastraTool execution found no oRPC context through its context option'
+						: `createMastraTool execution requires ${contextKey} in the Mastra request context`
+				)
 			}
 			try {
 				const result = await call(

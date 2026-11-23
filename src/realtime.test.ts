@@ -158,6 +158,56 @@ describe('createSubscriptionRunner', () => {
 			jest.useRealTimers()
 		}
 	})
+
+	test('start() during reconnect backoff cancels the timer and connects immediately', async () => {
+		jest.useFakeTimers()
+		try {
+			const stream = createTestStream<number>()
+			const { runner, reaches } = runnerFor(
+				(signal) => stream.subscribe({ signal }),
+				{ shouldReconnect: () => true }
+			)
+			await runner.connect()
+			const first = await stream.opened(1)
+			const failed = reaches('error')
+			first.fail(new Error('network blip'))
+			await failed
+
+			// While parked in backoff, an explicit start() must not silently no-op.
+			await runner.start()
+			await stream.opened(2)
+			expect(stream.connections).toHaveLength(2)
+			// Advancing past the old backoff timer must not open a duplicate connection.
+			jest.advanceTimersByTime(2000)
+			expect(stream.connections).toHaveLength(2)
+			await runner.dispose()
+		} finally {
+			jest.useRealTimers()
+		}
+	})
+
+	test('onClose distinguishes intentional disconnect from unexpected stream end', async () => {
+		const stream = createTestStream<number>()
+		const closes: Array<{ intentional: boolean } | undefined> = []
+		const runner = createSubscriptionRunner<number>({
+			open: (signal) => stream.subscribe({ signal }),
+			onEvent: () => {},
+			onStatus: () => {},
+			onClose: (info) => closes.push(info),
+			canConnect: () => true,
+			shouldReconnect: () => false
+		})
+		await runner.connect()
+		await stream.opened(1)
+		await runner.disconnect()
+		expect(closes).toEqual([{ intentional: true }])
+
+		await runner.connect()
+		await stream.opened(2)
+		stream.end()
+		await Bun.sleep(0)
+		expect(closes).toEqual([{ intentional: true }, { intentional: false }])
+	})
 })
 
 describe('createInvalidationCoordinator', () => {

@@ -241,4 +241,101 @@ describe('fnLive runtime (memory transport)', () => {
 		await Bun.sleep(5)
 		expect(transport.listenerCount('failing')).toBe(0)
 	})
+
+	test('coalesced applyBatch short-circuits shouldUpdate on the first matching event', async () => {
+		let checks = 0
+		let value = 0
+		const shortCircuit = fnLive({
+			name: 'test.liveShortCircuit',
+			procedure: 'public',
+			input: z.object({}),
+			handler: () => ({ value }),
+			live: {
+				eventSchema,
+				channel: 'short-circuit',
+				coalesceMs: 15,
+				shouldUpdate: () => {
+					checks++
+					return true
+				}
+			}
+		})
+		const stream = await call(shortCircuit.subscribe, {}, { context: {} })
+		expect((await stream.next()).value).toEqual({ value: 0 })
+		const next = stream.next()
+		value = 1
+		await Promise.all(
+			Array.from({ length: 5 }, (_, i) =>
+				shortCircuit.publish({
+					organizationId: 'o',
+					itemId: String(i),
+					kind: 'updated'
+				})
+			)
+		)
+		expect((await next).value).toEqual({ value: 1 })
+		expect(checks).toBe(1)
+		await stream.return(undefined)
+	})
+
+	test('subscribe and reruns run middleware, input parsing, guards and extras once while validating output', async () => {
+		const { os } = await import('@orpc/server')
+		const { createFn } = await import('../index.js')
+		const { memoryTransport } = await import('./memory.js')
+		const { quiet } = await import('../../tests/fixture.js')
+
+		let middlewareRuns = 0
+		let inputParses = 0
+		let guardRuns = 0
+		let extrasRuns = 0
+		let version = 1
+
+		const factory = createFn({
+			procedures: {
+				public: os.use(({ next }) => {
+					middlewareRuns++
+					return next({ context: { middlewareRuns } })
+				})
+			},
+			default: 'public',
+			logger: () => quiet,
+			extras: () => {
+				extrasRuns++
+				return { tag: 'v' }
+			},
+			guards: {
+				allow: () => {
+					guardRuns++
+					return true
+				}
+			},
+			pubsub: { transport: memoryTransport() }
+		})
+
+		const live = factory.fnLive({
+			name: 'test.oncePipeline',
+			allow: true,
+			input: z.object({
+				n: z.string().transform((s) => {
+					inputParses++
+					return Number(s)
+				})
+			}),
+			output: z.string().transform((s) => s.toUpperCase()),
+			handler: ({ input, tag }) => `${tag}${input.n}:${version}`,
+			live: { eventSchema: z.object({}), channel: 'once-pipeline' }
+		})
+
+		const stream = await call(live.subscribe, { n: '7' })
+		expect((await stream.next()).value).toBe('V7:1')
+		const next = stream.next()
+		version = 2
+		await live.publish({})
+		expect((await next).value).toBe('V7:2')
+		expect([middlewareRuns, inputParses, guardRuns, extrasRuns]).toEqual([
+			1, 1, 1, 1
+		])
+		await stream.return(undefined)
+		await factory.shutdown()
+	})
 })

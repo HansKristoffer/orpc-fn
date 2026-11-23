@@ -2,7 +2,5 @@
 export const REQUEST_TIMING = Symbol('orpc-fn.requestTiming')
 export type InvocationTiming = { procedureMs: number; calls: number }
 
-export const RAW_INPUT = Symbol('orpc-fn.rawInput')
-
 /** Extras a `createTestCall` replaces, carried through nested calls. */
 export const EXTRAS_OVERRIDE = Symbol('orpc-fn.extrasOverride')

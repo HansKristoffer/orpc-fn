@@ -79,6 +79,29 @@ describe('reading a bus on the server', () => {
 		transport.clearPublished()
 		expect(transport.published()).toEqual([])
 	})
+
+	test('returning a bus.listen() stream before the first next() still releases the subscription', async () => {
+		const { bus, factory, transport } = setup()
+		const events = await bus.listen({ docId: 'early' })
+		expect(factory.activePubSubSubscriberCount()).toBe(1)
+		expect(transport.listenerCount('doc:early')).toBe(1)
+		await events.return(undefined)
+		expect(factory.activePubSubSubscriberCount()).toBe(0)
+		expect(transport.listenerCount('doc:early')).toBe(0)
+	})
+
+	test('memoryTransport bounds the published log when maxLogSize is set', async () => {
+		const transport = memoryTransport({ maxLogSize: 2 })
+		await transport.publish([
+			{ channel: 'a', payload: JSON.stringify({ n: 1 }) },
+			{ channel: 'a', payload: JSON.stringify({ n: 2 }) },
+			{ channel: 'a', payload: JSON.stringify({ n: 3 }) }
+		])
+		expect(transport.published()).toEqual([
+			{ channel: 'a', event: { n: 2 } },
+			{ channel: 'a', event: { n: 3 } }
+		])
+	})
 })
 
 describe('pub/sub access', () => {

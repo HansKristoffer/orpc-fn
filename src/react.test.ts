@@ -155,6 +155,62 @@ describe('useLiveQuery', () => {
 		})
 		await hook.unmount()
 	})
+
+	test('supports BigInt subscription inputs, onSeed alone, and pauseWhenUnfocused: false', async () => {
+		const stream = createTestStream<Item>()
+		const seen: Item[] = []
+		focusManager.setFocused(false)
+		const hook = await renderHook(
+			(input: { id: bigint }) =>
+				useLiveQuery(
+					input,
+					(value) => ({
+						queryKey: ['item', value.id.toString()],
+						queryFn: async () => ({ id: value.id.toString(), name: 'seed' })
+					}),
+					stream.subscribe,
+					{
+						pauseWhenUnfocused: false,
+						onSeed: (data) => seen.push(data)
+					}
+				),
+			{ id: 1n }
+		)
+		await stream.opened()
+		await act(() => stream.push({ id: '1', name: 'live' }))
+		expect(seen).toEqual([{ id: '1', name: 'seed' }])
+		expect(hook.queryClient.getQueryData<Item>(['item', '1'])).toEqual({
+			id: '1',
+			name: 'live'
+		})
+		await hook.unmount()
+	})
+
+	test('stable subscriptionInput keeps delivering events when query input changes', async () => {
+		const stream = createTestStream<Item>()
+		const hook = await renderHook(
+			(input: { id: string; tab: string }) =>
+				useLiveQuery(
+					input,
+					(value) => ({
+						queryKey: ['item', value.id, value.tab],
+						queryFn: async () => ({ id: value.id, name: value.tab })
+					}),
+					stream.subscribe,
+					{ subscriptionInput: { id: input.id } }
+				),
+			{ id: '1', tab: 'a' }
+		)
+		await stream.opened(1)
+		await hook.rerender({ id: '1', tab: 'b' })
+		await act(() => stream.push({ id: '1', name: 'from-stream' }))
+		expect(hook.queryClient.getQueryData<Item>(['item', '1', 'b'])).toEqual({
+			id: '1',
+			name: 'from-stream'
+		})
+		expect(stream.connections).toHaveLength(1)
+		await hook.unmount()
+	})
 })
 
 describe('useInvalidationStream', () => {

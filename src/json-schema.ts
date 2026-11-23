@@ -87,18 +87,63 @@ export function passThroughOutputSchema<TOut>(
 	}
 }
 
-/** Tool protocols permit unions only when every branch accepts an object. */
-export function isObjectJsonSchema(schema: JsonSchema): boolean {
+function resolveLocalRef(
+	root: JsonSchema,
+	ref: string
+): JsonSchema | undefined {
+	if (!ref.startsWith('#/')) return undefined
+	let current: unknown = root
+	for (const segment of ref.slice(2).split('/')) {
+		if (typeof current !== 'object' || current === null) return undefined
+		const key = segment.replace(/~1/g, '/').replace(/~0/g, '~')
+		current = (current as Record<string, unknown>)[key]
+	}
+	return typeof current === 'object' && current !== null
+		? (current as JsonSchema)
+		: undefined
+}
+
+function checkObjectJsonSchema(
+	schema: JsonSchema,
+	root: JsonSchema,
+	visited: Set<JsonSchema>
+): boolean {
+	if (visited.has(schema)) return false
+	visited.add(schema)
 	if (schema.type === 'object') return true
+	if (typeof schema.$ref === 'string') {
+		const target = resolveLocalRef(root, schema.$ref)
+		if (target) return checkObjectJsonSchema(target, root, visited)
+	}
 	const union = schema.anyOf ?? schema.oneOf
-	return (
+	if (
 		Array.isArray(union) &&
 		union.length > 0 &&
 		union.every(
 			(branch) =>
 				typeof branch === 'object' &&
 				branch !== null &&
-				isObjectJsonSchema(branch)
+				checkObjectJsonSchema(branch as JsonSchema, root, visited)
 		)
-	)
+	) {
+		return true
+	}
+	if (
+		Array.isArray(schema.allOf) &&
+		schema.allOf.length > 0 &&
+		schema.allOf.every(
+			(branch) =>
+				typeof branch === 'object' &&
+				branch !== null &&
+				checkObjectJsonSchema(branch as JsonSchema, root, visited)
+		)
+	) {
+		return true
+	}
+	return false
+}
+
+/** Tool protocols permit unions/intersections only when every branch accepts an object. */
+export function isObjectJsonSchema(schema: JsonSchema): boolean {
+	return checkObjectJsonSchema(schema, schema, new Set())
 }

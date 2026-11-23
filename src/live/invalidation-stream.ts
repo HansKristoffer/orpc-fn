@@ -4,8 +4,11 @@ import {
 	type Procedure,
 	type Schema
 } from '@orpc/server'
+import type { ProcedureContext, ProcedureInput } from '../types.js'
+import { snapshotKey } from './codec.js'
+import { positiveInteger } from './lifecycle.js'
 
-/** A streaming procedure taking no input, such as a `createPubSub` subscribe route. */
+/** A streaming procedure such as a `createPubSub` subscribe route. */
 /* biome-ignore-start lint/suspicious/noExplicitAny: matches any context, input, errors and meta */
 type StreamProcedure<TEvent> = Procedure<
 	any,
@@ -17,6 +20,19 @@ type StreamProcedure<TEvent> = Procedure<
 >
 /* biome-ignore-end lint/suspicious/noExplicitAny: matches any context, input, errors and meta */
 
+/** Rejects a source whose input does not accept `{}` or whose context `TContext` does not satisfy. */
+type SourceCheck<TContext, TSource> = [Record<never, never>] extends [
+	ProcedureInput<TSource>
+]
+	? [TContext] extends [ProcedureContext<TSource>]
+		? unknown
+		: {
+				'orpc-fn: invalidationStream context does not satisfy this source': ProcedureContext<TSource>
+			}
+	: {
+			'orpc-fn: invalidationStream sources must accept empty input `{}`': ProcedureInput<TSource>
+		}
+
 /** One event of an invalidation stream: the domain that changed, plus whatever its mapper added. */
 export type InvalidationEvent<
 	TEvents extends Record<string, unknown>,
@@ -26,6 +42,8 @@ export type InvalidationEvent<
 		? Partial<TExtras[K]>
 		: unknown)
 }[keyof TEvents & string]
+
+const DEFAULT_MAX_QUEUE_SIZE = 1000
 
 /**
  * Fans several change streams into one stream of `{ domain }` events, so a
@@ -55,19 +73,52 @@ export type InvalidationEvent<
  * reconnects, which recreates them all.
  */
 export async function* invalidationStream<
-	TEvents extends Record<string, unknown>,
-	TExtras extends { [K in keyof TEvents]?: object } = Record<never, never>
+	TContext,
+	TSources extends Record<string, StreamProcedure<unknown>>,
+	TExtras extends {
+		[K in keyof TSources]?: object
+	} = Record<never, never>
 >(options: {
-	context: unknown
+	context: TContext
 	signal?: AbortSignal | undefined
-	sources: { [K in keyof TEvents]: StreamProcedure<TEvents[K]> }
+	sources: TSources & {
+		[K in keyof TSources]: SourceCheck<TContext, TSources[K]>
+	}
 	events?: {
 		[K in keyof TExtras]: (
-			value: NoInfer<TEvents[K & keyof TEvents]>
+			value: NoInfer<
+				TSources[K & keyof TSources] extends StreamProcedure<infer TEvent>
+					? TEvent
+					: never
+			>
 		) => TExtras[K] | undefined
 	}
-}): AsyncGenerator<InvalidationEvent<TEvents, TExtras>, void, unknown> {
-	type Event = InvalidationEvent<TEvents, TExtras>
+	/** Maximum distinct queued events before dropping the oldest (default 1000). */
+	maxQueueSize?: number
+}): AsyncGenerator<
+	InvalidationEvent<
+		{
+			[K in keyof TSources]: TSources[K] extends StreamProcedure<infer TEvent>
+				? TEvent
+				: never
+		},
+		TExtras
+	>,
+	void,
+	unknown
+> {
+	type Event = InvalidationEvent<
+		{
+			[K in keyof TSources]: TSources[K] extends StreamProcedure<infer TEvent>
+				? TEvent
+				: never
+		},
+		TExtras
+	>
+	const maxQueueSize = positiveInteger(
+		options.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE,
+		'maxQueueSize'
+	)
 	const controller = new AbortController()
 	const abort = () => controller.abort()
 	if (options.signal?.aborted) abort()
@@ -105,8 +156,16 @@ export async function* invalidationStream<
 			while (!ended) {
 				const result = await iterator.next()
 				if (result.done) return stop()
-				const event = { ...mappers[domain]?.(result.value), domain } as Event
-				queue.set(JSON.stringify(event), event)
+				const mapped = mappers[domain]?.(result.value)
+				const event = (mapped ? { ...mapped, domain } : { domain }) as Event
+				const key = mapped
+					? (snapshotKey(event) ?? JSON.stringify(event))
+					: domain
+				if (!queue.has(key) && queue.size >= maxQueueSize) {
+					const oldest = queue.keys().next()
+					if (!oldest.done) queue.delete(oldest.value)
+				}
+				queue.set(key, event)
 				wake?.()
 			}
 		} catch (error) {
@@ -115,16 +174,18 @@ export async function* invalidationStream<
 			await iterator?.return?.().catch(() => {})
 		}
 	}
-	const pumps = Object.entries(options.sources).map(([domain, procedure]) =>
+	const entries = Object.entries(options.sources)
+	if (entries.length === 0) return
+	const pumps = entries.map(([domain, procedure]) =>
 		pump(domain, procedure as AnyProcedure)
 	)
 
 	try {
 		while (true) {
-			const [next] = queue
-			if (next) {
-				queue.delete(next[0])
-				yield next[1]
+			const next = queue.entries().next()
+			if (!next.done) {
+				queue.delete(next.value[0])
+				yield next.value[1]
 				continue
 			}
 			if (ended) break

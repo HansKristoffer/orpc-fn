@@ -36,7 +36,7 @@ type SubscriptionRunnerOptions<TEvent> = {
 	onStatus: (status: LiveConnectionStatus) => void
 	onConnect?: ((connectionId: number) => void) | undefined
 	onError?: ((error: Error) => void) | undefined
-	onClose?: (() => void) | undefined
+	onClose?: ((info?: { intentional: boolean }) => void) | undefined
 	/** May a stream run at all right now (e.g. the app is in the foreground)? */
 	canConnect: () => boolean
 	/** Reconnect with backoff after an unexpected end? Checked when scheduling and firing. */
@@ -86,19 +86,24 @@ export function createSubscriptionRunner<TEvent>(
 		}, nextReconnectDelayMs(errorCount))
 	}
 
-	function handleUnexpectedEnd(error: Error | null) {
+	function handleUnexpectedEnd(
+		error: Error | null,
+		staleIterator?: AsyncIterator<TEvent> | null
+	) {
 		errorCount += 1
 		// Close the socket of a failed stream; on React Native an unaborted
 		// expo/fetch request keeps holding a connection from the device's pool.
 		abortController?.abort()
 		abortController = null
+		const activeIterator = staleIterator ?? iterator
 		iterator = null
+		if (activeIterator) void closeIterator(activeIterator)
 		if (error) {
 			setStatus('error')
 			options.onError?.(error)
 		} else {
 			setStatus('closed')
-			options.onClose?.()
+			options.onClose?.({ intentional: false })
 		}
 		scheduleReconnect()
 	}
@@ -106,7 +111,8 @@ export function createSubscriptionRunner<TEvent>(
 	async function connect(): Promise<void> {
 		if (disposed || !options.canConnect()) return
 		if (connectPromise) return connectPromise
-		if (status === 'connected' || reconnectTimer !== null) return
+		if (status === 'connected') return
+		clearReconnectTimer()
 
 		intentionalDisconnect = false
 		const thisConnect = (async () => {
@@ -116,9 +122,10 @@ export function createSubscriptionRunner<TEvent>(
 			const controller = new AbortController()
 			abortController = controller
 			const connectionId = ++activeConnectionId
+			let localIterator: AsyncIterator<TEvent> | null = null
 			try {
 				const iterable = await options.open(controller.signal)
-				const localIterator = iterable[Symbol.asyncIterator]()
+				localIterator = iterable[Symbol.asyncIterator]()
 				if (connectionId !== activeConnectionId || controller.signal.aborted) {
 					await closeIterator(localIterator)
 					return
@@ -128,9 +135,11 @@ export function createSubscriptionRunner<TEvent>(
 				options.onConnect?.(connectionId)
 				void consume(localIterator, connectionId)
 			} catch (error) {
-				if (connectionId !== activeConnectionId || controller.signal.aborted)
+				if (connectionId !== activeConnectionId || controller.signal.aborted) {
+					if (localIterator) await closeIterator(localIterator)
 					return
-				handleUnexpectedEnd(toError(error))
+				}
+				handleUnexpectedEnd(toError(error), localIterator)
 			}
 		})()
 		connectPromise = thisConnect
@@ -164,10 +173,10 @@ export function createSubscriptionRunner<TEvent>(
 			if (connectionId !== activeConnectionId) return
 			if (abortController?.signal.aborted || intentionalDisconnect) {
 				setStatus('closed')
-				options.onClose?.()
+				options.onClose?.({ intentional: true })
 				return
 			}
-			handleUnexpectedEnd(toError(error))
+			handleUnexpectedEnd(toError(error), localIterator)
 		}
 	}
 
@@ -185,7 +194,7 @@ export function createSubscriptionRunner<TEvent>(
 		abortController = null
 		if (status !== 'closed') {
 			setStatus('closed')
-			options.onClose?.()
+			options.onClose?.({ intentional: true })
 		}
 		await closeIterator(localIterator)
 	}
@@ -197,6 +206,7 @@ export function createSubscriptionRunner<TEvent>(
 		start() {
 			errorCount = 0
 			intentionalDisconnect = false
+			clearReconnectTimer()
 			return connect()
 		},
 		/** Connected, connecting, or waiting to reconnect. */
@@ -348,7 +358,7 @@ export function createInvalidationCoordinator<
 		connect(connectionId: number) {
 			clearSettleTimer()
 			catchUpPending ||= connectionId > 1
-			settleTimer = setTimeout(markHealthy, SETTLE_MS)
+			if (catchUpPending) settleTimer = setTimeout(markHealthy, SETTLE_MS)
 		},
 		lost() {
 			// Reconnecting is the subscription's job; this connection can no longer settle.

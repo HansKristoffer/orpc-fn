@@ -198,6 +198,73 @@ describe('useLiveQuery', () => {
 		expect(app.result.data.value).toEqual(['a', 'b'])
 		app.stop()
 	})
+
+	test('onSeed runs alone, meta is preserved, and respectVisibility: false stays enabled when unfocused', async () => {
+		const seen: Item[] = []
+		const stream = createTestStream<Item>()
+		const utils = {
+			item: {
+				get: {
+					queryOptions: ({ input }: { input: { id: string } }) => ({
+						queryKey: ['item', input.id],
+						queryFn: async () => ({ id: input.id, name: 'seeded' }),
+						meta: { custom: 'keep' }
+					})
+				},
+				watch: { call: stream.subscribe }
+			}
+		}
+		focusManager.setFocused(false)
+		const app = withOrpcApp(
+			() =>
+				useLiveQuery(
+					{ id: '1' },
+					(input, o: typeof utils) => o.item.get.queryOptions({ input }),
+					(o) => o.item.watch.call,
+					{
+						respectVisibility: false,
+						onSeed: (data) => seen.push(data)
+					}
+				),
+			{ utils }
+		)
+		await app.result.suspense()
+		expect(seen).toEqual([{ id: '1', name: 'seeded' }])
+		const entry = app.queryClient
+			.getQueryCache()
+			.find({ queryKey: ['item', '1'] })
+		expect(entry?.meta).toEqual({ custom: 'keep', live: true })
+		app.stop()
+	})
+
+	test('stable subscriptionInput keeps delivering events when query input changes', async () => {
+		const { utils, stream } = itemUtils(async (id) => ({ id, name: 'seed' }))
+		const input = ref({ id: '1', view: 'compact' })
+		const app = withOrpcApp(
+			() =>
+				useLiveQuery(
+					input,
+					(value, _o: typeof utils) => ({
+						queryKey: ['item', value.id, value.view],
+						queryFn: async () => ({ id: value.id, name: `seed-${value.view}` })
+					}),
+					(o) => o.item.watch.call,
+					{ subscriptionInput: () => ({ id: input.value.id }) }
+				),
+			{ utils }
+		)
+		await stream.opened(1)
+		input.value = { id: '1', view: 'full' }
+		await nextTick()
+		await app.result.suspense()
+		await stream.push({ id: '1', name: 'updated' })
+		expect(app.queryClient.getQueryData<Item>(['item', '1', 'full'])).toEqual({
+			id: '1',
+			name: 'updated'
+		})
+		expect(stream.connections).toHaveLength(1)
+		app.stop()
+	})
 })
 
 describe('useInvalidationStream', () => {
@@ -223,6 +290,22 @@ describe('useInvalidationStream', () => {
 			app.queryClient.getQueryState(queryKey)?.isInvalidated
 		expect(isInvalidated(['order', 'list'])).toBe(true)
 		expect(isInvalidated(['order', 'live'])).toBe(false)
+		app.stop()
+	})
+
+	test('intentional disconnect does not warn as a lost stream', async () => {
+		const stream = createTestStream<{ domain: 'order' }>()
+		const warn = mock(() => {})
+		const app = withOrpcApp(() =>
+			useInvalidationStream(undefined, () => stream.subscribe, {
+				orpc: {},
+				domains: { order: { queryKeys: [['order']] } },
+				logger: { warn }
+			})
+		)
+		await stream.opened()
+		await app.result.disconnect()
+		expect(warn).not.toHaveBeenCalled()
 		app.stop()
 	})
 })
@@ -293,6 +376,32 @@ describe('useMutation invalidates', () => {
 			.build(app.queryClient, { queryKey: ['order', 'list'] })
 		await app.result.mutateAsync('x')
 		expect(order).toEqual(['onSuccess:true'])
+		app.stop()
+	})
+
+	test('initialInput forwards per-call mutateOptions to mutateAsync', async () => {
+		const seen: string[] = []
+		const utils = {
+			order: {
+				save: {
+					mutationOptions: () => ({
+						mutationFn: async (input: { title: string }) => input.title
+					})
+				}
+			}
+		}
+		const app = withOrpcApp(
+			() =>
+				useApiClient<typeof utils>().useMutation(
+					(o) => o.order.save.mutationOptions(),
+					{ initialInput: { title: 'draft' } }
+				),
+			{ utils }
+		)
+		await app.result.mutateAsync(undefined, {
+			onSuccess: (value) => seen.push(value)
+		})
+		expect(seen).toEqual(['draft'])
 		app.stop()
 	})
 })

@@ -1,9 +1,9 @@
 import {
 	type AnyRouter,
 	type InferRouterInitialContext,
+	ORPCError,
 	call
 } from '@orpc/server'
-import { formatIssue } from '../issues.js'
 import { isObjectJsonSchema } from '../json-schema.js'
 import { listTools, type McpTool, type ProcedureFilter } from '../mcp.js'
 import { type ToolErrorOptions, toolErrorText } from '../tool-errors.js'
@@ -106,12 +106,28 @@ const errorResult = (text: string): TextToolResult => ({
 	isError: true
 })
 
+const toolMaps = new WeakMap<
+	PreparedMcpTools<AnyRouter>,
+	Map<string, McpTool>
+>()
+
+function toolMapOf(
+	prepared: PreparedMcpTools<AnyRouter>
+): Map<string, McpTool> {
+	let map = toolMaps.get(prepared)
+	if (!map) {
+		map = new Map(prepared.tools.map((tool) => [tool.name, tool]))
+		toolMaps.set(prepared, map)
+	}
+	return map
+}
+
 /** @internal SDK-independent `tools/list` and `tools/call` behind both adapters. */
 export function createToolHandlers<R extends AnyRouter, TResult>(
 	prepared: PreparedMcpTools<R>,
 	options: McpCallOptions<R, TResult>
 ) {
-	const tools = new Map(prepared.tools.map((tool) => [tool.name, tool]))
+	const tools = toolMapOf(prepared)
 	return {
 		names: prepared.names,
 		list: () => ({ tools: [...prepared.descriptions] }),
@@ -127,13 +143,12 @@ export function createToolHandlers<R extends AnyRouter, TResult>(
 				const validation = await tool.config.inputSchema?.[
 					'~standard'
 				].validate(args ?? {})
-				if (validation?.issues)
-					return errorResult(
-						[
-							'BAD_REQUEST: Invalid tool input',
-							...validation.issues.map(formatIssue)
-						].join('\n')
-					)
+				if (validation?.issues) {
+					throw new ORPCError('BAD_REQUEST', {
+						message: 'Invalid tool input',
+						data: { issues: validation.issues }
+					})
+				}
 				const context = await options.context({ name: tool.name, signal })
 				const result = await call(tool.procedure, validation?.value, {
 					context,

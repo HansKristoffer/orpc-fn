@@ -1,4 +1,5 @@
 import { Readable, pipeline } from 'node:stream'
+import { promisify } from 'node:util'
 import zlib from 'node:zlib'
 import type { OpenAPIGeneratorGenerateOptions } from '@orpc/openapi'
 import {
@@ -202,24 +203,61 @@ export function finishOrpcHeaders(
 }
 
 const NO_TRANSFORM = /(?:^|,)\s*no-transform\s*(?:,|$)/i
+const GZIP_MIN_JSON_BYTES = 512
+const gzipAsync = promisify(zlib.gzip)
+
+/** RFC 9110 `Accept-Encoding` check: matches `gzip` unless explicitly rejected (`q=0`). */
+function acceptsGzip(header: string | null): boolean {
+	if (!header) return false
+	for (const part of header.split(',')) {
+		const [rawEncoding, ...params] = part.trim().split(';')
+		const encoding = rawEncoding?.trim().toLowerCase()
+		if (encoding !== 'gzip' && encoding !== 'x-gzip') continue
+		let q = 1
+		for (const param of params) {
+			const [key, value] = param.trim().split('=')
+			if (key?.trim().toLowerCase() === 'q' && value !== undefined) {
+				const parsed = Number(value.trim())
+				if (Number.isFinite(parsed)) q = parsed
+			}
+		}
+		if (q > 0) return true
+	}
+	return false
+}
+
+function appendVaryAcceptEncoding(headers: Headers): void {
+	const vary = headers.get('vary')
+	if (!vary) {
+		headers.set('vary', 'accept-encoding')
+		return
+	}
+	if (vary === '*') return
+	const parts = vary.split(',').map((part) => part.trim().toLowerCase())
+	if (!parts.includes('accept-encoding'))
+		headers.append('vary', 'accept-encoding')
+}
 
 /**
  * JSON, and the event stream oRPC answers a streaming batch with (one event
  * per result). Other event streams are live: they stay open and carry little.
  */
-function shouldCompress(request: Request, response: Response): boolean {
-	if (request.method === 'HEAD') return false
-	if (!request.headers.get('accept-encoding')?.includes('gzip')) return false
-	if (response.headers.has('content-encoding')) return false
+function compressionKind(
+	request: Request,
+	response: Response
+): 'batch-stream' | 'json' | null {
+	if (request.method === 'HEAD') return null
+	if (!acceptsGzip(request.headers.get('accept-encoding'))) return null
+	if (response.headers.has('content-encoding')) return null
 	if (NO_TRANSFORM.test(response.headers.get('cache-control') ?? '')) {
-		return false
+		return null
 	}
 	const type = response.headers.get('content-type') ?? ''
 	if (type.startsWith('text/event-stream')) {
 		// BatchHandlerPlugin keys on this header too, whatever the URL.
-		return request.headers.has('x-orpc-batch')
+		return request.headers.has('x-orpc-batch') ? 'batch-stream' : null
 	}
-	return type.startsWith('application/json')
+	return type.startsWith('application/json') ? 'json' : null
 }
 
 /**
@@ -246,6 +284,13 @@ export function mountOrpc<E extends Env, R extends AnyRouter>(
 		sseKeepAlive = true,
 		compress = true
 	} = options
+	if (
+		typeof sseKeepAlive === 'number' &&
+		(!Number.isFinite(sseKeepAlive) || sseKeepAlive <= 0)
+	)
+		throw new RangeError(
+			'orpc-fn: sseKeepAlive must be a positive finite number'
+		)
 	const isExpectedError = options.isExpectedError ?? isExpectedClientError
 	const keepAlive =
 		sseKeepAlive === false
@@ -275,7 +320,8 @@ export function mountOrpc<E extends Env, R extends AnyRouter>(
 		prefix: Path,
 		handler: Handler<InferRouterInitialContext<R>>
 	) => {
-		app.use(`${prefix}/*`, async (c, next) => {
+		const route = prefix === '/' ? '/*' : `${prefix.replace(/\/+$/, '')}/*`
+		app.use(route, async (c, next) => {
 			const timing: RequestTiming = {}
 			const queueMs = (options.queueMs ?? msSinceRequestArrival)(c.req.raw)
 			if (queueMs !== undefined)
@@ -304,14 +350,37 @@ export function mountOrpc<E extends Env, R extends AnyRouter>(
 					})
 				: undefined
 			const responseHeaders = finishOrpcHeaders(response, timed)
-			let body = response.body
-			if (body && compress && shouldCompress(c.req.raw, response)) {
-				body = gzipFlushingEachChunk(body)
-				responseHeaders.set('content-encoding', 'gzip')
-				responseHeaders.delete('content-length')
-				responseHeaders.append('vary', 'accept-encoding')
+			let body: ReadableStream<Uint8Array> | Uint8Array | null = response.body
+			if (body && compress) {
+				const kind = compressionKind(c.req.raw, response)
+				if (kind === 'batch-stream') {
+					body = gzipFlushingEachChunk(body)
+					responseHeaders.set('content-encoding', 'gzip')
+					responseHeaders.delete('content-length')
+					appendVaryAcceptEncoding(responseHeaders)
+				} else if (kind === 'json') {
+					const declaredLength = response.headers.get('content-length')
+					const parsedLength =
+						declaredLength === null ? Number.NaN : Number(declaredLength)
+					if (!(parsedLength < GZIP_MIN_JSON_BYTES)) {
+						const raw = new Uint8Array(await response.arrayBuffer())
+						if (raw.byteLength >= GZIP_MIN_JSON_BYTES) {
+							const compressed = await gzipAsync(raw)
+							body = new Uint8Array(
+								compressed.buffer,
+								compressed.byteOffset,
+								compressed.byteLength
+							)
+							responseHeaders.set('content-encoding', 'gzip')
+							responseHeaders.set('content-length', String(body.byteLength))
+							appendVaryAcceptEncoding(responseHeaders)
+						} else {
+							body = raw
+						}
+					}
+				}
 			}
-			return c.newResponse(body, {
+			return c.newResponse(body as Parameters<typeof c.newResponse>[0], {
 				// oRPC only produces valid HTTP status codes.
 				status: response.status as StatusCode,
 				headers: responseHeaders
@@ -349,12 +418,17 @@ export function mountOrpc<E extends Env, R extends AnyRouter>(
 		let loading: Promise<Handler<InferRouterInitialContext<R>>> | undefined
 		mount(openapi.prefix, {
 			handle: async (request, handleOptions) => {
-				loading ??= createOpenApiHandler(
-					router,
-					openapi,
-					keepAlive,
-					options.onError ? report : undefined
-				)
+				if (!loading) {
+					loading = createOpenApiHandler(
+						router,
+						openapi,
+						keepAlive,
+						options.onError ? report : undefined
+					).catch((error) => {
+						loading = undefined
+						throw error
+					})
+				}
 				return (await loading).handle(request, handleOptions)
 			}
 		})

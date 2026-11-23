@@ -266,7 +266,7 @@ Sanitized tool-name collisions between distinct procedures throw; identical alia
 
 Tool descriptions are the route's `description`, else its `summary`, for MCP, Mastra and `readFnMeta(...).description` alike.
 
-XX, which orpc-fn depends on (`hanzio` ^3.4.0). Your `defineCli` must come from the same `hanzio` copy, so keep your own `hanzio` on a matching major.
+Built on `hanzio/cli`, which orpc-fn depends on (`hanzio` ^3.4.0). Your `defineCli` must come from the same `hanzio` copy, so keep your own `hanzio` on a matching major.
 
 ```ts
 import { defineCli } from 'hanzio/cli'

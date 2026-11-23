@@ -1,17 +1,21 @@
 import type { AnySchema, ErrorMap, Schema } from '@orpc/contract'
-import { type AnyProcedure, ORPCError } from '@orpc/server'
+import {
+	type AnyProcedure,
+	type DecoratedProcedure,
+	ORPCError
+} from '@orpc/server'
 import type { ZodType, z } from 'zod'
-import { RAW_INPUT } from '../timing.js'
+import type { StoredFnMeta } from '../meta.js'
 import { LIVE_GAP, positiveInteger } from './lifecycle.js'
 import { snapshotKey } from './codec.js'
 import type {
 	FnContext,
 	FnDefinition,
-	FnProcedure,
 	FnRouteOptions,
 	HandlerParams,
 	MaybePromise,
-	ProcedureKey
+	ProcedureKey,
+	ResolvedErrorMap
 } from '../types.js'
 import type {
 	AuthFn,
@@ -159,13 +163,25 @@ export type FnLiveReturn<
 	TEmit = never,
 	TErrors extends ErrorMap = Record<never, never>
 > = {
-	procedure: FnProcedure<TDef, TKey, TInput, TOutputSchema, TErrors>
-	subscribe: FnProcedure<
-		TDef,
-		TKey,
+	procedure: DecoratedProcedure<
+		TDef['procedures'][TKey]['initial'],
+		TDef['procedures'][TKey]['current'],
+		TInput,
+		TOutputSchema,
+		ResolvedErrorMap<TDef, TKey, TErrors>,
+		TDef['procedures'][TKey]['meta'] & {
+			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
+		}
+	>
+	subscribe: DecoratedProcedure<
+		TDef['procedures'][TKey]['initial'],
+		TDef['procedures'][TKey]['current'],
 		TInput,
 		Schema<AsyncGenerator<TOutput | TEmit>, AsyncGenerator<TOutput | TEmit>>,
-		TErrors
+		ResolvedErrorMap<TDef, TKey, TErrors>,
+		TDef['procedures'][TKey]['meta'] & {
+			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
+		}
 	>
 	publish: (event: z.input<TEventSchema>) => Promise<void>
 	getSubscriptionChannelName: (params: {
@@ -338,32 +354,32 @@ export async function* streamLiveSnapshots<
 
 		const batch: TEvent[] = [current.value]
 
-		if (coalesceMs) {
-			const endAt = Date.now() + coalesceMs
-			while (Date.now() < endAt && batch.length < maxBatchSize) {
-				const remainingMs = endAt - Date.now()
-				const read = readNext()
-				let timer: ReturnType<typeof setTimeout> | undefined
-				const result = await Promise.race([
-					read,
-					new Promise<typeof TIMEOUT>((resolve) => {
-						timer = setTimeout(resolve, remainingMs, TIMEOUT)
-					})
-				])
+		if (coalesceMs && batch.length < maxBatchSize) {
+			const endAt = performance.now() + coalesceMs
+			let timer: ReturnType<typeof setTimeout> | undefined
+			const deadline = new Promise<typeof TIMEOUT>((resolve) => {
+				timer = setTimeout(resolve, coalesceMs, TIMEOUT)
+			})
+			try {
+				while (batch.length < maxBatchSize && performance.now() < endAt) {
+					const read = readNext()
+					const result = await Promise.race([read, deadline])
+
+					if (result === TIMEOUT) {
+						// Reuse the SAME in-flight read next iteration instead of starting
+						// a new one - this is what prevents the "one behind" stranding.
+						pending = read
+						break
+					}
+
+					if (result.done) {
+						pending = Promise.resolve(result)
+						break
+					}
+					batch.push(result.value)
+				}
+			} finally {
 				clearTimeout(timer)
-
-				if (result === TIMEOUT) {
-					// Reuse the SAME in-flight read next iteration instead of starting
-					// a new one - this is what prevents the "one behind" stranding.
-					pending = read
-					break
-				}
-
-				if (result.done) {
-					pending = Promise.resolve(result)
-					break
-				}
-				batch.push(result.value)
 			}
 		}
 
@@ -400,7 +416,6 @@ type RuntimeParams = Record<string, unknown> & {
 	context: unknown
 	signal: AbortSignal | undefined
 	call: (procedure: AnyProcedure, input: unknown) => Promise<unknown>
-	[RAW_INPUT]: unknown
 }
 
 /** `FnLiveConfig` with the generics erased: what the implementation reads. */
@@ -483,8 +498,21 @@ export function createFnLive(runtime: {
 				})
 			return result.value
 		}
-		const runSnapshot = (params: RuntimeParams) =>
-			params.call(procedure, params[RAW_INPUT])
+		const runSnapshot = async (params: RuntimeParams) => {
+			// `subscribe` already ran builder middleware, input parsing, guards and
+			// extras; invoke the handler directly and validate through `output` so
+			// initial snapshots and reruns do not double-run the procedure pipeline.
+			const value = await runHandler(params)
+			if (!output) return value
+			try {
+				return await output.parseAsync(value)
+			} catch (err) {
+				throw new ORPCError('INTERNAL_SERVER_ERROR', {
+					message: 'Output validation failed',
+					cause: err
+				})
+			}
+		}
 		// Generated streams inherit access policies and metadata; tool adapters reject streams.
 
 		const guardOptions = Object.fromEntries(
@@ -573,8 +601,10 @@ export function createFnLive(runtime: {
 										event === LIVE_GAP ||
 										!live.shouldUpdate ||
 										(await live.shouldUpdate({ ...params, event, previous }))
-									)
+									) {
 										invalidated = true
+										break
+									}
 								if (!invalidated) return undefined
 								const next = await rerun()
 								if (live.skipUnchanged === false) return next

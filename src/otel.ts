@@ -163,31 +163,36 @@ export function createTracing(
 					{ kind: otel.SpanKind[kind] },
 					(span) => {
 						let active: unknown
+						let hasActive = false
 						try {
 							active = otel.context.active()
+							hasActive = true
 						} catch {
 							/* Fall back to the span without scope restoration. */
 						}
-						started = run(span, (step) => {
-							let completed: { value: ReturnType<typeof step> } | undefined
-							let failed: { error: unknown } | undefined
-							try {
-								return otel.context.with(active as never, () => {
+						const scope: StreamScope | undefined = hasActive
+							? (step) => {
+									let completed: { value: ReturnType<typeof step> } | undefined
+									let failed: { error: unknown } | undefined
 									try {
-										const value = step()
-										completed = { value }
-										return value
-									} catch (error) {
-										failed = { error }
-										throw error
+										return otel.context.with(active as never, () => {
+											try {
+												const value = step()
+												completed = { value }
+												return value
+											} catch (error) {
+												failed = { error }
+												throw error
+											}
+										})
+									} catch {
+										if (completed) return completed.value
+										if (failed) throw failed.error
+										return step()
 									}
-								})
-							} catch {
-								if (completed) return completed.value
-								if (failed) throw failed.error
-								return step()
-							}
-						})
+								}
+							: undefined
+						started = run(span, scope)
 						return started
 					}
 				)
@@ -235,24 +240,36 @@ export function errorAttributes(error: unknown, message = true) {
 	}
 }
 
+const SPAN_METHODS = new Set<PropertyKey>([
+	'setAttribute',
+	'setStatus',
+	'recordException',
+	'end'
+])
+const protectedSpans = new WeakSet<object>()
+
 function protectSpan<T extends SpanLike>(span: T): T {
-	return new Proxy(span, {
+	if (protectedSpans.has(span)) return span
+	const cache = new Map<PropertyKey, unknown>()
+	const proxy = new Proxy(span, {
 		get(target, key) {
 			const value = Reflect.get(target, key, target)
 			if (typeof value !== 'function') return value
-			if (
-				['setAttribute', 'setStatus', 'recordException', 'end'].includes(
-					String(key)
-				)
-			)
-				return (...args: unknown[]) => {
-					try {
-						return value.apply(target, args)
-					} catch {
-						/* Ignore exporter failures. */
+			const cached = cache.get(key)
+			if (cached !== undefined) return cached
+			const wrapped = SPAN_METHODS.has(key)
+				? (...args: unknown[]) => {
+						try {
+							return value.apply(target, args)
+						} catch {
+							/* Ignore exporter failures. */
+						}
 					}
-				}
-			return value.bind(target)
+				: value.bind(target)
+			cache.set(key, wrapped)
+			return wrapped
 		}
 	})
+	protectedSpans.add(proxy)
+	return proxy
 }

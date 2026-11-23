@@ -32,13 +32,21 @@ export function createLuaScript(send: RedisSend, source: string) {
 
 	return async function evalScript(keys: string[], args: string[]) {
 		const tail = [String(keys.length), ...keys, ...args]
-		sha ??= await load()
+		if (sha === null) sha = await load()
+		const digest = sha
 		try {
-			return await send('EVALSHA', [sha, ...tail])
+			return await send('EVALSHA', [digest, ...tail])
 		} catch (error) {
 			if (!isNoScriptError(error)) throw error
-			sha = null
-			return await send('EVAL', [source, ...tail])
+			try {
+				// EVAL repopulates Redis's script cache for the same digest.
+				const result = await send('EVAL', [source, ...tail])
+				sha = digest
+				return result
+			} catch (evalError) {
+				if (sha === digest) sha = null
+				throw evalError
+			}
 		}
 	}
 }
@@ -132,6 +140,7 @@ export function createRedisTransport(driver: {
 	let current: {
 		connection: Promise<SubscriberConnection>
 		retire: () => Promise<void>
+		isRetired: () => boolean
 	} | null = null
 	// The open connection of the current generation, once it resolves.
 	let open: SubscriberConnection | null = null
@@ -162,7 +171,9 @@ export function createRedisTransport(driver: {
 		const handlers: SubscriberHandlers = {
 			onMessage(channel, message) {
 				if (retired) return
-				for (const entry of [...(channels.get(channel)?.entries ?? [])]) {
+				const entries = channels.get(channel)?.entries
+				if (!entries) return
+				for (const entry of entries) {
 					try {
 						entry.listener(message)
 					} catch {
@@ -178,18 +189,30 @@ export function createRedisTransport(driver: {
 					.map(([channel]) => channel)
 				void connection
 					.then((open) =>
-						Promise.all(settled.map((channel) => open.resubscribe?.(channel)))
+						Promise.all(
+							settled.map(async (channel) => {
+								await open.resubscribe?.(channel)
+								// If the last listener unsubscribed while resubscribe was in
+								// flight, release the restored broker subscription.
+								if (!retired && !channels.has(channel) && open.resubscribe) {
+									await open.unsubscribe(channel).catch(() => {})
+								}
+							})
+						)
 					)
 					.then(() => {
 						if (retired) return
-						for (const channel of settled)
-							for (const entry of [...(channels.get(channel)?.entries ?? [])]) {
+						for (const channel of settled) {
+							const entries = channels.get(channel)?.entries
+							if (!entries) continue
+							for (const entry of [...entries]) {
 								try {
 									entry.onReconnect?.()
 								} catch {
 									/* Isolate subscriber callbacks. */
 								}
 							}
+						}
 					})
 					.catch((error) => retire(asError(error)))
 			},
@@ -204,8 +227,12 @@ export function createRedisTransport(driver: {
 				if (current?.connection === connection) current = null
 			}
 		)
-		current = { connection, retire: () => retire() }
-		return connection
+		current = {
+			connection,
+			retire: () => retire(),
+			isRetired: () => retired
+		}
+		return current
 	}
 
 	return {
@@ -242,13 +269,21 @@ export function createRedisTransport(driver: {
 			return Array.isArray(items) ? items.map(String) : []
 		},
 		async subscribe(channel, listener, onLost, options) {
-			const connection = await (current?.connection ?? connect())
 			const entry: Entry = {
 				listener,
 				onLost,
 				onReconnect: options?.onReconnect
 			}
-			await unsubscribing.get(channel)
+			let generation: NonNullable<typeof current>
+			let connection: SubscriberConnection
+			while (true) {
+				while (unsubscribing.has(channel)) {
+					await unsubscribing.get(channel)?.catch(() => {})
+				}
+				generation = current ?? connect()
+				connection = await generation.connection
+				if (!generation.isRetired() && !unsubscribing.has(channel)) break
+			}
 			let state = channels.get(channel)
 			if (!state) {
 				const created: ChannelState = {
@@ -280,9 +315,12 @@ export function createRedisTransport(driver: {
 				if (subscribed.entries.size > 0 || channels.get(channel) !== subscribed)
 					return
 				channels.delete(channel)
-				const done = connection.unsubscribe(channel).finally(() => {
-					if (unsubscribing.get(channel) === done) unsubscribing.delete(channel)
-				})
+				const done = Promise.resolve()
+					.then(() => connection.unsubscribe(channel))
+					.finally(() => {
+						if (unsubscribing.get(channel) === done)
+							unsubscribing.delete(channel)
+					})
 				unsubscribing.set(channel, done)
 				await done
 			}

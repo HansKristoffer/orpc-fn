@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { readFile, writeFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { AnyRouter } from '@orpc/server'
 import { CliError, defineCli, defineCommand } from 'hanzio/cli'
@@ -28,7 +28,13 @@ TypeScript routers with a runtime that loads .ts (bun, tsx, node >= 22.18).`,
 		check: z.boolean().describe('Exit 1 when the file is missing or stale')
 	}),
 	run: async (input) => {
-		const [modulePath = '', exportName = 'default'] = input.module.split('#')
+		const hashIndex = input.module.lastIndexOf('#')
+		const modulePath =
+			hashIndex === -1 ? input.module : input.module.slice(0, hashIndex)
+		const exportName =
+			hashIndex === -1
+				? 'default'
+				: input.module.slice(hashIndex + 1) || 'default'
 		const loaded: Record<string, unknown> = await import(
 			pathToFileURL(resolve(modulePath)).href
 		)
@@ -49,6 +55,7 @@ TypeScript routers with a runtime that loads .ts (bun, tsx, node >= 22.18).`,
 			throw new CliError(
 				`orpc-fn: ${input.out} is stale; rerun without --check to update it`
 			)
+		await mkdir(dirname(out), { recursive: true })
 		await writeFile(out, source)
 		return `orpc-fn: wrote ${input.out}`
 	}
