@@ -1,5 +1,6 @@
 import { type AnyProcedure, call } from '@orpc/server'
-import { readFnMeta } from './meta.js'
+import { procedureDefinition } from './compatibility.js'
+import { FN_META_KEY, type StoredFnMeta } from './meta.js'
 import { createTracing, type Tracing } from './otel.js'
 import type {
 	ProcedureContext,
@@ -41,7 +42,10 @@ export function createBoundCall<TContext>(
 	tracing: Tracing = noTracing
 ): BoundCall<TContext> {
 	return ((procedure: AnyProcedure, input: unknown) => {
-		const name = readFnMeta(procedure).name ?? 'unknown_procedure'
+		const stored = procedureDefinition(procedure).meta?.[FN_META_KEY] as
+			| StoredFnMeta
+			| undefined
+		const name = stored?.name ?? 'unknown_procedure'
 		return tracing.inSpan(`call: ${name}`, 'INTERNAL', async (span) => {
 			signal?.throwIfAborted()
 			span?.setAttribute('rpc.method', name)

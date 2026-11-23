@@ -60,7 +60,7 @@ export function bunRedisTransport(
 				// throws synchronously outside subscriber mode.
 				resubscribe: async (channel) => {
 					await Promise.resolve()
-						.then(() => subscriber.unsubscribe(channel))
+						.then(() => subscriber.unsubscribe(channel, dispatch))
 						.catch(() => {})
 					return subscriber.subscribe(channel, dispatch)
 				},

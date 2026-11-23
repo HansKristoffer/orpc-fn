@@ -78,9 +78,11 @@ export function createRpcLink<T extends ClientContext = ClientContext>(
 				],
 				exclude: ({ path, context }) =>
 					isStreamCall(context) ||
-					streams.has(JSON.stringify(path)) ||
+					(streams.size > 0 && streams.has(JSON.stringify(path))) ||
 					exclude(path) ||
-					(groups === undefined && Object.keys(context).length > 0)
+					(groups === undefined &&
+						(Object.keys(context).length > 0 ||
+							Object.getOwnPropertySymbols(context).length > 0))
 			}),
 			...plugins
 		]

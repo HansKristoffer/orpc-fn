@@ -27,8 +27,9 @@ export interface IORedisLike {
 /**
  * `PubSubTransport` for ioredis. Subscriptions use a dedicated connection
  * (`client.duplicate()` unless `subscriber` is given); ioredis re-subscribes
- * after reconnects itself (`autoResubscribe`), so no `resubscribe` is needed. `onError` receives connection
- * errors that ioredis is already retrying.
+ * after reconnects itself when `autoResubscribe` is enabled (the default), so
+ * explicit `resubscribe` only runs when `autoResubscribe` is disabled.
+ * `onError` receives connection errors that ioredis is already retrying.
  *
  * Call `close()` on shutdown to disconnect the subscriber it created.
  */
@@ -64,12 +65,19 @@ export function ioredisTransport(
 			subscriber.on('message', onMessage)
 			subscriber.on('error', onError)
 			subscriber.on('end', onEnd)
+			const autoResubscribe =
+				(subscriber as { options?: { autoResubscribe?: boolean } }).options
+					?.autoResubscribe !== false
 			return {
 				subscribe: (channel) => {
 					ours.add(channel)
 					return subscriber.subscribe(channel)
 				},
-				resubscribe: (channel: string) => subscriber.subscribe(channel),
+				...(autoResubscribe
+					? {}
+					: {
+							resubscribe: (channel: string) => subscriber.subscribe(channel)
+						}),
 				unsubscribe: (channel) => {
 					ours.delete(channel)
 					return subscriber.unsubscribe(channel)

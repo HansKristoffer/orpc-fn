@@ -140,4 +140,28 @@ describe('invalidationStream', () => {
 		expect((await next).done).toBe(true)
 		await deals.closed
 	})
+
+	test('supports BigInt in mapped events, bounds maxQueueSize, and ends immediately on empty sources', async () => {
+		const empty = invalidationStream({ context: {}, sources: {} })
+		expect((await empty.next()).done).toBe(true)
+
+		const deals = source<{ id: bigint }>('test.dealsBigInt')
+		const stream = invalidationStream({
+			context: {},
+			sources: { deal: deals.procedure },
+			events: { deal: (event) => ({ id: event.id }) },
+			maxQueueSize: 2
+		})
+		deals.push({ id: 1n })
+		expect((await stream.next()).value).toEqual({ domain: 'deal', id: 1n })
+		deals.push({ id: 2n })
+		deals.push({ id: 3n })
+		deals.push({ id: 4n })
+		deals.end()
+		await deals.closed
+		// maxQueueSize: 2 drops 2n and keeps 3n, 4n.
+		expect((await stream.next()).value).toEqual({ domain: 'deal', id: 3n })
+		expect((await stream.next()).value).toEqual({ domain: 'deal', id: 4n })
+		expect((await stream.next()).done).toBe(true)
+	})
 })

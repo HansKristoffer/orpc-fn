@@ -223,6 +223,29 @@ describe('Expo', () => {
 			globalThis.fetch = original
 		}
 	})
+
+	test('web: createBetterAuthExpoLink does not call getCookie or set Cookie header', async () => {
+		let cookieCalls = 0
+		let seenHeaders: Headers | undefined
+		const link = createBetterAuthExpoLink({
+			url,
+			native: false,
+			fetch: expoFetch,
+			webFetch: async (input, init) => {
+				const request = new Request(input, init)
+				seenHeaders = request.headers
+				return serve(request)
+			},
+			getCookie: () => {
+				cookieCalls++
+				return 'session=should-not-send'
+			}
+		})
+		const webClient: RouterClient<typeof router> = createORPCClient(link)
+		await webClient.echo({ text: 'web' })
+		expect(cookieCalls).toBe(0)
+		expect(seenHeaders?.has('cookie')).toBe(false)
+	})
 })
 
 test('manifest excludes aliased streaming routes with ordinary names from batches', async () => {
@@ -280,6 +303,31 @@ test('a stream call marked with streamCall stays out of batches without a manife
 	expect((await stream.next()).value).toEqual({ count: 0 })
 	expect(requests).toBe(2)
 	abort.abort()
+})
+
+test('symbol-keyed client context keeps calls out of batches', async () => {
+	const customMark = Symbol('no-batch')
+	const mixedApp = new Hono()
+	let requests = 0
+	mixedApp.use('*', async (_c, next) => {
+		requests++
+		await next()
+	})
+	mountOrpc(mixedApp, { router: { echo }, rpcPrefix: '/rpc' })
+	const client: RouterClient<{ echo: typeof echo }, { [customMark]?: true }> =
+		createORPCClient(
+			createRpcLink({
+				url,
+				fetch: (request) => Promise.resolve(mixedApp.fetch(request))
+			})
+		)
+	const [a, b] = await Promise.all([
+		client.echo({ text: 'marked' }, { context: { [customMark]: true } }),
+		client.echo({ text: 'plain' })
+	])
+	expect(a.text).toBe('marked')
+	expect(b.text).toBe('plain')
+	expect(requests).toBe(2)
 })
 
 test('generic Expo headers support async context and browser fetch injection', async () => {

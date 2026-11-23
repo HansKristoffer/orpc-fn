@@ -161,3 +161,47 @@ test('Mastra full input validation and execution preserves raw transforming inpu
 		)
 	).toBe(2026)
 })
+
+test('MCP formatError applies to input validation failures too', async () => {
+	const { fn } = createFn({
+		procedures: { public: os },
+		default: 'public',
+		logger: () => quiet
+	})
+	const route = fn({
+		name: 'strict.input',
+		input: z.object({ count: z.number() }),
+		handler: ({ input }) => input.count
+	})
+	const server = new Server(
+		{ name: 'test', version: '1' },
+		{ capabilities: { tools: {} } }
+	)
+	const client = new Client({ name: 'test-client', version: '1' })
+	registerMcpTools(
+		server,
+		{ route },
+		{
+			filter: () => true,
+			context: () => ({}),
+			formatError: (_error, { tool, expected }) => `custom:${tool}:${expected}`
+		}
+	)
+	const [clientTransport, serverTransport] =
+		InMemoryTransport.createLinkedPair()
+	await server.connect(serverTransport)
+	await client.connect(clientTransport)
+	try {
+		const res = await client.callTool({
+			name: 'strict-input',
+			arguments: { count: 'nope' }
+		})
+		expect(res.isError).toBe(true)
+		expect(res.content).toEqual([
+			{ type: 'text', text: 'custom:strict-input:true' }
+		])
+	} finally {
+		await client.close()
+		await server.close()
+	}
+})

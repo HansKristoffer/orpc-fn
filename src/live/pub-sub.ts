@@ -1,19 +1,20 @@
 import type { Schema } from '@orpc/contract'
-import { ORPCError } from '@orpc/server'
+import { type DecoratedProcedure, ORPCError } from '@orpc/server'
 import type { ZodObject, ZodRawShape, ZodType, z } from 'zod'
 import type { FnLogger } from '../logger.js'
+import type { StoredFnMeta } from '../meta.js'
 import {
 	errorAttributes,
 	errorMessageOf,
 	type SpanLike,
 	type Tracing
 } from '../otel.js'
+import { onStreamEnd } from '../stream.js'
 import type {
-	GuardOptions,
 	FnContext,
 	FnDefinition,
-	FnProcedure,
 	FnRouteOptions,
+	GuardOptions,
 	MaybePromise,
 	ProcedureKey,
 	ProcedureOption
@@ -38,6 +39,14 @@ import type {
 export type ObjectSchema = ZodObject<ZodRawShape, z.core.$ZodObjectConfig>
 
 /**
+ * Keys present on both `TInput` and `TEventData` keep their non-optional union
+ * type; keys present on only one side remain optional.
+ */
+type SharedChannelParams<TInput, TEventData> = {
+	[K in keyof TInput & keyof TEventData]: TInput[K] | TEventData[K]
+} & Partial<Omit<TInput, keyof TEventData> & Omit<TEventData, keyof TInput>>
+
+/**
  * A static channel name, or one derived from (partial) subscriber input or
  * event data.
  */
@@ -48,7 +57,7 @@ export type ChannelDefinition<TInput, TEventData, TContext = unknown> =
 			publish: (event: TEventData) => string
 	  }
 	| ((
-			params: Partial<TInput> | Partial<TEventData>,
+			params: SharedChannelParams<TInput, TEventData>,
 			context?: TContext
 	  ) => string)
 
@@ -160,14 +169,18 @@ export type PubSub<
 	TEventSchema extends ZodType,
 	TKey extends ProcedureKey<TDef>
 > = {
-	subscribe: FnProcedure<
-		TDef,
-		TKey,
+	subscribe: DecoratedProcedure<
+		TDef['procedures'][TKey]['initial'],
+		TDef['procedures'][TKey]['current'],
 		TInputSchema,
 		Schema<
 			AsyncGenerator<z.output<TEventSchema>, void, unknown>,
 			AsyncGenerator<z.output<TEventSchema>, void, unknown>
-		>
+		>,
+		TDef['procedures'][TKey]['errors'],
+		TDef['procedures'][TKey]['meta'] & {
+			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
+		}
 	>
 	publish: (data: z.input<TEventSchema>) => Promise<void>
 	/** Publish a batch in one atomic round-trip; items may target different channels. */
@@ -314,52 +327,92 @@ export function createBoundedEventQueue<T>(opts: {
 	onDrop?: () => void
 	onDepth?: (depth: number) => void
 }) {
-	positiveInteger(opts.maxSize, 'maxSize')
-	const items: T[] = []
+	const capacity = positiveInteger(opts.maxSize, 'maxSize')
+	// Start small and grow lazily up to `capacity` so idle subscribers do not
+	// allocate full `maxSize` backing arrays; all operations stay O(1) amortized.
+	let bufCap = Math.min(capacity, 16)
+	let items: Array<T | undefined> = new Array(bufCap)
+	let head = 0
+	let size = 0
 	// The queued marker while an overflow episode is open. Created once per
 	// episode, so identity is the exact "is this the pending marker?" test.
 	let pendingOverflowMarker: T | null = null
 
+	const pushBack = (value: T) => {
+		if (size === bufCap && bufCap < capacity) {
+			const nextCap = Math.min(capacity, bufCap * 2)
+			const next: Array<T | undefined> = new Array(nextCap)
+			for (let i = 0; i < size; i++) {
+				next[i] = items[(head + i) % bufCap]
+			}
+			items = next
+			head = 0
+			bufCap = nextCap
+		}
+		items[(head + size) % bufCap] = value
+		size++
+	}
+
 	return {
 		get length() {
-			return items.length
+			return size
 		},
 		enqueue(data: T): void {
 			try {
-				if (items.length >= opts.maxSize) {
+				if (size >= capacity) {
 					if (pendingOverflowMarker !== null) {
 						// Episode already signalled: drop the oldest non-marker message
-						// and enqueue WITHOUT a second marker.
-						const dropIndex = items[0] === pendingOverflowMarker ? 1 : 0
-						if (dropIndex >= items.length) {
-							// Degenerate maxSize: the queue is just the pending marker, so
-							// the new event is the drop - the marker's resync covers it.
+						// in O(1) and enqueue WITHOUT a second marker.
+						if (items[head] === pendingOverflowMarker) {
+							if (size <= 1) {
+								// Degenerate maxSize === 1: the queue is just the pending marker,
+								// so the new event is the drop - the marker's resync covers it.
+								safely(opts.onDrop)
+								return
+							}
+							const nextHead = (head + 1) % bufCap
+							items[nextHead] = pendingOverflowMarker
+							items[head] = undefined
+							head = nextHead
+							size--
 							safely(opts.onDrop)
+							pushBack(data)
 							return
 						}
-						items.splice(dropIndex, 1)
+						items[head] = undefined
+						head = (head + 1) % bufCap
+						size--
 						safely(opts.onDrop)
-						items.push(data)
+						pushBack(data)
 						return
 					}
-					items.shift()
+					items[head] = undefined
+					head = (head + 1) % bufCap
+					size--
 					safely(opts.onDrop)
 					const marker = opts.createOverflowMarker?.() ?? null
 					if (marker !== null) {
 						pendingOverflowMarker = marker
-						items.push(marker)
+						pushBack(marker)
 						return
 					}
 				}
-				items.push(data)
+				pushBack(data)
 			} finally {
-				safely(() => opts.onDepth?.(items.length))
+				safely(() => opts.onDepth?.(size))
 			}
 		},
 		dequeue(): T | undefined {
-			const next = items.shift()
-			safely(() => opts.onDepth?.(items.length))
-			if (next !== undefined && next === pendingOverflowMarker) {
+			if (size === 0) {
+				safely(() => opts.onDepth?.(0))
+				return undefined
+			}
+			const next = items[head] as T
+			items[head] = undefined
+			head = (head + 1) % bufCap
+			size--
+			safely(() => opts.onDepth?.(size))
+			if (next === pendingOverflowMarker) {
 				pendingOverflowMarker = null
 			}
 			return next
@@ -394,20 +447,16 @@ export function createSubscriberDelivery<T>(options: {
 	})
 	let closed = false
 	let failure: unknown
-	let wake: (() => void) | null = null
-	const notify = () => {
-		wake?.()
-		wake = null
-	}
+	let waiting: ((item: Item | undefined) => void) | null = null
 
 	async function* events(): AsyncGenerator<T, void, unknown> {
 		while (!closed) {
-			const item = queue.dequeue()
+			let item = queue.dequeue()
 			if (!item) {
-				await new Promise<void>((resolve) => {
-					wake = resolve
+				item = await new Promise<Item | undefined>((resolve) => {
+					waiting = resolve
 				})
-				continue
+				if (!item || closed) break
 			}
 			if (!item.marker && options.accept) {
 				try {
@@ -426,8 +475,16 @@ export function createSubscriberDelivery<T>(options: {
 	return {
 		push(data: T, marker = false) {
 			if (closed) return
-			queue.enqueue({ data, marker })
-			notify()
+			const item = { data, marker }
+			if (waiting) {
+				// Deliver directly to a parked reader so a synchronous burst never
+				// displaces an item the consumer is already waiting for.
+				const resolve = waiting
+				waiting = null
+				resolve(item)
+				return
+			}
+			queue.enqueue(item)
 		},
 		events: events(),
 		/** Stop delivering; a parked read ends at once. */
@@ -436,7 +493,11 @@ export function createSubscriberDelivery<T>(options: {
 			failure = error
 			closed = true
 			safely(() => options.onDepth?.(0))
-			notify()
+			if (waiting) {
+				const resolve = waiting
+				waiting = null
+				resolve(undefined)
+			}
 		}
 	}
 }
@@ -763,7 +824,7 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 							const message = decodeMessage(raw)
 							const parsed = await eventSchema.parseAsync(message.value)
 							if (closed) break
-							for (const sub of [...subscribers])
+							for (const sub of subscribers)
 								if (sub.isActive()) {
 									try {
 										sub.push(parsed, message.id)
@@ -1055,6 +1116,7 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 
 			let replaying: Array<{ data: unknown; id: string | undefined }> | null =
 				useBacklog ? [] : null
+			let replayHead = 0
 			let replayGap = false
 			// Overlap exists only between the backlog and live events that arrive
 			// while it replays, so ids are recorded only then: at most twice
@@ -1069,8 +1131,12 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 			const push = (data: unknown, id?: string) => {
 				messageCount++
 				if (replaying) {
-					if (replaying.length >= maxReplay) {
-						replaying.shift()
+					if (replaying.length - replayHead >= maxReplay) {
+						replayHead++
+						if (replayHead >= maxReplay && replayHead * 2 >= replaying.length) {
+							replaying = replaying.slice(replayHead)
+							replayHead = 0
+						}
 						replayGap = true
 						metric({
 							type: 'drop',
@@ -1087,7 +1153,7 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 					metric({
 						type: 'queue',
 						stage: 'replay',
-						depth: replaying.length,
+						depth: replaying.length - replayHead,
 						limit: maxReplay,
 						name,
 						channel: channelName
@@ -1163,19 +1229,10 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 						)
 						span?.setAttribute('pubsub.backlog_count', items.length)
 						for (const raw of items.slice(-maxReplay)) {
-							if (closed) break
+							if (closed || initializing.signal.aborted) break
+							let message: { id: string | undefined; value: unknown }
 							try {
-								const message = decodeMessage(raw)
-								if (!dedupe(message.id)) {
-									messageCount++
-									delivery.push(
-										await waitFor(
-											eventSchema.parseAsync(message.value),
-											initializationTimeout,
-											initializing.signal
-										)
-									)
-								}
+								message = decodeMessage(raw)
 							} catch (error) {
 								metric({
 									type: 'parseError',
@@ -1184,11 +1241,42 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 									name,
 									channel: channelName
 								})
-								/* Malformed backlog entries are skipped. */
+								continue
 							}
+							if (dedupe(message.id)) continue
+							let parsed: unknown
+							try {
+								parsed = await waitFor(
+									eventSchema.parseAsync(message.value),
+									initializationTimeout,
+									initializing.signal
+								)
+							} catch (error) {
+								if (
+									closed ||
+									initializing.signal.aborted ||
+									(error instanceof Error &&
+										error.message ===
+											'orpc-fn: subscription initialization timed out')
+								) {
+									throw error
+								}
+								metric({
+									type: 'parseError',
+									stage: 'replay',
+									error,
+									name,
+									channel: channelName
+								})
+								/* Malformed backlog entries are skipped. */
+								continue
+							}
+							messageCount++
+							delivery.push(parsed)
 						}
 						if (items.length > maxReplay) replayGap = true
 					} catch (error) {
+						if (closed || initializing.signal.aborted) throw error
 						replayGap = true
 						subscriberLogger.warn('pubsub.replay_failed', {
 							channel: channelName,
@@ -1196,17 +1284,21 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 						})
 					}
 				}
-				for (const { data, id } of replaying ?? [])
-					if (!dedupe(id)) delivery.push(data)
-				replaying = null
-				metric({
-					type: 'queue',
-					stage: 'replay',
-					depth: 0,
-					limit: maxReplay,
-					name,
-					channel: channelName
-				})
+				if (replaying) {
+					for (let i = replayHead; i < replaying.length; i++) {
+						const entry = replaying[i]!
+						if (!dedupe(entry.id)) delivery.push(entry.data)
+					}
+					replaying = null
+					metric({
+						type: 'queue',
+						stage: 'replay',
+						depth: 0,
+						limit: maxReplay,
+						name,
+						channel: channelName
+					})
+				}
 				if (replayGap && !closed) gap()
 			} catch (error) {
 				if (!closed) {
@@ -1228,7 +1320,14 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 				}
 			}
 
-			return { events: events(), close: () => close(), isClosed: () => closed }
+			// Wrap with `onStreamEnd` so `.return()` before the first `.next()`
+			// (e.g. from `bus.listen()`) still releases the subscription and span.
+			const stream = onStreamEnd(events(), () => close()) as AsyncGenerator<
+				unknown,
+				void,
+				unknown
+			>
+			return { events: stream, close: () => close(), isClosed: () => closed }
 		}
 
 		const { publish, publishMany } = createChannelPublisher({
@@ -1403,12 +1502,21 @@ export function createLiveRuntime(options: LiveRuntimeOptions) {
 				throw new RangeError('orpc-fn: overMs must be finite and nonnegative')
 			const step = overMs / Math.max(1, cleanups.length - 1)
 			return (async () => {
-				for (const [index, cleanup] of cleanups.entries()) {
-					if (index > 0)
-						await new Promise((resolve) => setTimeout(resolve, step))
+				let closedCount = 0
+				for (const cleanup of cleanups) {
+					if (terminated) break
+					if (!activeSubscriberCleanups.has(cleanup)) continue
+					if (closedCount > 0) {
+						await new Promise<void>((resolve) => {
+							const timer = setTimeout(resolve, step)
+							;(timer as { unref?: () => void }).unref?.()
+						})
+						if (terminated || !activeSubscriberCleanups.has(cleanup)) continue
+					}
 					run(cleanup)
+					closedCount++
 				}
-				return cleanups.length
+				return closedCount
 			})()
 		}
 	}

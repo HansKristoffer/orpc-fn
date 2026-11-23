@@ -33,13 +33,13 @@ import {
 } from './otel.js'
 import {
 	EXTRAS_OVERRIDE,
-	RAW_INPUT,
 	REQUEST_TIMING,
 	type InvocationTiming
 } from './timing.js'
 import { createRouter } from './router.js'
 import {
 	type ProcedureHookParams,
+	type ProcedureSpecOf,
 	type CompletedHookEvent,
 	type CurrentContextOf,
 	type BuilderLike,
@@ -64,12 +64,13 @@ type RuntimeOptions = {
 	extras?: (params: Record<string, unknown>) => unknown
 	extrasByProcedure?: Record<
 		string,
-		(params: Record<string, unknown>) => unknown
+		((params: Record<string, unknown>) => unknown) | undefined
 	>
 	guards?: Record<
 		string,
 		(value: unknown, params: GuardParams<unknown, unknown>) => unknown
 	>
+	tags?: readonly string[]
 	otel?: OtelApiLike
 	logger?: (scope: string, span: SpanLike | undefined) => FnLogger
 	spanAttributes?: (params: {
@@ -83,6 +84,26 @@ type RuntimeOptions = {
 	errorMessages?: 'all' | 'unexpected'
 	routePolicy?: (route: Record<string, unknown>) => void
 	pubsub?: PubSubRuntimeOptions
+}
+
+const INVOCATION = Symbol('orpc-fn.invocation')
+const HANDLER_PARAM_KEYS = [
+	'input',
+	'context',
+	'call',
+	'signal',
+	'span',
+	'logger',
+	'errors',
+	'lastEventId'
+] as const
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		typeof (value as PromiseLike<unknown>).then === 'function'
+	)
 }
 
 /** What `routePolicy` sees of each route when it is defined. */
@@ -229,7 +250,7 @@ type Definition<
 		never
 	>
 > = {
-	procedures: TProcedures
+	procedures: { [K in keyof TProcedures]: ProcedureSpecOf<TProcedures[K]> }
 	default: TDefault
 	extras: TExtras
 	extrasByProcedure: TScoped
@@ -240,15 +261,25 @@ type Definition<
 	logger: TLogger
 }
 
+type AllExtras<TDef extends FnDefinition> =
+	| TDef['extras']
+	| (TDef extends { extrasByProcedure: infer E }
+			? [keyof E] extends [never]
+				? never
+				: NonNullable<E[keyof E]>
+			: never)
+
+type UnionKeys<T> = T extends unknown ? keyof T : never
+type PropertyValue<T, K extends PropertyKey> = T extends unknown
+	? K extends keyof T
+		? T[K]
+		: never
+	: never
+
 /** Extras a test call may replace: any shared or scoped extra. */
-export type TestCallExtras<TDef extends FnDefinition> = Partial<
-	TDef['extras']
-> &
-	(TDef extends { extrasByProcedure: infer E }
-		? [keyof E] extends [never]
-			? object
-			: Partial<NonNullable<E[keyof E]>>
-		: object)
+export type TestCallExtras<TDef extends FnDefinition> = {
+	[K in UnionKeys<AllExtras<TDef>>]?: PropertyValue<AllExtras<TDef>, K>
+}
 
 export type FnFactory<TDef extends FnDefinition> = {
 	fn: Fn<TDef>
@@ -352,14 +383,17 @@ export function createFn<
 		return expected
 	}
 	const tracing = createTracing(runtime.otel, isExpectedError)
-	const defaultLogger = protectLogger(createDefaultLogger('fn'))
+	const defaultLogger = createDefaultLogger('fn')
 	const createLogger = (
 		scope: string,
 		span: SpanLike | undefined
 	): FnLogger => {
+		if (!runtime.logger) {
+			return scope === 'fn' ? defaultLogger : createDefaultLogger(scope)
+		}
 		try {
 			return protectLogger(
-				runtime.logger?.(scope, span) ??
+				runtime.logger(scope, span) ??
 					(scope === 'fn' ? defaultLogger : createDefaultLogger(scope))
 			)
 		} catch {
@@ -393,6 +427,20 @@ export function createFn<
 			)
 		}
 	}
+	if (runtime.extrasByProcedure !== undefined) {
+		for (const [key, factory] of Object.entries(runtime.extrasByProcedure)) {
+			if (factory === undefined) continue
+			if (!Object.hasOwn(runtime.procedures, key))
+				throw new TypeError(
+					`orpc-fn: extrasByProcedure references unknown procedure "${key}"`
+				)
+			if (typeof factory !== 'function')
+				throw new TypeError(
+					`orpc-fn: extrasByProcedure "${key}" must be a function`
+				)
+		}
+	}
+	const allowedTags = runtime.tags ? new Set(runtime.tags) : undefined
 
 	const resolveKey = (procedure: string | undefined, name: string) => {
 		const key = procedure ?? runtime.default
@@ -409,14 +457,12 @@ export function createFn<
 		resolveKey
 	)
 
-	const invocation = Symbol('orpc-fn.invocation')
 	type Invocation = {
 		span: SpanLike | undefined
 		logger: FnLogger
 		input: unknown
 		context: unknown
 		handlerStarted: boolean
-		rawInput: unknown
 	}
 	// The overload-to-runtime boundary is adapted once at the returned factory.
 	const fn = (routeOptions: Record<string, unknown>): AnyProcedure => {
@@ -432,10 +478,14 @@ export function createFn<
 			guardResolvers,
 			route,
 			guardChecks
-		} = normalizeRoute(routeOptions, isGuard)
+		} = normalizeRoute(routeOptions, isGuard, allowedTags)
 		const key = resolveKey(procedure, name)
 		const staticGuards = Object.fromEntries(guardChecks)
-		const dynamicGuards = Object.keys(guardResolvers)
+		const resolverEntries = Object.entries(guardResolvers)
+		const dynamicGuards = resolverEntries.map(([guard]) => guard)
+		const hasStaticGuards = guardChecks.length > 0
+		const hasDynamicGuards = resolverEntries.length > 0
+		const scopedExtras = runtime.extrasByProcedure?.[key]
 		runtime.routePolicy?.({
 			name,
 			procedure: key,
@@ -458,77 +508,101 @@ export function createFn<
 			...(errors ? { errors } : {}),
 			handler: async (params) => {
 				const { context, signal } = params
-				const state = context[invocation] as Invocation
-				const {
-					[invocation]: _invocation,
-					[EXTRAS_OVERRIDE]: overrides,
-					...observedContext
-				} = context
-				state.context = observedContext
+				const state = context[INVOCATION] as Invocation
+				const overrides = context[EXTRAS_OVERRIDE] as object | undefined
+				state.context = context
 				state.input = params.input
 				state.handlerStarted = true
-				try {
-					const attributes = runtime.spanAttributes?.({
-						context,
-						name,
-						procedure: key,
-						meta
-					})
-					for (const [attribute, value] of Object.entries(attributes ?? {}))
-						if (value !== undefined) state.span?.setAttribute(attribute, value)
-				} catch (error) {
-					state.logger.warn('spanAttributes hook failed', {
-						error: errorMessageOf(error)
-					})
-				}
-				const resolvedChecks = [...guardChecks]
-				for (const [guard, resolver] of Object.entries(guardResolvers)) {
-					const value = await resolver({ input: params.input, context, signal })
-					if (value !== undefined) resolvedChecks.push([guard, value])
-				}
-				for (const [guard, value] of resolvedChecks) {
-					const result = await guards[guard]?.(value, {
-						context,
-						input: params.input,
-						name,
-						procedure: key,
-						meta,
-						signal
-					})
-					if (result === false)
-						throw new ORPCError('FORBIDDEN', {
-							message: `Guard "${guard}" denied this call`
+				if (runtime.spanAttributes) {
+					try {
+						const attributes = runtime.spanAttributes({
+							context,
+							name,
+							procedure: key,
+							meta
 						})
-					if (result !== undefined && result !== true)
-						throw new TypeError(
-							`orpc-fn: guard "${guard}" must return void or boolean`
-						)
+						if (attributes) {
+							for (const [attribute, value] of Object.entries(attributes))
+								if (value !== undefined)
+									state.span?.setAttribute(attribute, value)
+						}
+					} catch (error) {
+						state.logger.warn('spanAttributes hook failed', {
+							error: errorMessageOf(error)
+						})
+					}
 				}
-				const extraParams = {
-					context,
-					span: state.span,
-					signal,
-					name,
-					procedure: key
+				if (hasStaticGuards || hasDynamicGuards) {
+					let checks: readonly [string, unknown][] = guardChecks
+					if (hasDynamicGuards) {
+						const resolved: Array<[string, unknown]> = [...guardChecks]
+						for (const [guard, resolver] of resolverEntries) {
+							const value = await resolver({
+								input: params.input,
+								context,
+								signal
+							})
+							if (value !== undefined) resolved.push([guard, value])
+						}
+						checks = resolved
+					}
+					for (const [guard, value] of checks) {
+						const rawResult = guards[guard]?.(value, {
+							context,
+							input: params.input,
+							name,
+							procedure: key,
+							meta,
+							signal
+						})
+						const result = isPromiseLike(rawResult)
+							? await rawResult
+							: rawResult
+						if (result === false)
+							throw new ORPCError('FORBIDDEN', {
+								message: `Guard "${guard}" denied this call`
+							})
+						if (result !== undefined && result !== true)
+							throw new TypeError(
+								`orpc-fn: guard "${guard}" must return void or boolean`
+							)
+					}
 				}
-				const shared = await runtime.extras?.(extraParams)
-				const scoped = await runtime.extrasByProcedure?.[key]?.(extraParams)
-				const extras = {
-					...(shared as object | undefined),
-					...(scoped as object | undefined),
-					...(overrides as object | undefined)
+				let shared: unknown
+				let scoped: unknown
+				if (runtime.extras || scopedExtras) {
+					const extraParams = {
+						context,
+						span: state.span,
+						signal,
+						name,
+						procedure: key
+					}
+					if (runtime.extras) {
+						const maybeShared = runtime.extras(extraParams)
+						shared = isPromiseLike(maybeShared)
+							? await maybeShared
+							: maybeShared
+					}
+					if (scopedExtras) {
+						const maybeScoped = scopedExtras(extraParams)
+						scoped = isPromiseLike(maybeScoped)
+							? await maybeScoped
+							: maybeScoped
+					}
 				}
-				if (extras && typeof extras === 'object') {
-					for (const reserved of [
-						'input',
-						'context',
-						'call',
-						'signal',
-						'span',
-						'logger',
-						'errors',
-						'lastEventId'
-					]) {
+				const hasExtras =
+					shared !== undefined ||
+					scoped !== undefined ||
+					overrides !== undefined
+				let extras: object | undefined
+				if (hasExtras) {
+					extras = {
+						...(shared as object | undefined),
+						...(scoped as object | undefined),
+						...overrides
+					}
+					for (const reserved of HANDLER_PARAM_KEYS) {
 						if (Object.hasOwn(extras, reserved))
 							throw new TypeError(
 								`orpc-fn: extra "${reserved}" shadows a handler parameter`
@@ -536,7 +610,7 @@ export function createFn<
 					}
 				}
 				return handler({
-					...(extras as object | undefined),
+					...extras,
 					input: params.input,
 					context,
 					call: createBoundCall(context, signal, tracing),
@@ -544,23 +618,21 @@ export function createFn<
 					span: state.span,
 					logger: state.logger,
 					errors: params.errors,
-					lastEventId: params.lastEventId,
-					[RAW_INPUT]: state.rawInput
+					lastEventId: params.lastEventId
 				})
 			}
 		})
 		// Prepending middleware shifts oRPC's validation indexes, covering auth,
 		// input validation, output validation, and the final stream lifetime.
 		return os
-			.use(async ({ context, next }, rawInput) => {
+			.use(async ({ context, next }) => {
 				const started = performance.now()
 				const state: Invocation = {
 					span: undefined,
 					logger: defaultLogger,
 					input: undefined,
 					context,
-					handlerStarted: false,
-					rawInput
+					handlerStarted: false
 				}
 				const result = await tracing.inSpan(
 					name,
@@ -571,7 +643,7 @@ export function createFn<
 						span?.setAttribute('fn.operation', name)
 						span?.setAttribute('fn.procedure', key)
 						try {
-							const result = await next({ context: { [invocation]: state } })
+							const result = await next({ context: { [INVOCATION]: state } })
 							if (isAsyncIteratorObject(result.output) !== stream) {
 								if (isAsyncIteratorObject(result.output)) {
 									try {
@@ -589,7 +661,7 @@ export function createFn<
 							const timing = (context as Record<symbol, unknown>)[
 								REQUEST_TIMING
 							] as InvocationTiming | undefined
-							if (timing && !(context as Record<symbol, unknown>)[invocation]) {
+							if (timing && !(context as Record<symbol, unknown>)[INVOCATION]) {
 								timing.procedureMs += performance.now() - started
 								timing.calls++
 							}
@@ -621,12 +693,23 @@ export function createFn<
 	const logCompleted = (logger: FnLogger, event: FnCompletedEvent) => {
 		const { error, success } = event
 		let extra: LogAttributes | undefined
-		try {
-			extra = runtime.onCompleted?.(event)
-		} catch (hookError) {
-			logger.warn('onCompleted hook failed', {
-				error: errorMessageOf(hookError)
-			})
+		if (runtime.onCompleted) {
+			let observedContext = event.context
+			if (typeof observedContext === 'object' && observedContext !== null) {
+				const {
+					[INVOCATION]: _invocation,
+					[EXTRAS_OVERRIDE]: _overrides,
+					...rest
+				} = observedContext as Record<PropertyKey, unknown>
+				observedContext = rest
+			}
+			try {
+				extra = runtime.onCompleted({ ...event, context: observedContext })
+			} catch (hookError) {
+				logger.warn('onCompleted hook failed', {
+					error: errorMessageOf(hookError)
+				})
+			}
 		}
 		const expected = !success && isExpectedError(error)
 		const level = success ? 'info' : expected ? 'warn' : 'error'

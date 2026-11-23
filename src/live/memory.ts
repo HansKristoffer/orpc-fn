@@ -4,12 +4,18 @@ import type { PubSubTransport, PubSubTransportStats } from './transport.js'
 /** One message the memory transport carried, decoded. */
 export type PublishedEvent = { channel: string; event: unknown }
 
+const DEFAULT_MAX_LOG_SIZE = 10_000
+
 /**
  * In-process transport for tests and single-process development. Delivery is
  * asynchronous (a microtask), like a real broker. It records what was
- * published, so a test asserts on `published()` instead of mocking a bus.
+ * published (bounded to `maxLogSize`, default 10,000, so long-running dev
+ * processes never leak), so a test asserts on `published()` instead of mocking
+ * a bus.
  */
-export function memoryTransport(): PubSubTransport & {
+export function memoryTransport(
+	options: { maxLogSize?: number } = {}
+): PubSubTransport & {
 	/** Active listeners per channel, for assertions. */
 	listenerCount(channel: string): number
 	stats(): PubSubTransportStats
@@ -18,6 +24,11 @@ export function memoryTransport(): PubSubTransport & {
 	/** Forget the recorded events. */
 	clearPublished(): void
 } {
+	const maxLogSize = options.maxLogSize ?? DEFAULT_MAX_LOG_SIZE
+	if (!Number.isSafeInteger(maxLogSize) || maxLogSize < 0)
+		throw new RangeError(
+			'orpc-fn: maxLogSize must be a nonnegative safe integer'
+		)
 	const listeners = new Map<string, Set<(payload: string) => void>>()
 	const backlogs = new Map<string, { items: string[]; expiresAt: number }>()
 	const log: { channel: string; payload: string }[] = []
@@ -29,7 +40,12 @@ export function memoryTransport(): PubSubTransport & {
 		},
 		async publish(messages, backlog) {
 			for (const { channel, payload } of messages) {
-				log.push({ channel, payload })
+				if (maxLogSize > 0) {
+					if (log.length >= maxLogSize) {
+						log.splice(0, log.length - maxLogSize + 1)
+					}
+					log.push({ channel, payload })
+				}
 				if (backlog) {
 					const current = backlogs.get(channel)
 					const items =
@@ -41,8 +57,11 @@ export function memoryTransport(): PubSubTransport & {
 						expiresAt: Date.now() + backlog.ttlSeconds * 1000
 					})
 				}
-				for (const listener of [...(listeners.get(channel) ?? [])]) {
-					queueMicrotask(() => listener(payload))
+				const set = listeners.get(channel)
+				if (set) {
+					for (const listener of set) {
+						queueMicrotask(() => listener(payload))
+					}
 				}
 			}
 		},

@@ -4,10 +4,12 @@ import type {
 	InferSchemaInput,
 	InferSchemaOutput,
 	MergedErrorMap,
+	Meta,
 	Schema
 } from '@orpc/contract'
 import type {
 	AnyProcedure,
+	Context,
 	DecoratedProcedure,
 	Procedure,
 	Route
@@ -190,14 +192,48 @@ export type CurrentContextOf<TBuilder> =
 		: never
 
 export type ErrorMapOf<TBuilder> = NativeErrors<ProcedureOf<TBuilder>>
-type MetaOf<TBuilder> = NativeMeta<ProcedureOf<TBuilder>>
+export type MetaOf<TBuilder> = NativeMeta<ProcedureOf<TBuilder>>
+
+/** Pre-extracted builder types so `fn()`/`fnLive()`/`createPubSub()` do not re-extract `ProcedureOf<TBuilder>` per route. */
+export type ProcedureSpec = {
+	initial: Context
+	current: Context
+	errors: ErrorMap
+	meta: Meta
+}
+
+export type ProcedureSpecOf<TBuilder> =
+	ProcedureOf<TBuilder> extends Procedure<
+		infer TInitial extends Context,
+		infer TCurrent extends Context,
+		infer _TIn,
+		infer _TOut,
+		infer TErrors extends ErrorMap,
+		infer TMeta extends Meta
+	>
+		? {
+				initial: TInitial
+				current: TCurrent
+				errors: TErrors
+				meta: TMeta
+			}
+		: never
+
+/** Fast-path empty route-local error maps to avoid redundant `MergedErrorMap` instantiations. */
+export type ResolvedErrorMap<
+	TDef extends FnDefinition,
+	TKey extends ProcedureKey<TDef>,
+	TErrors extends ErrorMap
+> = [keyof TErrors] extends [never]
+	? TDef['procedures'][TKey]['errors']
+	: MergedErrorMap<TDef['procedures'][TKey]['errors'], TErrors>
 
 /**
  * Everything `createFn` inferred from its options. Route types read from it;
  * apps rarely spell it out.
  */
 export type FnDefinition = {
-	procedures: Record<string, BuilderLike>
+	procedures: Record<string, ProcedureSpec>
 	default: string
 	extras: object
 	extrasByProcedure?: Partial<Record<string, object>>
@@ -215,7 +251,7 @@ export type ProcedureKey<TDef extends FnDefinition> = keyof TDef['procedures'] &
 export type FnContext<
 	TDef extends FnDefinition,
 	TKey extends ProcedureKey<TDef>
-> = CurrentContextOf<TDef['procedures'][TKey]>
+> = TDef['procedures'][TKey]['current']
 
 /** Union of every procedure's handler context: what guards and extras see. */
 export type AnyFnContext<TDef extends FnDefinition> = {
@@ -261,9 +297,9 @@ type MergeExtras<TShared, TScoped> = TShared extends unknown
 		: never
 	: never
 
-export type HandlerParams<
+/** Cached per `(TDef, TKey, TErrors)` so distinct route inputs do not bust the type alias cache. */
+type HandlerBaseParams<
 	TDef extends FnDefinition,
-	TInput,
 	TKey extends ProcedureKey<TDef>,
 	TErrors extends ErrorMap = Record<never, never>
 > = DistributiveOmit<
@@ -277,7 +313,6 @@ export type HandlerParams<
 	>,
 	HandlerParamKey
 > & {
-	input: TInput
 	context: FnContext<TDef, TKey>
 	/** Calls another procedure with this context and signal, in a child span. */
 	call: BoundCall<FnContext<TDef, TKey>>
@@ -288,10 +323,17 @@ export type HandlerParams<
 	logger: TDef['logger']
 	lastEventId: string | undefined
 	errors: ReturnType<
-		typeof createORPCErrorConstructorMap<
-			MergedErrorMap<ErrorMapOf<TDef['procedures'][TKey]>, TErrors>
-		>
+		typeof createORPCErrorConstructorMap<ResolvedErrorMap<TDef, TKey, TErrors>>
 	>
+}
+
+export type HandlerParams<
+	TDef extends FnDefinition,
+	TInput,
+	TKey extends ProcedureKey<TDef>,
+	TErrors extends ErrorMap = Record<never, never>
+> = HandlerBaseParams<TDef, TKey, TErrors> & {
+	input: TInput
 }
 
 /** Route options shared by every `fn()` overload. */
@@ -304,24 +346,31 @@ export type RouteConfig<TTag extends string = string> = Pick<
 	tags?: TTag[]
 }
 
+/** Cached per `(TDef, TKey)` independently of each route's input schema. */
+type FnRouteBase<
+	TDef extends FnDefinition,
+	TKey extends ProcedureKey<TDef>
+> = RouteConfig<TDef['tag']> &
+	GuardOptions<TDef['guards']> & {
+		meta?: TDef['meta']
+		stream?: boolean
+	} & ProcedureOption<TDef, TKey>
+
 export type FnRouteOptions<
 	TDef extends FnDefinition,
 	TKey extends ProcedureKey<TDef>,
 	TInput = unknown,
 	TErrors extends ErrorMap = Record<never, never>
-> = RouteConfig<TDef['tag']> &
-	GuardOptions<TDef['guards']> & {
-		meta?: TDef['meta']
-		stream?: boolean
-		errors?: TErrors
-		guardResolvers?: {
-			[K in keyof TDef['guards']]?: (params: {
-				input: TInput
-				context: FnContext<TDef, TKey>
-				signal: AbortSignal | undefined
-			}) => MaybePromise<GuardOptions<TDef['guards']>[K]>
-		}
-	} & ProcedureOption<TDef, TKey>
+> = FnRouteBase<TDef, TKey> & {
+	errors?: TErrors
+	guardResolvers?: {
+		[K in keyof TDef['guards']]?: (params: {
+			input: TInput
+			context: FnContext<TDef, TKey>
+			signal: AbortSignal | undefined
+		}) => MaybePromise<GuardOptions<TDef['guards']>[K]>
+	}
+}
 
 /**
  * Which `createFn({ procedures })` builder a route uses. Optional when
@@ -341,12 +390,12 @@ export type FnProcedure<
 	TOutputSchema extends Schema<unknown, unknown>,
 	TErrors extends ErrorMap = Record<never, never>
 > = DecoratedProcedure<
-	InitialContextOf<TDef['procedures'][TKey]>,
-	FnContext<TDef, TKey>,
+	TDef['procedures'][TKey]['initial'],
+	TDef['procedures'][TKey]['current'],
 	TInputSchema,
 	TOutputSchema,
-	MergedErrorMap<ErrorMapOf<TDef['procedures'][TKey]>, TErrors>,
-	MetaOf<TDef['procedures'][TKey]> & {
+	ResolvedErrorMap<TDef, TKey, TErrors>,
+	TDef['procedures'][TKey]['meta'] & {
 		'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
 	}
 >
@@ -356,7 +405,13 @@ type ReturnOf<TOut, TReturn> = [TOut] extends [AnySchema]
 	? InferSchemaInput<TOut>
 	: TReturn
 
-/** `fn()`: four overloads for input/output schema × inferred. */
+/**
+ * `fn()`: four overloads for input/output schema × inferred.
+ *
+ * Returns `DecoratedProcedure` directly instead of `FnProcedure<TDef, ...>` so
+ * emitted `.d.ts` files do not inline the entire `FnDefinition` (builders,
+ * server `extras`/DB clients, guards, logger) into every exported route.
+ */
 export interface Fn<TDef extends FnDefinition> {
 	// 1. With input + output schema
 	<
@@ -378,7 +433,16 @@ export interface Fn<TDef extends FnDefinition> {
 				>
 			) => MaybePromise<InferSchemaInput<TOut>>
 		} & FnRouteOptions<TDef, TKey, InferSchemaOutput<TInput>, TErrors>
-	): FnProcedure<TDef, TKey, TInput, TOut, TErrors>
+	): DecoratedProcedure<
+		TDef['procedures'][TKey]['initial'],
+		TDef['procedures'][TKey]['current'],
+		TInput,
+		TOut,
+		ResolvedErrorMap<TDef, TKey, TErrors>,
+		TDef['procedures'][TKey]['meta'] & {
+			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
+		}
+	>
 
 	// 2. With input, inferred output
 	<
@@ -399,7 +463,16 @@ export interface Fn<TDef extends FnDefinition> {
 				>
 			) => MaybePromise<TReturn>
 		} & FnRouteOptions<TDef, TKey, InferSchemaOutput<TInput>, TErrors>
-	): FnProcedure<TDef, TKey, TInput, Schema<TReturn, TReturn>, TErrors>
+	): DecoratedProcedure<
+		TDef['procedures'][TKey]['initial'],
+		TDef['procedures'][TKey]['current'],
+		TInput,
+		Schema<TReturn, TReturn>,
+		ResolvedErrorMap<TDef, TKey, TErrors>,
+		TDef['procedures'][TKey]['meta'] & {
+			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
+		}
+	>
 
 	// 3. No input, with output schema
 	<
@@ -414,7 +487,16 @@ export interface Fn<TDef extends FnDefinition> {
 				params: HandlerParams<TDef, unknown, NoInfer<TKey>, TErrors>
 			) => MaybePromise<InferSchemaInput<TOut>>
 		} & FnRouteOptions<TDef, TKey, unknown, TErrors>
-	): FnProcedure<TDef, TKey, Schema<unknown, unknown>, TOut, TErrors>
+	): DecoratedProcedure<
+		TDef['procedures'][TKey]['initial'],
+		TDef['procedures'][TKey]['current'],
+		Schema<unknown, unknown>,
+		TOut,
+		ResolvedErrorMap<TDef, TKey, TErrors>,
+		TDef['procedures'][TKey]['meta'] & {
+			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
+		}
+	>
 
 	// 4. No input, inferred output
 	<
@@ -429,12 +511,15 @@ export interface Fn<TDef extends FnDefinition> {
 				params: HandlerParams<TDef, unknown, NoInfer<TKey>, TErrors>
 			) => MaybePromise<TReturn>
 		} & FnRouteOptions<TDef, TKey, unknown, TErrors>
-	): FnProcedure<
-		TDef,
-		TKey,
+	): DecoratedProcedure<
+		TDef['procedures'][TKey]['initial'],
+		TDef['procedures'][TKey]['current'],
 		Schema<unknown, unknown>,
 		Schema<TReturn, TReturn>,
-		TErrors
+		ResolvedErrorMap<TDef, TKey, TErrors>,
+		TDef['procedures'][TKey]['meta'] & {
+			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
+		}
 	>
 
 	// 5. Never matches valid code first; it only words the type errors, which
@@ -454,12 +539,15 @@ export interface Fn<TDef extends FnDefinition> {
 				params: HandlerParams<TDef, InputOf<TInput>, NoInfer<TKey>, TErrors>
 			) => MaybePromise<ReturnOf<TOut, TReturn>>
 		} & FnRouteOptions<TDef, TKey, InputOf<TInput>, TErrors>
-	): FnProcedure<
-		TDef,
-		TKey,
+	): DecoratedProcedure<
+		TDef['procedures'][TKey]['initial'],
+		TDef['procedures'][TKey]['current'],
 		[TInput] extends [AnySchema] ? TInput : Schema<unknown, unknown>,
 		[TOut] extends [AnySchema] ? TOut : Schema<TReturn, TReturn>,
-		TErrors
+		ResolvedErrorMap<TDef, TKey, TErrors>,
+		TDef['procedures'][TKey]['meta'] & {
+			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
+		}
 	>
 }
 

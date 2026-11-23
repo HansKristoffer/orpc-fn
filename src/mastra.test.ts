@@ -243,4 +243,43 @@ describe('tool errors', () => {
 		)
 		expect((reported[0] as Error).message).toBe('secret connection string')
 	})
+
+	test('throwing and async context factories route through error reporting and metrics', async () => {
+		const reported: unknown[] = []
+		const outcomes: string[] = []
+		const failing = createMastraTool(testProcedureWithSchemas, {
+			context: async () => {
+				throw new Error('vault secret leaked')
+			},
+			onError: (error) => reported.push(error),
+			onExecuteFinish: (event) => outcomes.push(event.outcome)
+		})
+		await expect(run(failing)).rejects.toThrow(
+			'failed unexpectedly. The error was reported.'
+		)
+		expect((reported[0] as Error).message).toBe('vault secret leaked')
+		expect(outcomes).toEqual(['error'])
+
+		const ok = createMastraTool(testProcedureWithSchemas, {
+			context: async () => ({})
+		})
+		await expect(run(ok)).resolves.toEqual({
+			success: true,
+			message: 'User u'
+		})
+	})
+
+	test('accepts z.intersection of object schemas', () => {
+		const intersected = fn({
+			name: 'test.intersected',
+			procedure: 'public',
+			input: zod.intersection(
+				zod.object({ a: zod.string() }),
+				zod.object({ b: zod.number() })
+			),
+			handler: ({ input }) => `${input.a}:${input.b}`
+		})
+		const tool = createMastraTool(intersected)
+		expect(tool.id).toBe('test-intersected')
+	})
 })

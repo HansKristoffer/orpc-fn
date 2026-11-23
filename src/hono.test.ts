@@ -354,6 +354,54 @@ describe('mountOrpc compression', () => {
 		releaseSlow()
 		expect(await response.text()).toContain('"done":true')
 	})
+
+	test('tiny JSON responses skip gzip and Accept-Encoding gzip;q=0 is respected', async () => {
+		const app = createApp()
+		const tinyPromise = app.request('/rpc/slow', {
+			method: 'POST',
+			headers: { ...gzip, 'content-type': 'application/json' },
+			body: JSON.stringify({ json: null })
+		})
+		releaseSlow()
+		const tiny = await tinyPromise
+		expect(tiny.headers.get('content-encoding')).toBeNull()
+		expect(await tiny.json()).toEqual({ json: { done: true } })
+
+		const rejected = await app.request('/rpc/fast', {
+			method: 'POST',
+			headers: {
+				'accept-encoding': 'gzip;q=0, br;q=1',
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({ json: null })
+		})
+		expect(rejected.headers.get('content-encoding')).toBeNull()
+	})
+})
+
+test('mountOrpc supports root rpcPrefix "/" and rejects invalid sseKeepAlive', async () => {
+	const rootApp = new Hono()
+	const ping = fn({
+		name: 'root.ping',
+		procedure: 'public',
+		handler: () => 'ok'
+	})
+	mountOrpc(rootApp, { router: { ping }, rpcPrefix: '/' })
+	const response = await rootApp.request('/ping', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ json: null })
+	})
+	expect(response.status).toBe(200)
+	expect(await response.json()).toEqual({ json: 'ok' })
+
+	expect(() =>
+		mountOrpc(new Hono(), {
+			router: { ping },
+			rpcPrefix: '/rpc',
+			sseKeepAlive: 0
+		})
+	).toThrow(RangeError)
 })
 
 test('formatServerTiming', () => {

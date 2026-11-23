@@ -119,9 +119,9 @@ export function createBetterAuthExpoLink<
 			const headers = new Headers(
 				supplied as ConstructorParameters<typeof Headers>[0]
 			)
-			const cookie = await getCookie?.()
-			if (cookie) headers.set('Cookie', cookie)
 			if (options.native) {
+				const cookie = await getCookie?.()
+				if (cookie) headers.set('Cookie', cookie)
 				headers.set('x-skip-oauth-proxy', 'true')
 				const origin = await getExpoOrigin?.()
 				if (origin) headers.set('expo-origin', origin)

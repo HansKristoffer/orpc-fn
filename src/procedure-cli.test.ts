@@ -140,4 +140,53 @@ describe('procedureCommands', () => {
 
 		expect(() => procedureCommands(streams)).toThrow('streams')
 	})
+
+	test('rejects kebab-case command collisions and unresolved lazy routers', async () => {
+		const { lazy } = await import('@orpc/server')
+		const colliding = createRouter({
+			getUser: fn({ name: 'getUser', meta: { cli: true }, handler: () => 1 }),
+			'get-user': fn({
+				name: 'get-user',
+				meta: { cli: true },
+				handler: () => 2
+			})
+		})
+		expect(() => procedureCommands(colliding)).toThrow('collision')
+
+		const lazyRouter = {
+			nested: lazy(async () => ({ default: router }))
+		}
+		expect(() => procedureCommands(lazyRouter)).toThrow('unlazyRouter')
+	})
+
+	test('formats validation issues on expected errors', async () => {
+		const { ORPCError } = await import('@orpc/server')
+		const bad = createRouter({
+			check: fn({
+				name: 'check',
+				procedure: 'public',
+				meta: { cli: true },
+				handler: () => {
+					throw new ORPCError('BAD_REQUEST', {
+						message: 'Invalid payload',
+						data: {
+							issues: [{ path: ['email'], message: 'Invalid email' }]
+						}
+					})
+				}
+			})
+		})
+		const cli = defineCli({
+			name: 'app',
+			context: () => ({}),
+			commands: procedureCommands(bad)
+		})
+		let stderr = ''
+		const code = await cli.run(['check'], {
+			stderr: { write: (text: string) => (stderr += text) },
+			env: {}
+		})
+		expect(code).toBe(1)
+		expect(stderr).toBe('BAD_REQUEST: Invalid payload\nemail: Invalid email\n')
+	})
 })

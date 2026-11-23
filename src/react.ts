@@ -1,3 +1,4 @@
+import { StandardRPCJsonSerializer } from '@orpc/client/standard'
 import {
 	focusManager,
 	hashKey,
@@ -41,12 +42,20 @@ export type UseOrpcSubscriptionOptions<TInput, TEvent> = {
 	/** Every successful connect; `connectionId > 1` is a reconnect. */
 	onConnect?: (connectionId: number) => void
 	onError?: ((error: Error) => void) | undefined
-	onClose?: () => void
+	onClose?: ((info?: { intentional: boolean }) => void) | undefined
 	/**
 	 * Close the stream while the app is not focused (default: true). Focus is
 	 * TanStack's `focusManager`: on React Native, wire it to `AppState` once.
 	 */
 	pauseWhenUnfocused?: boolean | undefined
+}
+
+const inputSerializer = new StandardRPCJsonSerializer()
+
+/** Stable key for subscription inputs, preserving Date/BigInt/Map/Set and key order. */
+function serializeInputKey(input: unknown): string {
+	const [json, meta] = inputSerializer.serialize(input)
+	return hashKey([json, meta])
 }
 
 const subscribeFocus = (listener: () => void) =>
@@ -97,11 +106,11 @@ export function useOrpcSubscription<TInput, TEvent>(
 				}),
 			onConnect: (id) => latest.current.options.onConnect?.(id),
 			onError: (error) => latest.current.options.onError?.(error),
-			onClose: () => latest.current.options.onClose?.()
+			onClose: (info) => latest.current.options.onClose?.(info)
 		})
 	}
 	const runner = runnerRef.current
-	const serializedInput = JSON.stringify(input)
+	const serializedInput = serializeInputKey(input)
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: a changed input resubscribes
 	useEffect(() => {
@@ -240,38 +249,37 @@ export function useLiveQuery<
 		enabled?: UseQueryOptions['enabled']
 		meta?: Record<string, unknown>
 	} & Record<string, unknown>
-	const keyHash = hashKey(raw.queryKey)
-	const latest = useRef({ raw, keyHash, options })
-	latest.current = { raw, keyHash, options }
+	const subInput = (
+		options.subscriptionInput === undefined ? input : options.subscriptionInput
+	) as TSubscriptionInput
+	// Scope by the subscription's own input key so changing `input` without
+	// changing `subscriptionInput` keeps routing events to the new queryKey.
+	const subKeyHash = serializeInputKey(subInput)
+	const latest = useRef({ raw, subKeyHash, options })
+	latest.current = { raw, subKeyHash, options }
 
-	const { status } = useOrpcSubscription(
-		(options.subscriptionInput === undefined
-			? input
-			: options.subscriptionInput) as TSubscriptionInput,
-		subscribe,
-		{
-			enabled: options.enabled,
-			pauseWhenUnfocused: options.pauseWhenUnfocused,
-			onError: options.onError,
-			onConnect: (connectionId) =>
-				scope.open(connectionId, latest.current.keyHash),
-			onEvent: (event, { connectionId }) => {
-				const current = latest.current
-				// The consumer callback must not see an event for a scope no longer shown.
-				if (!scope.owns(connectionId, current.keyHash)) return
-				// Without `applyEvent` the stream event is the cache type (the first overload).
-				const applyEvent =
-					current.options.applyEvent ??
-					((streamEvent: TStreamEvent) => streamEvent as unknown as TData)
-				const key = current.raw.queryKey
-				const next = applyEvent(event, queryClient.getQueryData<TData>(key))
-				if (next !== undefined) queryClient.setQueryData(key, next)
-				current.options.onEvent?.(event, { connectionId })
-			}
+	const { status } = useOrpcSubscription(subInput, subscribe, {
+		enabled: options.enabled,
+		pauseWhenUnfocused: options.pauseWhenUnfocused,
+		onError: options.onError,
+		onConnect: (connectionId) =>
+			scope.open(connectionId, latest.current.subKeyHash),
+		onEvent: (event, { connectionId }) => {
+			const current = latest.current
+			// The consumer callback must not see an event for a scope no longer shown.
+			if (!scope.owns(connectionId, current.subKeyHash)) return
+			// Without `applyEvent` the stream event is the cache type (the first overload).
+			const applyEvent =
+				current.options.applyEvent ??
+				((streamEvent: TStreamEvent) => streamEvent as unknown as TData)
+			const key = current.raw.queryKey
+			const next = applyEvent(event, queryClient.getQueryData<TData>(key))
+			if (next !== undefined) queryClient.setQueryData(key, next)
+			current.options.onEvent?.(event, { connectionId })
 		}
-	)
+	})
 
-	const wrapsSeed = options.select || options.mergeSeed
+	const wrapsSeed = options.select || options.mergeSeed || options.onSeed
 	const queryFn =
 		raw.queryFn && wrapsSeed
 			? seedQueryFn(raw.queryFn, {
@@ -282,7 +290,9 @@ export function useLiveQuery<
 					mergeSeed: options.mergeSeed
 				})
 			: raw.queryFn
-	const runs = options.enabled !== false && focused
+	const runs =
+		options.enabled !== false &&
+		(options.pauseWhenUnfocused === false || focused)
 	const query = useQuery({
 		...raw,
 		...(queryFn ? { queryFn } : {}),
@@ -340,7 +350,9 @@ export function useInvalidationStream<
 		onEvent: coordinator.event,
 		onConnect: coordinator.connect,
 		onError: coordinator.lost,
-		onClose: coordinator.lost
+		onClose: (info) => {
+			if (!info?.intentional) coordinator.lost()
+		}
 	})
 }
 

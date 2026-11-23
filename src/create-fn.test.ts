@@ -213,12 +213,14 @@ describe('meta', () => {
 			meta: { readOnly: 'yes' },
 			handler: () => null
 		})
-		fn({
-			name: 'test.badTag',
-			// @ts-expect-error tags come from createFn({ tags })
-			tags: ['nope'],
-			handler: () => null
-		})
+		expect(() =>
+			fn({
+				name: 'test.badTag',
+				// @ts-expect-error tags come from createFn({ tags })
+				tags: ['nope'],
+				handler: () => null
+			})
+		).toThrow('unknown route tag')
 	})
 
 	test('meta survives procedures rebuilt by os.router()', () => {
@@ -804,5 +806,55 @@ describe('createTestCall', () => {
 			// @ts-expect-error the input schema still applies
 			createTestCall({ admin: true }, { extras: fake })(outer, { id: 1 })
 		).rejects.toThrow('Input validation failed')
+	})
+})
+
+describe('startup and route validation', () => {
+	test('createFn rejects unknown or non-function extrasByProcedure entries', () => {
+		expect(() =>
+			createFn({
+				procedures: { public: os },
+				default: 'public',
+				extrasByProcedure: { unknown: () => ({}) } as never
+			})
+		).toThrow('unknown procedure')
+		expect(() =>
+			createFn({
+				procedures: { public: os },
+				default: 'public',
+				extrasByProcedure: { public: 123 } as never
+			})
+		).toThrow('must be a function')
+	})
+
+	test('undefined entries in guardResolvers are skipped like static guards', async () => {
+		let guardCalls = 0
+		const { fn } = createFn({
+			procedures: { public: os },
+			default: 'public',
+			logger: () => quiet,
+			guards: {
+				flag: (_v: string) => {
+					guardCalls++
+				}
+			}
+		})
+		const route = fn({
+			name: 'test.undefResolver',
+			guardResolvers: { flag: undefined } as never,
+			handler: () => 'ok'
+		})
+		expect(await call(route, undefined)).toBe('ok')
+		expect(guardCalls).toBe(0)
+	})
+
+	test('renderStreamManifest rejects invalid JS identifier export names', async () => {
+		const { renderStreamManifest } = await import('./router.js')
+		expect(() =>
+			renderStreamManifest([], { format: 'ts', name: '123bad' })
+		).toThrow('valid JavaScript identifier')
+		expect(() =>
+			renderStreamManifest([], { format: 'ts', name: 'x = 1; evil()' })
+		).toThrow('valid JavaScript identifier')
 	})
 })

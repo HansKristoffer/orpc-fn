@@ -1,3 +1,4 @@
+import { StandardRPCJsonSerializer } from '@orpc/client/standard'
 import {
 	type DefaultError,
 	type FetchQueryOptions,
@@ -6,6 +7,7 @@ import {
 	type InferDataFromTag,
 	type InfiniteData,
 	type InvalidateQueryFilters,
+	type MutateOptions,
 	type MutationObserverOptions,
 	type UseInfiniteQueryOptions,
 	type UseInfiniteQueryReturnType,
@@ -125,6 +127,14 @@ function useUtilsGetter<TOrpc>(
 	}
 }
 
+const inputSerializer = new StandardRPCJsonSerializer()
+
+/** Stable key for subscription inputs, preserving Date/BigInt/Map/Set and key order. */
+function serializeInputKey(input: unknown): string {
+	const [json, meta] = inputSerializer.serialize(input)
+	return hashKey([json, meta])
+}
+
 let documentVisible: Ref<boolean> | null = null
 /**
  * Whether the page is visible, from TanStack's `focusManager` (which follows
@@ -141,9 +151,18 @@ export function useDocumentVisible(): Ref<boolean> {
 	return documentVisible
 }
 
-function resolveQueryEnabled(enabled: unknown): boolean {
+function gateQueryEnabled(
+	gate: boolean,
+	enabled: unknown
+): boolean | ((query: unknown) => boolean) {
+	if (!gate) return false
 	if (enabled === undefined) return true
-	if (typeof enabled === 'function') return Boolean(enabled())
+	if (typeof enabled === 'function') {
+		// 0-arg functions are Vue getters; 1-arg functions are TanStack Query predicates.
+		if (enabled.length === 0) return Boolean((enabled as () => unknown)())
+		return (query: unknown) =>
+			Boolean((enabled as (q: unknown) => unknown)(query))
+	}
 	return Boolean(toValue(enabled))
 }
 
@@ -167,7 +186,7 @@ export interface UseSubscriptionOptions<TEvent, TOrpc = RegisteredOrpcUtils> {
 	onError?: ((error: Error) => void) | undefined
 	/** Every successful connect; `connectionId > 1` is a reconnect. */
 	onConnect?: (connectionId: number) => void
-	onClose?: () => void
+	onClose?: (info?: { intentional: boolean }) => void
 	/** Events kept in `events` (default: 100). 1 keeps only `latestEvent`. */
 	maxEvents?: number
 	/** Reconnect when the input changes (default: true). */
@@ -264,20 +283,22 @@ export function useOrpcSubscription<
 	}
 
 	if (autoReconnectOnInputChange) {
+		let inputChangeId = 0
 		watch(
-			() => toValue(input),
+			() => serializeInputKey(toValue(input)),
 			async () => {
+				const changeId = ++inputChangeId
 				const wasLive = runner.isLive()
 				if (runner.getStatus() !== 'idle') {
 					await runner.disconnect()
+					if (changeId !== inputChangeId) return
 					clearEvents()
 				}
 				// Reconnect in auto mode, or in manual mode when it was running.
 				if (shouldAutoConnect.value || (wasLive && isStreamAllowed.value)) {
 					await runner.start()
 				}
-			},
-			{ deep: true }
+			}
 		)
 	}
 
@@ -425,8 +446,14 @@ function useBoundApiClient<TOrpc>(orpc: MaybeRefOrGetter<TOrpc> | undefined) {
 		}
 	): UseMutationReturnType<TData, TError, TVariables, TContext> & {
 		inputData: Ref<TVariables>
-		mutate: (variables?: TVariables) => void
-		mutateAsync: (variables?: TVariables) => Promise<TData>
+		mutate: (
+			variables?: TVariables,
+			mutateOptions?: MutateOptions<TData, TError, TVariables, TContext>
+		) => void
+		mutateAsync: (
+			variables?: TVariables,
+			mutateOptions?: MutateOptions<TData, TError, TVariables, TContext>
+		) => Promise<TData>
 	}
 	function useMutation<
 		TData = unknown,
@@ -474,10 +501,14 @@ function useBoundApiClient<TOrpc>(orpc: MaybeRefOrGetter<TOrpc> | undefined) {
 		return {
 			...mutation,
 			inputData,
-			mutate: (variables?: TVariables) =>
-				mutation.mutate(variables ?? inputData.value),
-			mutateAsync: (variables?: TVariables) =>
-				mutation.mutateAsync(variables ?? inputData.value)
+			mutate: (
+				variables?: TVariables,
+				mutateOptions?: MutateOptions<TData, TError, TVariables, TContext>
+			) => mutation.mutate(variables ?? inputData.value, mutateOptions),
+			mutateAsync: (
+				variables?: TVariables,
+				mutateOptions?: MutateOptions<TData, TError, TVariables, TContext>
+			) => mutation.mutateAsync(variables ?? inputData.value, mutateOptions)
 		}
 	}
 
@@ -681,50 +712,52 @@ export function useLiveQuery<
 	// Without `applyEvent` the stream event is the cache type (the first overload).
 	const applyEvent =
 		options.applyEvent ?? ((event: TStreamEvent) => event as unknown as TData)
-	// Recomputed when the input changes, not once per stream event.
-	const queryKey = computed(
-		() => queryOptionsFn(toValue(input), getO()).queryKey
+	// Evaluate queryOptionsFn once per reactive change, shared by scope and query.
+	const resolvedQuery = computed(() => {
+		const inputValue = toValue(input)
+		// oRPC query options are plain objects at runtime; vue-query's type
+		// wraps fields in MaybeRefDeep, so `queryFn` is read through one shape.
+		const raw = queryOptionsFn(inputValue, getO()) as unknown as {
+			queryKey: QueryKey
+			queryFn?: (context: unknown) => Promise<TRouteData>
+			enabled?: unknown
+			meta?: Record<string, unknown>
+		} & Record<string, unknown>
+		return { inputValue, raw }
+	})
+	const subInput = computed(
+		() =>
+			(options.subscriptionInput === undefined
+				? toValue(input)
+				: toValue(options.subscriptionInput)) as TSubscriptionInput
 	)
-	const queryHash = computed(() => hashKey(queryKey.value))
+	// Scope by the subscription's own input hash: when `input` changes without
+	// `subscriptionInput` changing, the existing stream stays valid for the new
+	// query key; when `subscriptionInput` changes, stale frames drop immediately.
+	const subHash = computed(() => serializeInputKey(subInput.value))
 	const scope = createStreamScope()
 
-	const subscription = useOrpcSubscription(
-		computed(
-			() =>
-				(options.subscriptionInput === undefined
-					? toValue(input)
-					: toValue(options.subscriptionInput)) as TSubscriptionInput
-		),
-		subscribeFn,
-		{
-			immediate: options.immediate,
-			respectVisibility: options.respectVisibility,
-			onError: options.onError,
-			maxEvents: 1,
-			orpc: getO,
-			onConnect: (connectionId) => scope.open(connectionId, queryHash.value),
-			onEvent: (event, meta) => {
-				// The consumer callback must not see an event for a scope no longer shown.
-				if (!meta || !scope.owns(meta.connectionId, queryHash.value)) return
-				const key = queryKey.value
-				const next = applyEvent(event, queryClient.getQueryData<TData>(key))
-				if (next !== undefined) queryClient.setQueryData(key, next)
-				options.onEvent?.(event, meta)
-			}
+	const subscription = useOrpcSubscription(subInput, subscribeFn, {
+		immediate: options.immediate,
+		respectVisibility: options.respectVisibility,
+		onError: options.onError,
+		maxEvents: 1,
+		orpc: getO,
+		onConnect: (connectionId) => scope.open(connectionId, subHash.value),
+		onEvent: (event, meta) => {
+			// The consumer callback must not see an event for a scope no longer shown.
+			if (!meta || !scope.owns(meta.connectionId, subHash.value)) return
+			const key = resolvedQuery.value.raw.queryKey
+			const next = applyEvent(event, queryClient.getQueryData<TData>(key))
+			if (next !== undefined) queryClient.setQueryData(key, next)
+			options.onEvent?.(event, meta)
 		}
-	)
+	})
 
 	const query = useVueQuery<TData, TError>(
 		computed(() => {
-			const inputValue = toValue(input)
-			// oRPC query options are plain objects at runtime; vue-query's type
-			// wraps fields in MaybeRefDeep, so `queryFn` is read through one shape.
-			const raw = queryOptionsFn(inputValue, getO()) as unknown as {
-				queryKey: QueryKey
-				queryFn?: (context: unknown) => Promise<TRouteData>
-				enabled?: unknown
-			} & Record<string, unknown>
-			const wrapsSeed = options.select || options.mergeSeed
+			const { inputValue, raw } = resolvedQuery.value
+			const wrapsSeed = options.select || options.mergeSeed || options.onSeed
 			const queryFn =
 				raw.queryFn && wrapsSeed
 					? seedQueryFn(raw.queryFn, {
@@ -735,15 +768,18 @@ export function useLiveQuery<
 							mergeSeed: options.mergeSeed
 						})
 					: raw.queryFn
+			const gate =
+				(options.respectVisibility === false || visible.value) &&
+				(options.immediate === undefined || Boolean(toValue(options.immediate)))
 			return {
 				...raw,
 				...(queryFn ? { queryFn } : {}),
-				enabled: visible.value && resolveQueryEnabled(raw.enabled),
+				enabled: gateQueryEnabled(gate, raw.enabled),
 				...(options.keepPreviousData === false
 					? {}
 					: { placeholderData: keepPreviousData }),
 				staleTime: Number.POSITIVE_INFINITY,
-				meta: { live: true }
+				meta: { ...raw.meta, live: true }
 			} as unknown as UseQueryOptions<TData, TError>
 		})
 	)
@@ -821,7 +857,9 @@ export function useInvalidationStream<
 		onEvent: coordinator.event,
 		onConnect: coordinator.connect,
 		onError: coordinator.lost,
-		onClose: coordinator.lost
+		onClose: (info) => {
+			if (!info?.intentional) coordinator.lost()
+		}
 	})
 }
 

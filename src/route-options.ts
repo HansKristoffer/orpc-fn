@@ -25,7 +25,8 @@ function schemaOption(schema: unknown, name: string): AnySchema | undefined {
 /** Runtime validation for JavaScript callers and spread route options. */
 export function normalizeRoute(
 	options: Record<string, unknown>,
-	isGuard: (key: string) => boolean
+	isGuard: (key: string) => boolean,
+	allowedTags?: ReadonlySet<string>
 ) {
 	const {
 		handler,
@@ -67,6 +68,19 @@ export function normalizeRoute(
 				`orpc-fn: unknown route option "${option}"; put application metadata in meta`
 			)
 	}
+	if (route.tags !== undefined) {
+		if (
+			!Array.isArray(route.tags) ||
+			route.tags.some((tag) => typeof tag !== 'string')
+		)
+			throw new TypeError('orpc-fn: tags must be an array of strings')
+		if (allowedTags) {
+			for (const tag of route.tags) {
+				if (!allowedTags.has(tag))
+					throw new TypeError(`orpc-fn: unknown route tag "${tag}"`)
+			}
+		}
+	}
 	const iterator = getEventIteratorSchemaDetails(output) !== undefined
 	if (stream === false && iterator)
 		throw new TypeError(
@@ -80,7 +94,9 @@ export function normalizeRoute(
 		throw new TypeError(
 			`orpc-fn: ${name} has an async generator handler; declare stream: true`
 		)
+	const activeResolvers: Record<string, Resolver> = {}
 	for (const [guard, resolver] of Object.entries(guardResolvers)) {
+		if (resolver === undefined) continue
 		if (!isGuard(guard))
 			throw new TypeError(`orpc-fn: unknown guard resolver "${guard}"`)
 		if (typeof resolver !== 'function')
@@ -91,6 +107,7 @@ export function normalizeRoute(
 			throw new TypeError(
 				`orpc-fn: guard "${guard}" has both a value and resolver`
 			)
+		activeResolvers[guard] = resolver as Resolver
 	}
 	return {
 		handler: handler as (params: Record<PropertyKey, unknown>) => unknown,
@@ -101,7 +118,7 @@ export function normalizeRoute(
 		meta: appMeta as Record<string, unknown>,
 		stream: stream === true || iterator,
 		errors: errors as ErrorMap | undefined,
-		guardResolvers: guardResolvers as Record<string, Resolver>,
+		guardResolvers: activeResolvers,
 		route,
 		guardChecks
 	}
