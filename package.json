@@ -117,6 +117,8 @@
 	"scripts": {
 		"build": "bun scripts/build.ts",
 		"prepublishOnly": "bun run build",
+		"prepare": "husky",
+		"check": "bun run build && bun run lint",
 		"test": "bun test",
 		"typecheck": "tsc --noEmit && tsc --noEmit -p tests/consumers/tsconfig.json",
 		"lint": "bun run typecheck && biome check",
@@ -213,6 +215,7 @@
 		"@types/react": "19",
 		"@types/react-test-renderer": "19",
 		"hono": "^4.12.31",
+		"husky": "^9.1.7",
 		"ioredis": "5.8.2",
 		"publint": "^0.3.12",
 		"react": "19.2.3",
