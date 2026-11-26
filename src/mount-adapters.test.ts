@@ -484,6 +484,68 @@ for (const adapter of adapters) {
 			expect(untimed.headers['server-timing']).toBeUndefined()
 		})
 
+		test('a streamed batch claims no total: its header is written when the first result is ready', async () => {
+			const url = await serve()
+			const batch = await captureStreamingBatch(['big', 'slow'])
+			const stream = await openStream(`${url}${batch.path}`, {
+				headers: batch.headers,
+				body: batch.body
+			})
+			// The response has started while `slow` is still running.
+			expect(stream.headers['server-timing']).toMatch(/^first;dur=[\d.]+$/)
+			releaseSlow()
+			await stream.readUntil('"done":true')
+
+			// A buffered batch starts when every call is done, so it has both.
+			const buffered = await raw(`${url}${batch.path}`, {
+				headers: { ...batch.headers, 'orpc-batch': 'buffered' },
+				body: Buffer.from(batch.body).toString()
+			})
+			expect(buffered.headers['server-timing']).toMatch(
+				/^total;dur=[\d.]+, handler;dur=[\d.]+$/
+			)
+		})
+
+		test('overlapping work is timed once: handler and timed() report wall-clock, within the total', async () => {
+			const url = await serve()
+			const batch = await captureStreamingBatch(['slow', 'slow', 'slow'])
+			setTimeout(releaseSlow, 20)
+			const response = await raw(`${url}${batch.path}`, {
+				headers: { ...batch.headers, 'orpc-batch': 'buffered' },
+				body: Buffer.from(batch.body).toString()
+			})
+			const header = String(response.headers['server-timing'])
+			const metric = (name: string) =>
+				Number(new RegExp(`${name};dur=([\\d.]+)`).exec(header)?.[1])
+			// Three calls waited the same 20 ms: summed, handler would be 3x the total.
+			expect(metric('handler')).toBeGreaterThan(5)
+			expect(metric('handler')).toBeLessThanOrEqual(metric('total'))
+
+			// What a batch does with a memoised check: every call awaits one promise.
+			let token: Promise<string> | undefined
+			const timing: RequestTiming = {}
+			const started = performance.now()
+			const verify = () =>
+				(token ??= new Promise((resolve) =>
+					setTimeout(() => resolve('user'), 20)
+				))
+			await Promise.all([
+				timed(timing, 'auth_ms', verify),
+				timed(timing, 'auth_ms', verify),
+				timed(timing, 'auth_ms', verify)
+			])
+			const elapsed = performance.now() - started
+			expect(timing.auth_ms).toBeGreaterThan(5)
+			expect(timing.auth_ms).toBeLessThanOrEqual(elapsed + 0.01)
+			// Work that does not overlap still adds up.
+			await timed(timing, 'auth_ms', verify)
+			await timed(timing, 'other_ms', verify)
+			expect(timing.auth_ms).toBeLessThanOrEqual(
+				performance.now() - started + 0.01
+			)
+			expect(timing.other_ms).toBeGreaterThanOrEqual(0)
+		})
+
 		test('large JSON is compressed with brotli or gzip as the client accepts', async () => {
 			const url = await serve()
 			const call = (acceptEncoding?: string) =>
@@ -771,6 +833,86 @@ for (const adapter of adapters) {
 				{ id: '2', status: 200, output: part },
 				{ id: '3', status: 200, output: part }
 			])
+		})
+
+		// The body is read before any auth, so the limit is all that guards a
+		// public procedure: no URL, header or encoding may get a body past it.
+		test('maxBodySize as a function limits each procedure; a batch and a chunked body find no way around it', async () => {
+			const asked: Array<string | null> = []
+			const url = await serve({
+				maxBodySize: ({ procedure, path }) => {
+					asked.push(procedure ? path.join('.') : null)
+					return path.join('.') === 'download' ? 8192 : 1024
+				}
+			})
+			const json = { 'content-type': 'application/json' }
+			const body = (bytes: number) => rpcBody({ text: 'x'.repeat(bytes) })
+			const post = (path: string, bytes: number, chunked = false) =>
+				raw(`${url}/rpc/${path}`, { headers: json, body: body(bytes), chunked })
+
+			// The same body fits the procedure with the larger limit only.
+			expect((await post('download', 4096)).status).toBe(200)
+			expect((await post('echo', 4096)).status).toBe(413)
+			expect((await post('download', 16_384)).status).toBe(413)
+			expect(asked).toEqual(['download', 'echo', 'download'])
+
+			// Without a content-length the bytes are counted as they arrive.
+			expect((await post('download', 4096, true)).status).toBe(200)
+			expect((await post('echo', 4096, true)).status).toBe(413)
+			expect((await post('download', 16_384, true)).status).toBe(413)
+
+			// A batch is matched by its header whatever its URL, so the URL of
+			// the generous procedure buys a batch nothing.
+			asked.length = 0
+			const batch = encodeRpcBatchRequest([
+				{ url: '/rpc/echo', input: { text: 'x'.repeat(2048) } },
+				{ url: '/rpc/requestId' }
+			])
+			for (const chunked of [false, true]) {
+				const smuggled = await raw(`${url}/rpc/download`, {
+					headers: { ...json, 'orpc-batch': 'buffered' },
+					body: batch,
+					chunked
+				})
+				expect(smuggled.status).toBe(413)
+				expect(decode(smuggled).json).toMatchObject({
+					code: 'PAYLOAD_TOO_LARGE'
+				})
+			}
+			expect(asked).toEqual([null, null])
+
+			// A batch under the limit for no procedure runs, each call unasked.
+			const small = await raw(`${url}/rpc/download/__batch__`, {
+				headers: { ...json, 'orpc-batch': 'buffered' },
+				body: encodeRpcBatchRequest([
+					{ url: '/rpc/echo', input: { text: 'a' } }
+				])
+			})
+			expect(decodeRpcBatchResponse(decodeText(small))).toEqual([
+				{ id: '1', status: 200, output: { text: 'a' } }
+			])
+		})
+
+		test('a maxBodySize function that returns no usable limit refuses the request', async () => {
+			const onError = mock(() => {})
+			const url = await serve({
+				onError,
+				maxBodySize: ({ path }) =>
+					path[0] === 'echo' ? Number.NaN : Number.POSITIVE_INFINITY
+			})
+			const json = { 'content-type': 'application/json' }
+			const refused = await raw(`${url}/rpc/echo`, {
+				headers: json,
+				body: rpcBody({ text: 'x' })
+			})
+			expect(refused.status).toBe(500)
+			expect(onError).toHaveBeenCalledTimes(1)
+			// Infinity lifts the limit for that procedure.
+			const unlimited = await raw(`${url}/rpc/download`, {
+				headers: json,
+				body: rpcBody({ text: 'x'.repeat(100_000) })
+			})
+			expect(unlimited.status).toBe(200)
 		})
 
 		test('files round-trip: upload a File, download a Blob', async () => {
