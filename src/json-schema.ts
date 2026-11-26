@@ -78,7 +78,7 @@ const DESCRIBED_FORMATS = new Set([
 ])
 
 /** How tool JSON Schemas are written for a model. */
-export type ToolSchemaOptions = {
+type ToolSchemaOptions = {
 	/**
 	 * Keep a string's `pattern` when a standard `format` (`uuid`, `email`,
 	 * `date-time`, …) already describes it. Default: false, which keeps tool
@@ -88,7 +88,7 @@ export type ToolSchemaOptions = {
 }
 
 /** `schema` without patterns that repeat a standard format, as a copy. */
-export function compactToolJsonSchema(schema: JsonSchema): JsonSchema {
+function compactToolJsonSchema(schema: JsonSchema): JsonSchema {
 	const compact = (value: unknown): unknown => {
 		if (Array.isArray(value)) return value.map(compact)
 		if (typeof value !== 'object' || value === null) return value

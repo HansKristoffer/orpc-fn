@@ -109,11 +109,7 @@ export function listTools(
 			config: {
 				...(description === undefined ? {} : { description }),
 				...(inputSchema
-					? {
-							inputSchema: rawInputSchema(inputSchema, {
-								keepFormatPatterns: options.keepFormatPatterns === true
-							})
-						}
+					? { inputSchema: rawInputSchema(inputSchema, options) }
 					: {}),
 				annotations: { readOnlyHint: readOnly(contract, path) }
 			}

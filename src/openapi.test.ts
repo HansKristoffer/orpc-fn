@@ -135,7 +135,7 @@ describe('generateOpenApiDocument', () => {
 			await generateOpenApiDocument(router, {
 				filter: () => true
 			})
-		) as Document
+		)
 		expect(Object.keys(document.paths)).toContain('/secret')
 		await expect(
 			// @ts-expect-error what to document is an explicit choice

@@ -571,8 +571,8 @@ export function createFnLive(runtime: {
 
 					const rerun = () => runSnapshot(params)
 					const authorize = async () => {
-						// 0.9.1 reran snapshots through the whole procedure, guards
-						// included; reruns now call the handler, so guards run here.
+						// A rerun calls the snapshot handler directly, past the
+						// procedure's middleware, so the guards run here.
 						if (rerunGuards && subscribeGuards)
 							await subscribeGuards({
 								input: params.input,

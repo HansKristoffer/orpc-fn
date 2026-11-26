@@ -434,9 +434,10 @@ export function createMounts<R extends AnyRouter, H>(
 		throw new RangeError(
 			'orpc-fn: sseKeepAlive must be a positive finite number'
 		)
-	const surfaces = options.openapi === undefined ? [] : [options.openapi].flat()
 	const prefixes = new Set<string>()
-	for (const surface of surfaces) {
+	const configured =
+		options.openapi === undefined ? [] : [options.openapi].flat()
+	const surfaces = configured.map((surface) => {
 		if (typeof surface.filter !== 'function')
 			throw new TypeError(
 				'orpc-fn: openapi needs a filter; pass () => true to publish every route'
@@ -447,8 +448,8 @@ export function createMounts<R extends AnyRouter, H>(
 				`orpc-fn: two openapi surfaces share the prefix ${surface.prefix}`
 			)
 		prefixes.add(prefix)
-		docsPages(surface)
-	}
+		return { surface, pages: docsPages(surface) }
+	})
 
 	const statusMap = options.errorStatusMap
 	const isExpectedError =
@@ -506,7 +507,7 @@ export function createMounts<R extends AnyRouter, H>(
 		mounts.push({ prefix: options.rpcPrefix, handler: () => handler })
 	}
 
-	for (const openapi of surfaces) {
+	for (const { surface: openapi, pages } of surfaces) {
 		let loading: Promise<H> | undefined
 		mounts.push({
 			prefix: openapi.prefix,
@@ -514,6 +515,7 @@ export function createMounts<R extends AnyRouter, H>(
 				loading ??= createOpenApiHandler(
 					router,
 					openapi,
+					pages,
 					handlerOptions(openapi.plugins),
 					runtime.openapi
 				).catch((error) => {
@@ -537,7 +539,7 @@ type ResolvedPage = Omit<OpenApiDocsPage, 'filter'> & {
 
 /**
  * A surface's docs pages, with the surface's fields as their defaults.
- * Throws when two pages share a path, so it runs when the app mounts.
+ * Throws when two pages share a path.
  */
 function docsPages<R extends AnyRouter>(
 	surface: OpenApiMountOptions<R>
@@ -574,6 +576,7 @@ function docsPages<R extends AnyRouter>(
 async function createOpenApiHandler<R extends AnyRouter, H>(
 	router: R,
 	openapi: OpenApiMountOptions<R>,
+	pages: readonly ResolvedPage[],
 	options: HandlerOptions<InferRouterInitialContext<R>>,
 	loadHandler: HandlerRuntime<R, H>['openapi']
 ): Promise<H> {
@@ -597,7 +600,7 @@ async function createOpenApiHandler<R extends AnyRouter, H>(
 			})
 		)
 	}
-	for (const page of docsPages(openapi)) {
+	for (const page of pages) {
 		const { base, errorStatusMap, ...generate } = page.spec ?? {}
 		const resolvedErrorStatusMap = errorStatusMap ?? options.errorStatusMap
 		const { document } = page
@@ -609,7 +612,7 @@ async function createOpenApiHandler<R extends AnyRouter, H>(
 						...(resolvedErrorStatusMap
 							? { errorStatusMap: resolvedErrorStatusMap }
 							: {}),
-						...(page.components ? { components: page.components } : {}),
+						components: page.components,
 						filter: page.filter,
 						base: {
 							info: page.info ?? { title: 'API', version: '0.0.0' },

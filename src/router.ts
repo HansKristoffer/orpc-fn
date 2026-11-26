@@ -30,7 +30,8 @@ export function createRouter<T extends AnyRouter>(routes: T): Readonly<T> {
  *
  * ```ts
  * walkProcedures(router, (procedure, path) => {
- *   if (readFnMeta(procedure).name) byName.set(readFnMeta(procedure).name, procedure)
+ *   const { name } = readFnMeta(procedure)
+ *   if (name) byName.set(name, procedure)
  * })
  * ```
  */

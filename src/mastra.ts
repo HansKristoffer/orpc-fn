@@ -97,12 +97,9 @@ export function createMastraTool<TProc extends AnyProcedure>(
 		definition.outputSchemas,
 		`Mastra tool ${name}`
 	)
-	const schemaOptions = {
-		keepFormatPatterns: options.keepFormatPatterns === true
-	}
 	let inputSchema: ToolSchema | undefined
 	if (procedureInput) {
-		inputSchema = rawInputSchema(procedureInput, schemaOptions)
+		inputSchema = rawInputSchema(procedureInput, options)
 		if (!isObjectJsonSchema(inputSchema['~standard'].jsonSchema.input())) {
 			throw new Error(`${name} must take an object input to be an agent tool`)
 		}
@@ -134,7 +131,7 @@ export function createMastraTool<TProc extends AnyProcedure>(
 			} satisfies ToolSchema),
 		...(procedureOutput
 			? {
-					outputSchema: passThroughOutputSchema(procedureOutput, schemaOptions)
+					outputSchema: passThroughOutputSchema(procedureOutput, options)
 				}
 			: {}),
 		execute: async (input, ctx) => {
