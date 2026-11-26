@@ -9,6 +9,7 @@ import {
 } from '@orpc/server'
 import {
 	createFn,
+	errorStatusOf,
 	type FnLogger,
 	readFnMeta,
 	isExpectedClientError
@@ -23,15 +24,22 @@ import {
 	streamLiveSnapshots
 } from 'orpc-fn/live'
 import { createMastraTool } from 'orpc-fn/mastra'
-import { hasTag, listTools } from 'orpc-fn/mcp'
-import { mountOrpc } from 'orpc-fn/hono'
+import { allOf, anyOf, hasTag, hasTags, listTools, not } from 'orpc-fn/mcp'
+import { CLIENT_REQUEST_HEADERS, mountOrpc } from 'orpc-fn/hono'
+import { generateOpenApiDocument } from 'orpc-fn/openapi'
+import type { OpenAPIV3_1 } from '@orpc/openapi'
 import { createFetchHandler } from 'orpc-fn/fetch'
 import { createNodeHandler, timed } from 'orpc-fn/node'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { procedureCommands } from 'orpc-fn/cli'
-import { createRpcLink, hasOrpcErrorCode } from 'orpc-fn/client'
+import {
+	createRpcLink,
+	hasOrpcErrorCode,
+	responseStatusOf
+} from 'orpc-fn/client'
 import { createBetterAuthExpoLink } from 'orpc-fn/expo'
 import { createTanstackQueryUtils } from '@orpc/tanstack-query'
+import type { QueryKey } from '@tanstack/vue-query'
 import * as vue from 'orpc-fn/vue'
 import * as react from 'orpc-fn/react'
 import { createORPCClient } from '@orpc/client'
@@ -474,6 +482,74 @@ mountOrpc(new Hono(), {
 	router,
 	openapi: { prefix: '/api', filter: () => true, docs: false }
 })
+// Several OpenAPI surfaces, docs pages with their own spec options, named
+// components, an app-built document and an error body with its status.
+const ErrorBody = z.object({ code: z.string(), status: z.number() })
+mountOrpc(new Hono(), {
+	router,
+	errorStatusMap: { RATE_LIMITED: 429 },
+	openapi: [
+		{ prefix: '/api', filter: () => true },
+		{
+			prefix: '/v1',
+			filter: allOf(hasTag('external'), not(hasTags('internal', 'external'))),
+			spec: { base: { security: [{ basicAuth: [] }] } },
+			components: {
+				Error: ErrorBody,
+				Event: { schema: ErrorBody, only: 'output' }
+			},
+			errorResponseBodyEncoder: (error, status) => ({
+				...error.toJSON(),
+				status
+			}),
+			docs: [
+				{
+					path: '/customer',
+					specPath: '/customer/spec.json',
+					filter: anyOf(hasTag('external')),
+					info: { title: 'Customer API', version: '1.0.0' },
+					spec: { version: '3.1.1' }
+				},
+				{
+					document: () =>
+						generateOpenApiDocument(router, {
+							filter: () => true,
+							version: '3.1.1'
+						})
+				}
+			]
+		}
+	]
+})
+// biome-ignore format: keep the expected error on one line
+// @ts-expect-error a component is named for 'input' or 'output' only
+mountOrpc(new Hono(), { router, openapi: { prefix: '/v1', filter: () => true, components: { Error: { schema: ErrorBody, only: 'both' } } } })
+// `version` picks oRPC's document type, e.g. OpenAPI 3.1's.
+const pinned = generateOpenApiDocument(router, {
+	filter: () => true,
+	version: '3.1.1'
+})
+export type PinnedVersion = Assert<
+	Equal<Awaited<typeof pinned>, OpenAPIV3_1.OpenAPIObject>
+>
+// @ts-expect-error what a document lists is an explicit choice
+generateOpenApiDocument(router, {})
+const corsHeaders: readonly string[] = [
+	...CLIENT_REQUEST_HEADERS,
+	'authorization'
+]
+void corsHeaders
+const restStatus: number = errorStatusOf(new ORPCError('NOT_FOUND'), {
+	NOT_FOUND: 410
+})
+const clientStatus: number | undefined = responseStatusOf(new Error('offline'))
+void [restStatus, clientStatus]
+listTools(router, { filter: hasTag('external'), streams: 'throw' })
+// @ts-expect-error streams are skipped or thrown on
+listTools(router, { filter: hasTag('external'), streams: 'keep' })
+// A path constant needs no `as const`.
+const rpcPath: string = '/rpc'
+createRpcLink({ origin: 'http://localhost', url: rpcPath })
 
 // ── Fetch and Node handlers ─────────────────────────────────────────────────
 // Next.js App Router, TanStack Start: (request) => Promise<Response>.
@@ -1087,4 +1163,109 @@ export type ClientHookTypes = [
 		>
 	>,
 	Assert<Equal<Hooks[8]['data']['value'], { pendingCount: number } | undefined>>
+]
+
+// A recursive output (`z.json()`) tags oRPC's query key with a type vue-query
+// walked deeply, failing with TS2589 "excessively deep" at the call.
+const jsonDelivery = fnLive({
+	name: 'delivery.get',
+	input: z.object({ id: z.string() }),
+	output: z.object({ id: z.string(), body: z.json() }),
+	handler: ({ input }) => ({ id: input.id, body: { status: 200 } }),
+	live: { eventSchema: z.object({ id: z.string() }), channel: 'deliveries' }
+})
+const findDelivery = fn({
+	name: 'delivery.find',
+	input: z.object({ id: z.string() }),
+	output: z.object({ id: z.string(), body: z.json() }).nullable(),
+	handler: () => null
+})
+const jsonClient: RouterClient<{
+	delivery: {
+		find: typeof findDelivery
+		get: typeof jsonDelivery.procedure
+		watch: typeof jsonDelivery.subscribe
+	}
+}> = createORPCClient(
+	createRpcLink({ origin: 'http://localhost', url: '/rpc' })
+)
+const jsonUtils = createTanstackQueryUtils(jsonClient)
+type JsonDelivery = { id: string; body: z.core.util.JSONType }
+export function useJsonOutputHooks() {
+	const api = vue.useApiClient({ orpc: jsonUtils })
+	const delivery = api.useQuery((o) =>
+		o.delivery.get.queryOptions({ input: { id: '1' } })
+	)
+	const deliveryId = api.useQuery((o) =>
+		o.delivery.get.queryOptions({
+			input: { id: '1' },
+			select: (value) => value.id
+		})
+	)
+	const liveDelivery = vue.useLiveQuery(
+		{ id: '1' },
+		(input, o) => o.delivery.get.queryOptions({ input }),
+		(o) => o.delivery.watch.call,
+		{ orpc: jsonUtils }
+	)
+	const reactDelivery = react.useLiveQuery(
+		{ id: '1' },
+		(input) => jsonUtils.delivery.get.queryOptions({ input }),
+		jsonClient.delivery.watch
+	)
+	return [delivery, deliveryId, liveDelivery, reactDelivery] as const
+}
+type JsonHooks = ReturnType<typeof useJsonOutputHooks>
+export type JsonOutputHookTypes = [
+	Assert<Equal<JsonHooks[0]['data']['value'], JsonDelivery | undefined>>,
+	Assert<Equal<JsonHooks[1]['data']['value'], string | undefined>>,
+	Assert<Equal<JsonHooks[2]['data']['value'], JsonDelivery | undefined>>,
+	Assert<Equal<JsonHooks[3]['data'], JsonDelivery | undefined>>
+]
+
+// An explicit data type, and an app helper that passes options along: oRPC 2
+// types `queryFn` and `throwOnError` with its tagged key, so the helper types
+// its options as `ApiQueryOptions` rather than vue-query's `UseQueryOptions`.
+type MaybeDelivery = JsonDelivery | null
+function useDeliveryLive<TInput extends { id: string }, TSnapshot, TOrpc>(
+	input: TInput,
+	route: {
+		queryOptions: (
+			input: TInput,
+			o: TOrpc
+		) => vue.ApiQueryOptions<TSnapshot, Error> & { queryKey: QueryKey }
+		subscribe: vue.OrpcSubscribeFn<TInput, TSnapshot, TOrpc>
+		orpc: TOrpc
+	}
+) {
+	return vue.useLiveQuery<
+		TInput,
+		TSnapshot,
+		TSnapshot,
+		TSnapshot,
+		Error,
+		TOrpc
+	>(input, route.queryOptions, route.subscribe, { orpc: route.orpc })
+}
+export function useExplicitQueryTypes() {
+	const api = vue.useApiClient({ orpc: jsonUtils })
+	const polled = api.useQuery<MaybeDelivery>((o) => ({
+		...o.delivery.find.queryOptions({ input: { id: '1' } }),
+		enabled: true,
+		refetchInterval: (query) => (query.state.data?.id ? 1000 : false)
+	}))
+	const live = useDeliveryLive(
+		{ id: '1' },
+		{
+			queryOptions: (input, o) => o.delivery.get.queryOptions({ input }),
+			subscribe: (o) => o.delivery.watch.call,
+			orpc: jsonUtils
+		}
+	)
+	return [polled, live] as const
+}
+type ExplicitHooks = ReturnType<typeof useExplicitQueryTypes>
+export type ExplicitQueryTypes = [
+	Assert<Equal<ExplicitHooks[0]['data']['value'], MaybeDelivery | undefined>>,
+	Assert<Equal<ExplicitHooks[1]['data']['value'], JsonDelivery | undefined>>
 ]

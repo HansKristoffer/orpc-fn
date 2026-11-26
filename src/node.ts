@@ -23,12 +23,25 @@ import {
 	type RequestTiming,
 	timed
 } from './http/mount.js'
-import { hasTag, type ProcedureFilter } from './meta.js'
+import {
+	allOf,
+	anyOf,
+	hasTag,
+	hasTags,
+	not,
+	type ProcedureFilter
+} from './meta.js'
+import { CLIENT_REQUEST_HEADERS } from './request-headers.js'
 
 export {
+	allOf,
+	anyOf,
 	type BaseContext,
+	CLIENT_REQUEST_HEADERS,
 	formatServerTiming,
 	hasTag,
+	hasTags,
+	not,
 	normalizeExpoOrigin,
 	type OpenApiMountOptions,
 	type ProcedureFilter,

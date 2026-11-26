@@ -1,9 +1,11 @@
+import type { RouterContract } from '@orpc/contract'
 import {
 	type AnyRouter,
 	type AnyProcedure,
 	walkProcedureContractsAsync,
 	walkProcedureContractsSync
 } from '@orpc/server'
+import { isProcedure } from './compatibility.js'
 import { readFnMeta } from './meta.js'
 
 /**
@@ -18,6 +20,32 @@ import { readFnMeta } from './meta.js'
  */
 export function createRouter<T extends AnyRouter>(routes: T): Readonly<T> {
 	return routes
+}
+
+/**
+ * Calls `callback` with every procedure in `router` and its path, skipping
+ * contract-only entries: a tool catalog or a route audit reads each route
+ * with `readFnMeta(procedure)`. Resolve lazy routers first with oRPC's
+ * `unlazyRouter`.
+ *
+ * ```ts
+ * walkProcedures(router, (procedure, path) => {
+ *   const { name } = readFnMeta(procedure)
+ *   if (name) byName.set(name, procedure)
+ * })
+ * ```
+ */
+export function walkProcedures(
+	router: AnyRouter | RouterContract,
+	callback: (procedure: AnyProcedure, path: readonly string[]) => void
+): void {
+	const unresolved = walkProcedureContractsSync(router, (entry, path) => {
+		if (isProcedure(entry)) callback(entry, path)
+	})
+	if (unresolved.length)
+		throw new TypeError(
+			'orpc-fn: resolve lazy routers with unlazyRouter before walkProcedures'
+		)
 }
 
 /** Serialize these paths to a frontend module; this helper belongs on the server. */

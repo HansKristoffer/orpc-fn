@@ -76,6 +76,27 @@ type CachedData<TData, TKey extends QueryKey> = [TData] extends [never]
 	? InferDataFromTag<unknown, TKey>
 	: TData
 
+/**
+ * A query key whose type is never walked. `useQuery`'s options use it so a
+ * recursive output type tagged on oRPC's key stays out of vue-query's deep
+ * option types; `queryFn` accepts any key with it, tagged or not.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: assignable both ways, so oRPC's tagged queryFn fits
+type AnyQueryKey = any
+
+/**
+ * The query options `useQuery` and `useLiveQuery` take: vue-query's, with a
+ * key of any type. oRPC 2 types `queryFn` and `throwOnError` with its tagged
+ * key, so its options do not fit vue-query's plain `UseQueryOptions<T, E>`;
+ * type a helper that passes options along with this instead:
+ * `queryOptions: (input) => ApiQueryOptions<Snapshot, Error>`.
+ */
+export type ApiQueryOptions<
+	TQueryFnData,
+	TError = DefaultError,
+	TData = TQueryFnData
+> = UseQueryOptions<TQueryFnData, TError, TData, TQueryFnData, AnyQueryKey>
+
 type ProvidedOrpc = { client: unknown; utils: unknown }
 const orpcKey: InjectionKey<ProvidedOrpc> = Symbol('orpc-fn')
 
@@ -366,27 +387,18 @@ function useBoundApiClient<TOrpc>(orpc: MaybeRefOrGetter<TOrpc> | undefined) {
 
 	// Each wrapper forwards TanStack's own generics, so `select`, typed errors,
 	// page params and oRPC's tagged keys infer exactly as with vue-query itself.
-	function useQuery<
-		TQueryFnData,
-		TError = DefaultError,
-		TData = TQueryFnData,
-		TQueryKey extends QueryKey = QueryKey
-	>(
-		optionsFn: (
-			orpc: TOrpc
-		) => UseQueryOptions<TQueryFnData, TError, TData, TQueryFnData, TQueryKey>
+	// The key is `AnyQueryKey`, not inferred: oRPC's key is a `DataTag` that
+	// carries the output type, and vue-query's options walk it deeply, so a
+	// recursive output (`z.json()`) failed with "excessively deep" (TS2589).
+	// The data and error types still come from the options.
+	function useQuery<TQueryFnData, TError = DefaultError, TData = TQueryFnData>(
+		optionsFn: (orpc: TOrpc) => ApiQueryOptions<TQueryFnData, TError, TData>
 	): UseQueryReturnType<TData, TError> {
 		// A computed is a ref at runtime; TypeScript cannot relate a computed of
 		// the generic options to vue-query's MaybeRef parameter, so it is asserted.
 		const options = computed(() => optionsFn(getO()))
-		return useVueQuery<TQueryFnData, TError, TData, TQueryKey>(
-			options as unknown as UseQueryOptions<
-				TQueryFnData,
-				TError,
-				TData,
-				TQueryFnData,
-				TQueryKey
-			>
+		return useVueQuery<TQueryFnData, TError, TData, AnyQueryKey>(
+			options as unknown as ApiQueryOptions<TQueryFnData, TError, TData>
 		)
 	}
 
@@ -658,22 +670,13 @@ export function useLiveQuery<
 	TData = TRouteData,
 	TError = Error,
 	TOrpc = RegisteredOrpcUtils,
-	TSubscriptionInput = TInput,
-	TQueryKey extends QueryKey = QueryKey
+	TSubscriptionInput = TInput
 >(
 	input: MaybeRefOrGetter<TInput>,
 	queryOptionsFn: (
 		input: TInput,
 		orpc: TOrpc
-	) => UseQueryOptions<
-		TRouteData,
-		TError,
-		TRouteData,
-		TRouteData,
-		TQueryKey
-	> & {
-		queryKey: TQueryKey
-	},
+	) => ApiQueryOptions<TRouteData, TError> & { queryKey: QueryKey },
 	subscribeFn: OrpcSubscribeFn<
 		NoInfer<TSubscriptionInput>,
 		TStreamEvent,
@@ -708,22 +711,13 @@ export function useLiveQuery<
 	TData,
 	TError,
 	TOrpc,
-	TSubscriptionInput,
-	TQueryKey extends QueryKey
+	TSubscriptionInput
 >(
 	input: MaybeRefOrGetter<TInput>,
 	queryOptionsFn: (
 		input: TInput,
 		orpc: TOrpc
-	) => UseQueryOptions<
-		TRouteData,
-		TError,
-		TRouteData,
-		TRouteData,
-		TQueryKey
-	> & {
-		queryKey: TQueryKey
-	},
+	) => ApiQueryOptions<TRouteData, TError> & { queryKey: QueryKey },
 	subscribeFn: OrpcSubscribeFn<TSubscriptionInput, TStreamEvent, TOrpc>,
 	options: LiveQueryOptions<
 		TInput,

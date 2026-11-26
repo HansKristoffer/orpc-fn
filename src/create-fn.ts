@@ -9,7 +9,12 @@ import { type AnyProcedure, ORPCError, os } from '@orpc/server'
 import { decorateProcedure, procedureDefinition } from './compatibility.js'
 import { type BoundCall, createBoundCall } from './bound-call.js'
 import { isExpectedClientError, markExpected } from './expected-client-error.js'
-import { createFnLive, type FnLive, fnLivePatch } from './live/fn-live.js'
+import {
+	createFnLive,
+	type FnLive,
+	fnLivePatch,
+	type GuardRunner
+} from './live/fn-live.js'
 import {
 	type CreatePublisher,
 	type CreatePubSub,
@@ -467,6 +472,8 @@ export function createFn<
 		context: unknown
 		handlerStarted: boolean
 	}
+	// Each guarded route's guard runner, for `fnLive` to repeat before updates.
+	const guardRunners = new WeakMap<object, GuardRunner>()
 	// The overload-to-runtime boundary is adapted once at the returned factory.
 	const fn = (routeOptions: Record<string, unknown>): AnyProcedure => {
 		const {
@@ -498,6 +505,45 @@ export function createFn<
 			stream,
 			tags: (route.tags as string[] | undefined) ?? []
 		})
+		/** The route's static, then resolved, guards: before the handler, and before each live update. */
+		const runGuards = async ({
+			input,
+			context,
+			signal
+		}: {
+			input: unknown
+			context: unknown
+			signal: AbortSignal | undefined
+		}) => {
+			let checks: readonly [string, unknown][] = guardChecks
+			if (hasDynamicGuards) {
+				const resolved: Array<[string, unknown]> = [...guardChecks]
+				for (const [guard, resolver] of resolverEntries) {
+					const value = await resolver({ input, context, signal })
+					if (value !== undefined) resolved.push([guard, value])
+				}
+				checks = resolved
+			}
+			for (const [guard, value] of checks) {
+				const rawResult = guards[guard]?.(value, {
+					context,
+					input,
+					name,
+					procedure: key,
+					meta,
+					signal
+				})
+				const result = isPromiseLike(rawResult) ? await rawResult : rawResult
+				if (result === false)
+					throw new ORPCError('FORBIDDEN', {
+						message: `Guard "${guard}" denied this call`
+					})
+				if (result !== undefined && result !== true)
+					throw new TypeError(
+						`orpc-fn: guard "${guard}" must return void or boolean`
+					)
+			}
+		}
 		const built = buildProcedure({
 			name,
 			procedure: key,
@@ -535,42 +581,8 @@ export function createFn<
 						})
 					}
 				}
-				if (hasStaticGuards || hasDynamicGuards) {
-					let checks: readonly [string, unknown][] = guardChecks
-					if (hasDynamicGuards) {
-						const resolved: Array<[string, unknown]> = [...guardChecks]
-						for (const [guard, resolver] of resolverEntries) {
-							const value = await resolver({
-								input: params.input,
-								context,
-								signal
-							})
-							if (value !== undefined) resolved.push([guard, value])
-						}
-						checks = resolved
-					}
-					for (const [guard, value] of checks) {
-						const rawResult = guards[guard]?.(value, {
-							context,
-							input: params.input,
-							name,
-							procedure: key,
-							meta,
-							signal
-						})
-						const result = isPromiseLike(rawResult)
-							? await rawResult
-							: rawResult
-						if (result === false)
-							throw new ORPCError('FORBIDDEN', {
-								message: `Guard "${guard}" denied this call`
-							})
-						if (result !== undefined && result !== true)
-							throw new TypeError(
-								`orpc-fn: guard "${guard}" must return void or boolean`
-							)
-					}
-				}
+				if (hasStaticGuards || hasDynamicGuards)
+					await runGuards({ input: params.input, context, signal })
 				let shared: unknown
 				let scoped: unknown
 				if (runtime.extras || scopedExtras) {
@@ -627,7 +639,7 @@ export function createFn<
 		})
 		// Prepending middleware shifts oRPC's validation indexes, covering auth,
 		// input validation, output validation, and the final stream lifetime.
-		return decorateProcedure(
+		const decorated = decorateProcedure(
 			os
 				.use(async ({ context, next }) => {
 					const started = performance.now()
@@ -696,6 +708,9 @@ export function createFn<
 				})
 				.router({ route: built }).route
 		)
+		if (hasStaticGuards || hasDynamicGuards)
+			guardRunners.set(decorated, runGuards)
+		return decorated
 	}
 
 	const logCompleted = (logger: FnLogger, event: FnCompletedEvent) => {
@@ -754,7 +769,8 @@ export function createFn<
 		fnLive: createFnLive({
 			fn,
 			createChannel: live.createChannel,
-			isGuard
+			isGuard,
+			guardsOf: (procedure) => guardRunners.get(procedure)
 		}),
 		fnLivePatch,
 		createPubSub: live.createPubSub,

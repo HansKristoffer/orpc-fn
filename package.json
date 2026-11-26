@@ -21,6 +21,7 @@
 		"live-query",
 		"mastra",
 		"mcp",
+		"openapi",
 		"cli",
 		"hono",
 		"nextjs",
@@ -76,6 +77,10 @@
 		"./node": {
 			"types": "./dist/node.d.ts",
 			"import": "./dist/node.js"
+		},
+		"./openapi": {
+			"types": "./dist/openapi.d.ts",
+			"import": "./dist/openapi.js"
 		},
 		"./client": {
 			"types": "./dist/client.d.ts",

@@ -10,7 +10,9 @@ import {
 	hasOrpcErrorCode,
 	isSubscriptionPath,
 	formatClientError,
+	operationPath,
 	queryCacheSerializer,
+	responseStatusOf,
 	streamCall,
 	userFacingErrorMessage
 } from './client.js'
@@ -19,7 +21,11 @@ import {
 	createBetterAuthExpoLink,
 	type ExpoFetchInit
 } from './expo.js'
-import { mountOrpc, normalizeExpoOrigin } from './hono.js'
+import {
+	CLIENT_REQUEST_HEADERS,
+	mountOrpc,
+	normalizeExpoOrigin
+} from './hono.js'
 
 const echo = fn({
 	name: 'echo',
@@ -147,13 +153,91 @@ describe('createRpcLink', () => {
 		expect(hasOrpcErrorCode(new Error('x'), 'NOT_FOUND')).toBe(false)
 	})
 
+	test('responseStatusOf reads the status of an oRPC error and of a foreign response', async () => {
+		const error = await client.missing().catch((caught: unknown) => caught)
+		expect(responseStatusOf(error)).toBe(404)
+		// A proxy's error page is not oRPC's format: MalformedResponseError.
+		const behindProxy: RouterClient<typeof router> = createORPCClient(
+			createRpcLink({
+				origin,
+				url,
+				batch: false,
+				fetch: async () =>
+					new Response('<h1>Bad Gateway</h1>', {
+						status: 502,
+						headers: { 'content-type': 'text/html' }
+					})
+			})
+		)
+		const proxied = await behindProxy
+			.echo({ text: 'a' })
+			.catch((caught: unknown) => caught)
+		expect(responseStatusOf(proxied)).toBe(502)
+		// No response arrived at all.
+		const offline: RouterClient<typeof router> = createORPCClient(
+			createRpcLink({
+				origin,
+				url,
+				batch: false,
+				fetch: () => Promise.reject(new TypeError('fetch failed'))
+			})
+		)
+		const unreachable = await offline
+			.echo({ text: 'a' })
+			.catch((caught: unknown) => caught)
+		expect(unreachable).toBeInstanceOf(Error)
+		expect(responseStatusOf(unreachable)).toBeUndefined()
+		expect(responseStatusOf(new ORPCError('NOT_FOUND'))).toBeUndefined()
+	})
+
+	test('without origin the link fetches the bare path, which a browser resolves against the page', async () => {
+		const seen: string[] = []
+		const sameOrigin: RouterClient<typeof router> = createORPCClient(
+			createRpcLink({
+				url,
+				batch: false,
+				fetch: (path, init) => {
+					seen.push(path)
+					return serve(`${origin}${path}`, init)
+				}
+			})
+		)
+		expect((await sameOrigin.echo({ text: 'a' })).text).toBe('a')
+		expect(seen).toEqual(['/rpc/echo'])
+	})
+
 	test('a full URL as url names the oRPC 2 origin/url split', () => {
-		expect(() =>
-			createRpcLink({ url: 'https://api.test/rpc?v=2' as `/${string}` })
-		).toThrow("pass origin: 'https://api.test' and url: '/rpc?v=2'")
-		expect(() => createRpcLink({ url: 'http://[' as `/${string}` })).toThrow(
+		expect(() => createRpcLink({ url: 'https://api.test/rpc?v=2' })).toThrow(
+			"pass origin: 'https://api.test' and url: '/rpc?v=2'"
+		)
+		expect(() => createRpcLink({ url: 'http://[' })).toThrow(
 			'RPCLink url is a path since oRPC 2'
 		)
+	})
+
+	test('url takes a plain string path, and rejects one without a leading slash', async () => {
+		// A `string` constant, as apps keep their paths, with no `as const`.
+		const path: string = ['', 'rpc'].join('/')
+		const plain: RouterClient<typeof router> = createORPCClient(
+			createRpcLink({ origin, url: path, fetch: serve, batch: false })
+		)
+		expect((await plain.echo({ text: 'a' })).text).toBe('a')
+		expect(() => createRpcLink({ origin, url: 'rpc' })).toThrow(
+			"RPCLink url must be a path starting with '/', got 'rpc'"
+		)
+	})
+
+	test('operationPath reads the path of an oRPC query key, prefixed or not', () => {
+		const orpc = createTanstackQueryUtils(client)
+		expect(operationPath(orpc.counter.get.key({ input: { id: 'x' } }))).toEqual(
+			['counter', 'get']
+		)
+		expect(operationPath(orpc.counter.key())).toEqual(['counter'])
+		const prefixed = createTanstackQueryUtils(client, { prefix: 'admin' })
+		expect(operationPath(prefixed.counter.get.key())).toEqual([
+			'counter',
+			'get'
+		])
 	})
 
 	test('TanStack Query calls batch, while liveOptions stays out of batches', async () => {
@@ -262,6 +346,27 @@ describe('Expo', () => {
 			'x-skip-oauth-proxy': 'true',
 			'x-orpc-source': 'expo-react'
 		})
+	})
+
+	test('CLIENT_REQUEST_HEADERS lists every header the links add', async () => {
+		inits.length = 0
+		const client: RouterClient<typeof router> = createORPCClient(
+			createBetterAuthExpoLink({
+				origin,
+				url,
+				fetch: expoFetch,
+				native: true,
+				getCookie: () => 'session=abc',
+				getExpoOrigin: () => 'myapp://'
+			})
+		)
+		// Two parallel calls go out as one batch, which adds `orpc-batch`.
+		await Promise.all([client.echo({ text: 'a' }), client.echo({ text: 'b' })])
+		const sent = new Set(inits.flatMap((init) => Object.keys(init.headers)))
+		expect(sent.has('orpc-batch')).toBe(true)
+		// A browser cannot set `cookie`, and `accept` is CORS-safelisted.
+		for (const name of ['cookie', 'accept']) sent.delete(name)
+		expect([...sent].sort()).toEqual([...CLIENT_REQUEST_HEADERS].sort())
 	})
 
 	test('native: aborting a subscription closes the server stream', async () => {

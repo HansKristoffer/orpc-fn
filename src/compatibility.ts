@@ -124,6 +124,30 @@ export function readStoredFnMeta(procedure: object): unknown {
 }
 
 /**
+ * Whether a router walk entry is a procedure (it has a handler) rather than
+ * a contract. oRPC 2 dropped `isProcedure`; `instanceof Procedure` fails
+ * across installed copies of `@orpc/server`.
+ */
+export function isProcedure(value: object): value is AnyProcedure {
+	const def = (value as { '~orpc'?: { handler?: unknown } })['~orpc']
+	return (
+		typeof def === 'object' && def !== null && typeof def.handler === 'function'
+	)
+}
+
+/** A copy of `procedure` whose `fn()` record is `stored`. */
+export function withStoredFnMeta<T extends AnyProcedure>(
+	procedure: T,
+	stored: unknown
+): T {
+	const def = procedure['~orpc']
+	return new DecoratedProcedure({
+		...def,
+		meta: { ...def.meta, [FN_META_KEY]: stored }
+	}) as unknown as T
+}
+
+/**
  * `os.use(...).router(...)` returns a plain `Procedure` without `.meta()`,
  * `.errors()` or `.use()`. Re-wrap it as `DecoratedProcedure` so runtime
  * routes support the methods `fn()`'s return type exposes.

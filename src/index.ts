@@ -6,13 +6,22 @@ export {
 	type RoutePolicyParams,
 	type TestCallExtras
 } from './create-fn.js'
-export { isExpectedClientError } from './expected-client-error.js'
+export {
+	errorStatusOf,
+	isExpectedClientError
+} from './expected-client-error.js'
 export {
 	createDefaultLogger,
 	type FnLogger,
 	type LogAttributes
 } from './logger.js'
-export { defineMeta, FN_META_KEY, type FnMeta, readFnMeta } from './meta.js'
+export {
+	defineMeta,
+	FN_META_KEY,
+	type FnMeta,
+	readFnMeta,
+	withFnMeta
+} from './meta.js'
 export type {
 	AttributeValue,
 	OtelApiLike,
@@ -24,7 +33,8 @@ export {
 	createRouter,
 	createStreamManifest,
 	createStreamManifestAsync,
-	renderStreamManifest
+	renderStreamManifest,
+	walkProcedures
 } from './router.js'
 export type {
 	AnyFnContext,

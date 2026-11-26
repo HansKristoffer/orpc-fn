@@ -12,7 +12,9 @@ import {
 	createStreamManifest,
 	defineMeta,
 	type OtelApiLike,
-	readFnMeta
+	readFnMeta,
+	walkProcedures,
+	withFnMeta
 } from './index.js'
 import { hasOrpcErrorCode } from './client.js'
 import { createMastraTool } from './mastra.js'
@@ -237,7 +239,7 @@ test('procedure-scoped extras and hooks retain context correlation', async () =>
 	)
 })
 
-test('tool object unions work; collisions and streams fail clearly', () => {
+test('tool object unions work; collisions fail clearly and streams are skipped or fail', () => {
 	const { fn } = createFn({ procedures: { public: os }, default: 'public' })
 	const union = fn({
 		name: 'union',
@@ -253,17 +255,15 @@ test('tool object unions work; collisions and streams fail clearly', () => {
 	expect(() =>
 		listTools({ first, second: fn({ name: 'order-get', handler: () => 2 }) })
 	).toThrow('collision')
-	expect(() =>
-		listTools({
-			watch: fn({
-				name: 'watch',
-				stream: true,
-				handler: async function* () {
-					yield 1
-				}
-			})
-		})
-	).toThrow('streaming')
+	const watch = fn({
+		name: 'watch',
+		stream: true,
+		handler: async function* () {
+			yield 1
+		}
+	})
+	expect(listTools({ watch })).toEqual([])
+	expect(() => listTools({ watch }, { streams: 'throw' })).toThrow('streaming')
 })
 
 test('client error code is a real predicate', () => {
@@ -428,4 +428,61 @@ test('scoped extras replace shared keys in both handler types and values', async
 		}
 	})
 	expect(await call(route, undefined)).toBe(42)
+})
+
+test('walkProcedures yields procedures with their paths and skips contracts', async () => {
+	const { oc } = await import('@orpc/contract')
+	const { unlazyRouter } = await import('@orpc/server')
+	const { fn } = createFn({ procedures: { public: os }, default: 'public' })
+	const get = fn({ name: 'order.get', handler: () => 1 })
+	const list = fn({ name: 'order.list', handler: () => [] })
+	const router = {
+		order: { get, list },
+		contractOnly: oc.input(z.object({}))
+	}
+	const seen: Array<[string | undefined, readonly string[]]> = []
+	walkProcedures(router, (procedure, path) => {
+		seen.push([readFnMeta(procedure).name, path])
+	})
+	expect(seen).toEqual([
+		['order.get', ['order', 'get']],
+		['order.list', ['order', 'list']]
+	])
+	const lazy = { order: os.lazy(async () => ({ default: { get } })) }
+	expect(() => walkProcedures(lazy, () => {})).toThrow('unlazyRouter')
+	const names: string[] = []
+	walkProcedures(await unlazyRouter(lazy), (procedure) => {
+		names.push(readFnMeta(procedure).name ?? '')
+	})
+	expect(names).toEqual(['order.get'])
+})
+
+test('withFnMeta returns a route with merged app meta and leaves the route alone', async () => {
+	const factory = createFn({
+		procedures: { public: os },
+		default: 'public',
+		logger: () => quiet,
+		meta: defineMeta<{ approval?: 'none' | 'human'; risk?: 'low' | 'high' }>()
+	})
+	const route = factory.fn({
+		name: 'refund',
+		meta: { risk: 'high' },
+		handler: () => 'done'
+	})
+	const gated = withFnMeta(route, { approval: 'human' })
+	expect(readFnMeta(gated).meta).toEqual({ risk: 'high', approval: 'human' })
+	expect(readFnMeta(gated).name).toBe('refund')
+	expect(readFnMeta(route).meta).toEqual({ risk: 'high' })
+	expect(await call(gated, undefined, { context: {} })).toBe('done')
+	expectTypeOf(factory.readMeta(gated).meta.approval).toEqualTypeOf<
+		'none' | 'human' | undefined
+	>()
+	// @ts-expect-error meta values are the factory's
+	withFnMeta(route, { approval: 'robot' })
+	expect(() =>
+		withFnMeta(
+			os.handler(() => 1),
+			{}
+		)
+	).toThrow('procedure made with fn()')
 })

@@ -20,6 +20,10 @@ export type McpToolSelection = {
 	filter: ProcedureFilter
 	readOnly?: ProcedureFilter
 	name?: NonNullable<Parameters<typeof listTools>[1]>['name']
+	/** Streaming procedures the filter accepts: left out (`'skip'`, default) or `'throw'`. */
+	streams?: 'skip' | 'throw'
+	/** Keep patterns that repeat a standard `format` in input schemas. Default: false. */
+	keepFormatPatterns?: boolean
 }
 
 /** How a registered tool is called and how its outcome reads. */
@@ -65,7 +69,9 @@ export function prepareMcpTools<R extends AnyRouter>(
 	const tools = listTools(router, {
 		filter: options.filter,
 		...(options.readOnly ? { readOnly: options.readOnly } : {}),
-		...(options.name ? { name: options.name } : {})
+		...(options.name ? { name: options.name } : {}),
+		...(options.streams ? { streams: options.streams } : {}),
+		...(options.keepFormatPatterns ? { keepFormatPatterns: true } : {})
 	})
 	const descriptions = tools.map((tool) => {
 		const inputSchema = tool.config.inputSchema?.[

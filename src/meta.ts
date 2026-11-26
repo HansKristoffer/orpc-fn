@@ -9,7 +9,8 @@ import {
 	type LibraryMeta,
 	openapiRoute,
 	procedureDefinition,
-	readStoredFnMeta
+	readStoredFnMeta,
+	withStoredFnMeta
 } from './compatibility.js'
 
 export { FN_META_KEY }
@@ -28,6 +29,28 @@ export const hasTag =
 	(tag: string): ProcedureFilter =>
 	(procedure) =>
 		openapiRoute(procedure).tags?.includes(tag) ?? false
+
+/** Procedures every filter accepts: `allOf(hasTag('external'), not(hasTag('beta')))`. */
+export const allOf =
+	(...filters: readonly ProcedureFilter[]): ProcedureFilter =>
+	(procedure, path) =>
+		filters.every((filter) => filter(procedure, path))
+
+/** Procedures whose route has every one of `tags`: `hasTags('external', 'mcp-support')`. */
+export const hasTags = (...tags: readonly string[]): ProcedureFilter =>
+	allOf(...tags.map(hasTag))
+
+/** Procedures at least one filter accepts. */
+export const anyOf =
+	(...filters: readonly ProcedureFilter[]): ProcedureFilter =>
+	(procedure, path) =>
+		filters.some((filter) => filter(procedure, path))
+
+/** Procedures `filter` rejects. */
+export const not =
+	(filter: ProcedureFilter): ProcedureFilter =>
+	(procedure, path) =>
+		!filter(procedure, path)
 
 export type StoredFnMeta<
 	TMeta extends object = Record<string, unknown>,
@@ -116,6 +139,25 @@ export function readFnMeta<T extends AnyProcedure | AnyProcedureContract>(
 		guards: stored?.guards ?? {},
 		dynamicGuards: stored?.dynamicGuards ?? []
 	}
+}
+
+/**
+ * A copy of a `fn()` route with `meta` merged over its app meta, e.g. a test
+ * that needs a route with another approval rule:
+ * `call(withFnMeta(route, { requiresHumanApproval: gate }), input, { context })`.
+ * The route itself is unchanged.
+ */
+export function withFnMeta<T extends AnyProcedure>(
+	procedure: T,
+	meta: Partial<MetaFrom<T>>
+): T {
+	const stored = readStoredFnMeta(procedure) as StoredFnMeta | undefined
+	if (!stored)
+		throw new TypeError('orpc-fn: withFnMeta needs a procedure made with fn()')
+	return withStoredFnMeta(procedure, {
+		...stored,
+		meta: { ...stored.meta, ...meta }
+	})
 }
 
 function single(schemas: readonly AnySchema[]): AnySchema | undefined {

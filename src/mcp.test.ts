@@ -2,7 +2,15 @@ import { describe, expect, test } from 'bun:test'
 import { call } from '@orpc/server'
 import { z } from 'zod'
 import { createRouter, fn } from '../tests/fixture.js'
-import { hasTag, listTools, type ProcedureFilter } from './mcp.js'
+import {
+	allOf,
+	anyOf,
+	hasTag,
+	hasTags,
+	listTools,
+	not,
+	type ProcedureFilter
+} from './mcp.js'
 import { readFnMeta } from './meta.js'
 
 const isExternal = hasTag('external')
@@ -195,5 +203,107 @@ describe('listExternalTools', () => {
 		expect(
 			await tool?.config.inputSchema?.['~standard'].validate({})
 		).toMatchObject({ issues: [{ message: 'Expected { query: string }' }] })
+	})
+})
+
+describe('streaming procedures', () => {
+	const watch = fn({
+		name: 'thing.watch',
+		procedure: 'public',
+		tags: ['external'],
+		stream: true,
+		async *handler() {
+			yield { ok: true }
+		}
+	})
+	const withStream = createRouter({ external, watch })
+
+	test('are left out by default, so one filter serves REST and MCP', () => {
+		expect(listExternalTools(withStream).map((t) => t.name)).toEqual([
+			'thing-get'
+		])
+	})
+
+	test("streams: 'throw' fails on one the filter accepts", () => {
+		expect(() =>
+			listTools(withStream, { filter: isExternal, streams: 'throw' })
+		).toThrow('streaming procedure thing.watch cannot be an MCP tool')
+	})
+})
+
+describe('filter combinators', () => {
+	const names = (filter: ProcedureFilter) =>
+		listTools(router, { filter }).map((t) => t.name)
+
+	test('hasTags needs every tag; allOf, anyOf and not combine filters', () => {
+		expect(names(hasTags('external', 'mcp-support'))).toEqual(['thing-support'])
+		expect(names(allOf(isExternal, isMcpSupport))).toEqual(['thing-support'])
+		expect(names(anyOf(isMcpSupport, hasTag('mcp-readonly')))).toEqual([
+			'thing-support',
+			'thing-report'
+		])
+		expect(names(not(isExternal))).toEqual(['thing-secret'])
+		expect(names(allOf())).toHaveLength(4)
+		expect(names(anyOf())).toEqual([])
+	})
+
+	test('filters see the router path', () => {
+		const underOther: ProcedureFilter = (_procedure, path) =>
+			path[0] === 'other'
+		expect(
+			listTools(router, { filter: allOf(underOther, not(isExternal)) }).map(
+				(t) => t.name
+			)
+		).toEqual(['thing-secret'])
+	})
+})
+
+describe('tool JSON Schema size', () => {
+	const lookup = fn({
+		name: 'thing.lookup',
+		procedure: 'public',
+		input: z.object({
+			id: z.uuid(),
+			email: z.email(),
+			ref: z.cuid(),
+			note: z.string().min(1).max(200)
+		}),
+		handler: ({ input }) => input.id
+	})
+	const inputOf = (options: { keepFormatPatterns?: boolean } = {}) => {
+		const [tool] = listTools(createRouter({ lookup }), options)
+		return tool?.config.inputSchema
+	}
+
+	test('a pattern that repeats a standard format is left out; limits and other patterns stay', async () => {
+		const schema = inputOf()
+		const json = schema?.['~standard'].jsonSchema.input() as {
+			properties: Record<string, Record<string, unknown>>
+		}
+		expect(json.properties.id).toEqual({ type: 'string', format: 'uuid' })
+		expect(json.properties.email).toEqual({ type: 'string', format: 'email' })
+		expect(json.properties.ref?.pattern).toBeString()
+		expect(json.properties.note).toEqual({
+			type: 'string',
+			minLength: 1,
+			maxLength: 200
+		})
+		// Validation still applies every check.
+		const rejected = await schema?.['~standard'].validate({
+			id: 'not-a-uuid',
+			email: 'a@b.co',
+			ref: 'cjld2cjxh0000qzrmn831i7rn',
+			note: 'x'
+		})
+		expect(rejected && 'issues' in rejected && rejected.issues?.length).toBe(1)
+	})
+
+	test('keepFormatPatterns keeps them', () => {
+		const json = inputOf({ keepFormatPatterns: true })?.[
+			'~standard'
+		].jsonSchema.input() as {
+			properties: Record<string, Record<string, unknown>>
+		}
+		expect(json.properties.id?.pattern).toBeString()
 	})
 })

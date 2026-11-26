@@ -83,6 +83,10 @@ oRPC 2 tags serialized types by name (`['date', 'at']`) where oRPC 1 used number
 
 `fnLive` authorizes and subscribes before it builds the initial snapshot. The earlier pattern, calling the subscribe procedure and then loading the snapshot, sent the snapshot before `authFn` ran (an async generator does not run until its first `next()`). It also missed events published while the snapshot loaded. lullu's in-repo `fn-live.ts` has both problems.
 
+## Live updates repeat the route's guards
+
+0.9.1 reran a snapshot by calling the procedure, so guards ran before every update. 0.9.2 called the handler directly, to stop middleware, input parsing and extras running per update, and guards silently ran only when the stream opened: a feature flag removed mid-stream kept the stream alive, and a rerun that changed nothing hid it entirely. **Decision:** `fn` keeps each guarded route's guard runner, and `fnLive` runs the subscribe route's guards before each update (rerun, fold or gap), on by default; `live.rerunGuards: false` opts out. Middleware still runs once: an app that loads permissions in middleware reads them through a guard to have them rechecked. `createPubSub` streams forward events and never reran guards, so they are unchanged.
+
 ## Client helpers
 
 `orpc-fn/client` and `orpc-fn/expo` hold only what the apps wrote by hand: a batching link that sends subscriptions on their own, and the `expo/fetch` bridge with the Better Auth headers. `createORPCClient` and `createTanstackQueryUtils` are already one line each in `@orpc/client` and `@orpc/tanstack-query`, so they are not wrapped. Expo and React Native are passed in (`fetch`, `native`) rather than imported, so the package has no Expo dependency.
@@ -109,6 +113,14 @@ The client link used to keep a call out of a batch when its router path containe
 
 oRPC 2 removed `ORPCError`'s `status`: a handler maps codes with `errorStatusMap` (its common map otherwise) and answers codes it does not know with 400, where oRPC 1 used 500. **Decision:** `isExpectedClientError` classifies by the status oRPC would answer with, so an unknown code counts as expected, matching what the client receives. The HTTP adapters take `errorStatusMap`, merged over oRPC's common map because oRPC replaces it, and classify `onError` under it. The factory remembers only its app's own `isExpectedError` decisions, so the default rule is re-applied by each adapter under its map rather than frozen at the route.
 
+oRPC 2's REST error body also dropped `status`. A plugin cannot change the body: `OpenAPIHandler` builds its codec, with `errorResponseBodyEncoder`, before plugins `init`. **Decision:** `openapi.errorResponseBodyEncoder` passes oRPC's option through, with the status under the merged map as a second argument, and `errorStatusOf` is exported for the same rule elsewhere. No built-in `'with-status'` body: the app documents its shape with oRPC's own `errorResponseBodySchema`, which a fixed option would have to second-guess.
+
+The default `isExpectedClientError` does not accept hanzio's `ApiError`, although Feedreply, hellu and brain add it. gey-mono throws `ApiError`s from calls to e-conomic and Shipmondo with the default rule, and would stop reporting their 5xx, network and config failures; the tool adapters would also show the model upstream URLs and bodies. Importing `hanzio/api-wrapper` would also bring `zod` into the root entry. An app that wants it passes `createFn({ isExpectedError: (error) => isExpectedClientError(error) || isApiError(error) })`, which `mountOrpc` and the tool adapters then follow.
+
+## OpenAPI documents: components and several pages
+
+oRPC 2 removed `commonSchemas`. Its generator hoists a Zod schema that carries an `id` into `components.schemas`, but only where a route refers to it, and an `id` in Zod's global registry would also change the JSON Schema the tool adapters build from the same schema. **Decision:** `generateOpenApiDocument` (`orpc-fn/openapi`) gives oRPC's `ZodToJsonSchemaConverter` a private registry per direction whose `get` adds the `id` to the global metadata, then adds the components no route refers to with `z.toJSONSchema(registry, { uri })` (dates as `date-time` strings, as oRPC writes them). Everything else is oRPC's generator and options. The mount's docs pages generate with it, take an app-built `document` instead, and come several to a surface (one `OpenAPIReferenceHandlerPlugin` each), as do surfaces to a mount, so an external API with its own docs pages needs no second handler.
+
 ## The adapters compress their own responses
 
 oRPC answers a streaming batch with one frame per result (`application/vnd.orpc.batch` since oRPC 2, an event stream before), sent as each finishes. A compressor that buffers its output (`CompressionStream`, a default zlib stream) makes a fast result wait behind a slow one, and Hono's `compress()` and oRPC 1's `CompressionPlugin` skipped event streams altogether. oRPC 2's `ResponseCompressionHandlerPlugin` uses `CompressionStream`, so it lacks brotli (`gzip`/`deflate` only) and cannot flush per batch frame. Apps served without a compressing proxy sent their largest responses raw, and a Vercel function must stay under its response size limit. **Decision:** the adapters compress JSON and batch event streams themselves (`compress`, on by default) with `node:zlib`: brotli at quality 4 (about gzip's speed, smaller output) unless the client prefers or only accepts gzip, flushing after every chunk. A batch is recognised by its content type. Event streams stay uncompressed: they are long-lived and small. Responses that already have `content-encoding`, say `no-transform`, or carry `206`/`content-range` are left alone, so an outer compressor still wins; strong ETags are weakened on compressed responses.
@@ -122,6 +134,10 @@ On Fetch the adapter compresses the finished `Response`. On Node, oRPC writes st
 ## Exposure and access are explicit
 
 `mountOrpc`'s OpenAPI mount used to publish every route when its optional `filter` was left out, which the README example did. A pub/sub definition without `authFn` let through anyone who passed its procedure builder, and a bus meant only for the server was one router line away from that. **Decision:** `openapi.filter` is required (on every HTTP adapter), as `registerMcpTools`'s already was; `() => true` says "everything". `createPubSub` requires `authFn`; `true` says "anyone". A scoped change bus defaults it to `true`, because its scope, read from the context, is the access decision. The server reads a bus with `listen`, which needs no route. The OpenAPI modules load on the first request to the prefix, so an RPC-only app does not install those peers.
+
+## Tool listings skip streams
+
+`listTools` threw when its filter accepted a streaming procedure. A stream tagged `external` is a valid REST route (SSE), so apps kept a second filter only to strip streams from the same surface. **Decision:** a stream the filter accepts is left out by default (`streams: 'skip'`); `streams: 'throw'` keeps the strict check. `createMastraTool` takes one procedure, so it still throws, and `orpc-fn/cli` lists only routes that opt in.
 
 ## Tools tell the model what it can fix, and nothing else
 
@@ -138,6 +154,8 @@ Pub/sub subscriptions used to skip guards, extras and completion logging. Comple
 ## Tool schemas
 
 The core accepts any Standard Schema, oRPC's own `eventIterator` included. Executable tools (MCP, Mastra) need JSON Schema, so they convert through oRPC's `DelegatingJsonSchemaConverter` (`ZodToJsonSchemaConverter` plus `StandardJsonSchemaConverter`) and check object schemas with `extractJsonObjectSchemaEntries` from `@orpc/json-schema`, supporting both Zod 4.5+ and any Standard JSON Schema v1 validator. A widened core does not promise that every validator works with every adapter. Validation and execution can both parse the raw tool input, so transforms and refinements must be pure.
+
+oRPC 2's Zod converter writes string checks oRPC 1's dropped: `minLength`/`maxLength`, and for a format both `format` and Zod's whole regex as `pattern` (about 150 characters for a uuid). Tool schemas are prompt text, and one app's tool prefix grew by about 25%. **Decision:** the schema a model reads leaves out a `pattern` beside a standard JSON Schema `format` that already names the shape (`uuid`, `email`, `date-time`, …), keeping limits and Zod's own formats (`cuid`, `e164`, …, which a model cannot read from the name); validation and coercion use the full conversion. `keepFormatPatterns: true` keeps them.
 
 ## `trpc-cli` vs `/cli`
 

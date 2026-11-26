@@ -612,6 +612,67 @@ for (const adapter of adapters) {
 			expect((await raw(`${url}/api/big`, { method: 'GET' })).status).toBe(404)
 		})
 
+		test('several OpenAPI surfaces, docs pages with their own specs, and an error body with its status', async () => {
+			const url = await serve({
+				errorStatusMap: { RATE_LIMITED: 429 },
+				openapi: [
+					{ prefix: '/internal', filter: () => true, docs: false },
+					{
+						prefix: '/v1',
+						filter: hasTag('external'),
+						spec: { version: '3.1.1' },
+						errorResponseBodyEncoder: (error, status) => ({
+							...error.toJSON(),
+							status
+						}),
+						docs: [
+							{
+								path: '/customer',
+								specPath: '/customer/spec.json',
+								filter: (_procedure, path) => path[0] === 'echo',
+								info: { title: 'Customer API', version: '1.0.0' }
+							},
+							{ info: { title: 'External API', version: '1.0.0' } }
+						]
+					}
+				]
+			})
+			const customer = decode(
+				await raw(`${url}/v1/customer/spec.json`, { method: 'GET' })
+			)
+			expect(customer.openapi).toBe('3.1.1')
+			expect(customer.info.title).toBe('Customer API')
+			expect(Object.keys(customer.paths)).toEqual(['/echo'])
+			const external = decode(
+				await raw(`${url}/v1/spec.json`, { method: 'GET' })
+			)
+			expect(external.info.title).toBe('External API')
+			expect(Object.keys(external.paths)).toEqual([
+				'/echo',
+				'/cached',
+				'/limited'
+			])
+			const page = await raw(`${url}/v1/customer`, { method: 'GET' })
+			expect(page.headers['content-type']).toContain('text/html')
+			// The REST error body carries the status, under errorStatusMap.
+			const limited = await raw(`${url}/v1/limited`, { method: 'GET' })
+			expect(limited.status).toBe(429)
+			expect(decode(limited)).toMatchObject({
+				code: 'RATE_LIMITED',
+				status: 429
+			})
+			// The other surface keeps oRPC's body, and serves routes /v1 does not.
+			const internal = await raw(`${url}/internal/limited`, { method: 'GET' })
+			expect(internal.status).toBe(429)
+			expect(decode(internal).status).toBeUndefined()
+			expect(
+				(await raw(`${url}/internal/spec.json`, { method: 'GET' })).status
+			).toBe(404)
+			// RPC errors keep oRPC's own format, which its client decodes.
+			const rpc = await raw(`${url}/rpc/limited`, { body: rpcBody() })
+			expect(decode(rpc).json.status).toBeUndefined()
+		})
+
 		test('compression weakens strong ETags, skips content-range and deduplicates exposed headers', async () => {
 			const url = await serve({
 				plugins: [
