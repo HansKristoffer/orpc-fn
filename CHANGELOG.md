@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.11.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.10.0...v0.11.0) (2026-11-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* move to oRPC 2 ([#38](https://github.com/HansKristoffer/orpc-fn/issues/38))
+
+### Features
+
+* move to oRPC 2 ([#38](https://github.com/HansKristoffer/orpc-fn/issues/38)) ([2c3ae6e](https://github.com/HansKristoffer/orpc-fn/commit/2c3ae6e4a9b6f4dba0b587442a7138f59d07c254))
+
 ## [0.10.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.9.2...v0.10.0) (2026-11-26)
 
 
