@@ -240,6 +240,135 @@ describe('createRpcLink', () => {
 		])
 	})
 
+	test("batch.only: 'queries' batches TanStack queries; mutations, direct calls and calls with a client context go alone", async () => {
+		type Context = { batch?: false }
+		const queriesOnly: RouterClient<typeof router, Context> = createORPCClient(
+			createRpcLink<Context>({
+				origin,
+				url,
+				fetch: serve,
+				batch: { only: 'queries' }
+			})
+		)
+		const orpc = createTanstackQueryUtils(queriesOnly)
+		const signal = new AbortController().signal
+		const query = (text: string, context: Context = {}) => {
+			const options = orpc.echo.queryOptions({ input: { text }, context })
+			return options.queryFn({
+				queryKey: options.queryKey,
+				signal,
+				meta: undefined
+			} as never)
+		}
+		const infinite = orpc.echo.infiniteOptions({
+			input: (text: string) => ({ text }),
+			initialPageParam: 'page',
+			getNextPageParam: () => undefined
+		})
+
+		hits.length = 0
+		const queried = await Promise.all([
+			query('a'),
+			query('b'),
+			infinite.queryFn?.({
+				queryKey: infinite.queryKey,
+				signal,
+				meta: undefined,
+				pageParam: 'page',
+				direction: 'forward'
+			} as never)
+		])
+		expect(queried.map((result) => result?.text)).toEqual(['a', 'b', 'page'])
+		expect(hits).toEqual(['/rpc/echo/__batch__'])
+
+		hits.length = 0
+		const mutation = orpc.echo.mutationOptions()
+		await Promise.all([
+			mutation.mutationFn?.({ text: 'c' }, {} as never),
+			mutation.mutationFn?.({ text: 'd' }, {} as never),
+			queriesOnly.echo({ text: 'e' }),
+			queriesOnly.echo({ text: 'f' })
+		])
+		expect(hits).toEqual(['/rpc/echo', '/rpc/echo', '/rpc/echo', '/rpc/echo'])
+
+		// A client context opts a query out, as it does without `only`.
+		hits.length = 0
+		await Promise.all([
+			query('g', { batch: false }),
+			query('h', { batch: false })
+		])
+		expect(hits).toEqual(['/rpc/echo', '/rpc/echo'])
+
+		// With `groups`, `only` still narrows what the groups see.
+		const grouped: RouterClient<typeof router, Context> = createORPCClient(
+			createRpcLink<Context>({
+				origin,
+				url,
+				fetch: serve,
+				batch: {
+					only: 'queries',
+					groups: [
+						{
+							condition: ({ context }) => context.batch !== false,
+							context: {}
+						}
+					]
+				}
+			})
+		)
+		hits.length = 0
+		await Promise.all([
+			grouped.echo({ text: 'i' }),
+			grouped.echo({ text: 'j' })
+		])
+		expect(hits).toEqual(['/rpc/echo', '/rpc/echo'])
+	})
+
+	test('batch.mode asks the server for a streaming (default) or buffered batch', async () => {
+		const sent: Array<string | null> = []
+		const linked = (batch?: { mode: 'streaming' | 'buffered' }) =>
+			createORPCClient<RouterClient<typeof router>>(
+				createRpcLink({
+					origin,
+					url,
+					fetch: (input, init) => {
+						sent.push(new Request(input, init).headers.get('orpc-batch'))
+						return serve(input, init)
+					},
+					...(batch ? { batch } : {})
+				})
+			)
+		for (const batch of [
+			undefined,
+			{ mode: 'streaming' },
+			{ mode: 'buffered' }
+		] as const) {
+			const mode = linked(batch)
+			const results = await Promise.all([
+				mode.echo({ text: 'a' }),
+				mode.echo({ text: 'b' })
+			])
+			expect(results.map((result) => result.text)).toEqual(['a', 'b'])
+		}
+		expect(sent).toEqual(['streaming', 'streaming', 'buffered'])
+	})
+
+	test('batch.mode and batch.only reject values the types do not allow', () => {
+		// What a spread or a JS caller can pass.
+		const loose = (batch: object) =>
+			createRpcLink({ origin, url, batch: batch as { mode: 'buffered' } })
+		expect(() => loose({ mode: 'buffer' })).toThrow(
+			"batch.mode must be 'streaming' or 'buffered'"
+		)
+		expect(() => loose({ only: 'query' })).toThrow(
+			"batch.only must be 'queries'"
+		)
+		expect(() =>
+			// @ts-expect-error the mode is one of oRPC's two
+			createRpcLink({ origin, url, batch: { mode: 'streamed' } })
+		).toThrow(TypeError)
+	})
+
 	test('TanStack Query calls batch, while liveOptions stays out of batches', async () => {
 		const orpc = createTanstackQueryUtils(client)
 		const q1 = orpc.echo.queryOptions({ input: { text: 'a' } })

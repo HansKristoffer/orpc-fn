@@ -16,7 +16,11 @@ import { CORSHandlerPlugin } from '@orpc/server/plugins'
 import { z } from 'zod'
 import { captureStreamingBatch } from '../tests/batch.js'
 import { quiet } from '../tests/fixture.js'
-import { createRpcLink } from './client.js'
+import {
+	createRpcLink,
+	decodeRpcBatchResponse,
+	encodeRpcBatchRequest
+} from './client.js'
 import { createFetchHandler, type FetchHandlerOptions, timed } from './fetch.js'
 import { createFn } from './index.js'
 import { createNodeHandler } from './node.js'
@@ -272,6 +276,8 @@ function raw(
 		method?: string
 		headers?: Record<string, string>
 		body?: string
+		/** Send the body without a content-length. */
+		chunked?: boolean
 	} = {}
 ): Promise<RawResponse> {
 	return new Promise((resolve, reject) => {
@@ -292,7 +298,8 @@ function raw(
 			}
 		)
 		req.on('error', reject)
-		req.end(init.body)
+		if (init.chunked && init.body !== undefined) req.write(init.body)
+		req.end(init.chunked ? undefined : init.body)
 	})
 }
 
@@ -338,7 +345,7 @@ function openStream(
 }
 
 const rpcBody = (json: unknown = null) => JSON.stringify({ json })
-const decode = (response: RawResponse) => {
+const decodeText = (response: RawResponse) => {
 	const encoding = response.headers['content-encoding']
 	const body =
 		encoding === 'br'
@@ -346,8 +353,9 @@ const decode = (response: RawResponse) => {
 			: encoding === 'gzip'
 				? zlib.gunzipSync(response.body)
 				: response.body
-	return JSON.parse(body.toString())
+	return body.toString()
 }
+const decode = (response: RawResponse) => JSON.parse(decodeText(response))
 
 for (const adapter of adapters) {
 	describe(`orpc-fn/${adapter.name}`, () => {
@@ -607,49 +615,162 @@ for (const adapter of adapters) {
 
 		// An app memoises per-request work (one token verification per batch)
 		// on what the factory creates, and reads request state from the scope.
-		test('a batch builds the context once, inside the one AsyncLocalStorage scope around the handler', async () => {
-			let built = 0
-			const builtIn: Array<number | null> = []
-			const url = await serve(
-				{
-					context: (_request, base) => {
-						builtIn.push(store.getStore()?.scope ?? null)
-						return { ...base, built: ++built }
-					}
-				},
-				true
-			)
-			let requests = 0
+		test.each(['streaming', 'buffered'] as const)(
+			'a %s batch builds the context once, inside the one AsyncLocalStorage scope around the handler',
+			async (mode) => {
+				let built = 0
+				const builtIn: Array<number | null> = []
+				const url = await serve(
+					{
+						context: (_request, base) => {
+							builtIn.push(store.getStore()?.scope ?? null)
+							return { ...base, built: ++built }
+						}
+					},
+					true
+				)
+				let requests = 0
+				const client: RouterClient<Router> = createORPCClient(
+					createRpcLink({
+						origin: url,
+						url: '/rpc',
+						batch: { mode },
+						fetch: (input, init) => {
+							requests++
+							return fetch(input, init)
+						}
+					})
+				)
+
+				const batch = await Promise.all([
+					client.scope(),
+					client.scope(),
+					client.scope()
+				])
+				expect(requests).toBe(1)
+				expect(built).toBe(1)
+				const scope = builtIn[0] ?? null
+				expect(scope).toBeNumber()
+				expect(batch.map((result) => result.built)).toEqual([1, 1, 1])
+				expect(batch.map((result) => result.scope)).toEqual([
+					scope,
+					scope,
+					scope
+				])
+				// Every call counted into the same store object, not a copy per call.
+				expect(batch.map((result) => result.calls).sort()).toEqual([1, 2, 3])
+
+				// The next HTTP request gets a context and a scope of its own.
+				const alone = await client.scope()
+				expect(requests).toBe(2)
+				expect(alone).toEqual({ built: 2, scope: builtIn[1] ?? null, calls: 1 })
+				expect(builtIn[1]).not.toBe(scope)
+			}
+		)
+
+		test('a buffered batch answers once, as one JSON array', async () => {
+			const url = await serve()
+			const responses: Array<string | null> = []
 			const client: RouterClient<Router> = createORPCClient(
 				createRpcLink({
 					origin: url,
 					url: '/rpc',
-					fetch: (input, init) => {
-						requests++
-						return fetch(input, init)
+					batch: { mode: 'buffered' },
+					fetch: async (input, init) => {
+						const response = await fetch(input, init)
+						responses.push(response.headers.get('content-type'))
+						return response
 					}
 				})
 			)
-
-			const batch = await Promise.all([
-				client.scope(),
-				client.scope(),
-				client.scope()
+			releaseSlow()
+			const [echo, slow, missing] = await Promise.allSettled([
+				client.echo({ text: 'hi' }),
+				client.slow(),
+				client.missing()
 			])
-			expect(requests).toBe(1)
-			expect(built).toBe(1)
-			const scope = builtIn[0] ?? null
-			expect(scope).toBeNumber()
-			expect(batch.map((result) => result.built)).toEqual([1, 1, 1])
-			expect(batch.map((result) => result.scope)).toEqual([scope, scope, scope])
-			// Every call counted into the same store object, not a copy per call.
-			expect(batch.map((result) => result.calls).sort()).toEqual([1, 2, 3])
+			expect(echo).toEqual({ status: 'fulfilled', value: { text: 'hi' } })
+			expect(slow).toEqual({ status: 'fulfilled', value: { done: true } })
+			expect(missing).toMatchObject({
+				status: 'rejected',
+				reason: { code: 'NOT_FOUND' }
+			})
+			expect(responses).toEqual(['application/json'])
+		})
 
-			// The next HTTP request gets a context and a scope of its own.
-			const alone = await client.scope()
-			expect(requests).toBe(2)
-			expect(alone).toEqual({ built: 2, scope: builtIn[1] ?? null, calls: 1 })
-			expect(builtIn[1]).not.toBe(scope)
+		test('maxBodySize answers 413 to a larger body, measured or declared, alone or batched', async () => {
+			const url = await serve({
+				maxBodySize: 1024,
+				plugins: [new CORSHandlerPlugin()]
+			})
+			const json = {
+				'content-type': 'application/json',
+				origin: 'https://app.test'
+			}
+			const small = rpcBody({ text: 'ok' })
+			const large = rpcBody({ text: 'x'.repeat(2048) })
+
+			const accepted = await raw(`${url}/rpc/echo`, {
+				headers: json,
+				body: small
+			})
+			expect(decode(accepted)).toEqual({ json: { text: 'ok' } })
+
+			for (const chunked of [false, true]) {
+				const refused = await raw(`${url}/rpc/echo`, {
+					headers: json,
+					body: large,
+					chunked
+				})
+				expect(refused.status).toBe(413)
+				expect(decode(refused).json).toMatchObject({
+					code: 'PAYLOAD_TOO_LARGE'
+				})
+			}
+
+			// A batch is one request: its calls fit one by one, not together.
+			const part = { text: 'x'.repeat(400) }
+			const batch = encodeRpcBatchRequest([
+				{ url: '/rpc/echo', input: part },
+				{ url: '/rpc/echo', input: part },
+				{ url: '/rpc/echo', input: part }
+			])
+			const refusedBatch = await raw(`${url}/rpc/echo/__batch__`, {
+				headers: { ...json, 'orpc-batch': 'buffered' },
+				body: batch
+			})
+			expect(refusedBatch.status).toBe(413)
+			expect(decode(refusedBatch).json).toMatchObject({
+				code: 'PAYLOAD_TOO_LARGE'
+			})
+			// A browser on another origin can still read the refusal.
+			expect(refusedBatch.headers['access-control-allow-origin']).toBe('*')
+			// The link gives every call of that batch the error, not a parse failure.
+			const client: RouterClient<Router> = createORPCClient(
+				createRpcLink({ origin: url, url: '/rpc' })
+			)
+			const calls = await Promise.allSettled([
+				client.echo(part),
+				client.echo(part),
+				client.echo(part)
+			])
+			for (const call of calls)
+				expect(call).toMatchObject({
+					status: 'rejected',
+					reason: { code: 'PAYLOAD_TOO_LARGE' }
+				})
+
+			const unlimited = await serve()
+			const answered = await raw(`${unlimited}/rpc/echo/__batch__`, {
+				headers: { ...json, 'orpc-batch': 'buffered' },
+				body: batch
+			})
+			expect(answered.status).toBe(207)
+			expect(decodeRpcBatchResponse(decodeText(answered))).toEqual([
+				{ id: '1', status: 200, output: part },
+				{ id: '2', status: 200, output: part },
+				{ id: '3', status: 200, output: part }
+			])
 		})
 
 		test('files round-trip: upload a File, download a Blob', async () => {
@@ -842,6 +963,10 @@ describe('adapter-specific behaviour', () => {
 		).toThrow('rpcPrefix or openapi')
 		// @ts-expect-error a handler must serve RPC, OpenAPI or both
 		expect(() => createNodeHandler({ router })).toThrow('rpcPrefix or openapi')
+		for (const maxBodySize of [0, -1, Number.POSITIVE_INFINITY, Number.NaN])
+			expect(() =>
+				createNodeHandler({ router, rpcPrefix: '/rpc', maxBodySize })
+			).toThrow(RangeError)
 		expect(() =>
 			createFetchHandler({
 				router,
