@@ -338,7 +338,7 @@ export { handler as GET, handler as POST }
 // TanStack Start: server: { handlers: { ANY: ({ request }) => handler(request) } }
 ```
 
-**`orpc-fn/node`** is a `(req, res, next?)` handler over `@orpc/server/node`, for Next.js Pages Router API routes, Express and `http.createServer`. Unmatched requests go to `next` when given, else get a 404. A body an earlier middleware parsed (`req.body`) is used as is, but Next.js should leave it unparsed so file uploads arrive intact. The handler runs inside whatever wraps it, so an `AsyncLocalStorage` wrapper reaches every procedure, batched or not.
+**`orpc-fn/node`** is a `(req, res, next?)` handler over `@orpc/server/node`, for Next.js Pages Router API routes, Express and `http.createServer`. Unmatched requests go to `next` when given, else get a 404. A body an earlier middleware parsed (`req.body`) is used as is, but Next.js should leave it unparsed so file uploads arrive intact. With the parser off nothing limits the request body, so set `maxBodySize`. The handler runs inside whatever wraps it, so an `AsyncLocalStorage` wrapper reaches every procedure, batched or not.
 
 ```ts
 // pages/api/rpc/[[...rpc]].ts
@@ -350,6 +350,7 @@ export default withInRequestStorage(
   createNodeHandler({
     router,
     rpcPrefix: '/api/rpc',
+    maxBodySize: 4 * 1024 * 1024,
     context: async (req, { headers, timing }) => ({
       headers,
       timing,
@@ -402,6 +403,7 @@ Behaviour:
 - The response gets a `Server-Timing` header built from the request timing collector: app-recorded queue/auth/context metrics plus library-owned procedure time (`serverTiming: false` turns it off). Nested calls do not overwrite parent timing; batches aggregate their top-level procedure durations (which may overlap). `fn` does not mutate an arbitrary `context.timing` field. `formatServerTiming` (and `finishOrpcHeaders` on `orpc-fn/hono`) are available for composed adapters.
 - SSE responses get keep-alive comments (15 s) and anti-buffering headers.
 - RPC calls are batched (`BatchHandlerPlugin`).
+- `maxBodySize` (bytes) refuses a larger request body with 413 `PAYLOAD_TOO_LARGE`, on the RPC and the OpenAPI handlers (oRPC's `RequestLimitHandlerPlugin`). There is no default: a Hono app, Express or a proxy usually limits bodies already, and a limit of ours would break uploads that work today. Set it where nothing else does, such as a Next.js API route with `bodyParser: false`. A declared `content-length` over the limit is refused before the body is read; otherwise the bytes are counted as they arrive. A batch counts as the one request it is, so the limit must fit `batch.maxSize` calls together, and its calls all fail with the same error. A body an earlier middleware already parsed is checked by its declared length only. A `RequestLimitHandlerPlugin` of your own in `plugins` replaces ours.
 - JSON and batch responses are compressed when the client accepts it: brotli, or gzip when the client prefers or only accepts it (`compress: false` turns it off). Bodies under 512 bytes are sent as they are. A streaming batch (`application/vnd.orpc.batch`) sends each result as it finishes, so it is flushed after every result instead of buffered. Live event streams are never compressed, nor is a response that already has a `content-encoding` or `Cache-Control: no-transform`.
 - `openapi.filter` is required and decides which routes get a REST endpoint and a place in the spec; `() => true` publishes all of them. Scalar docs are served at the OpenAPI prefix (or `docsPath` under it) and the spec at `/spec.json`, unless `docs: false`.
 - `openapi` takes an array for several REST surfaces, each with its own `prefix`, `filter` and options. `docs` takes an array for several reference pages on one surface, each with its own `path`, `specPath`, `filter` (within the surface's), `info`, `spec` (oRPC's generator options, such as `version`), `components` and `document`; the surface's own fields are their defaults. Two pages may not share a path. Auth for a surface stays in the app, e.g. a Hono middleware in front that `context` reads:
@@ -499,9 +501,38 @@ toast(userFacingErrorMessage(error, t('errors.generic'))) // server text only wh
 
 Route error messages are developer text, so `userFacingErrorMessage` shows your localized fallback unless the server opted in with `new ORPCError('BAD_REQUEST', { message, data: { userMessage } })`. `formatClientError(error, fallback)` does the same but lists the rejected fields of a failed input validation (`lines.0.sku: Required`) before falling back.
 
+Tests that speak HTTP without a client, such as a Playwright `page.route` mock or a `page.request` call, use the wire helpers instead of writing oRPC's body format by hand (it changed between oRPC 1 and 2). They import no server code:
+
+```ts
+import { decodeRpcBatchRequest, decodeRpcResponse, encodeRpcBatchResponse, encodeRpcRequest, encodeRpcResponse } from 'orpc-fn/client'
+
+// Answer one call. An error: status 409 and encodeRpcResponse(new ORPCError('CONFLICT', { message })).
+await page.route('**/api/rpc/order/get', (route) =>
+  route.fulfill({ contentType: 'application/json', body: encodeRpcResponse(order) }))
+
+// Call a procedure without the client.
+const response = await page.request.post('/api/rpc/order/get', {
+  headers: { 'content-type': 'application/json' },
+  data: encodeRpcRequest({ id: 'o1', since: new Date(0) })
+})
+const order = decodeRpcResponse(await response.text()) // Dates are Dates again
+
+// Answer a batch: the request has an `orpc-batch` header and its URL ends in `/__batch__`.
+await page.route('**/api/rpc/**/__batch__', (route) =>
+  route.fulfill({
+    status: 207,
+    contentType: 'application/json',
+    body: encodeRpcBatchResponse(
+      decodeRpcBatchRequest(route.request().postData()).map(({ id, url, input }) => ({ id, output: answer(url, input) }))
+    )
+  }))
+```
+
+`encodeRpcRequest`/`decodeRpcRequest`, `encodeRpcResponse`/`decodeRpcResponse` and the four `...Batch...` forms cover both directions. `undefined` is an empty body. They cover JSON bodies: a `File` input, a returned `Blob` and a stream have none, and encoding one throws. A batch response is written and read in oRPC's `buffered` form (a JSON array), which the link accepts in either mode; to read a real server's batch answer, send `orpc-batch: buffered`, since a `streaming` one is length-prefixed frames.
+
 Streams cannot be batched. The Vue and React helpers mark the streams they open (`streamCall` as the client context), so `createRpcLink` keeps them out of batches without a stream manifest; pass `context: streamCall` when you iterate a stream by hand. The manifest (`streamPaths`) remains for streams opened without either. `queryCacheSerializer` is a `serialize`/`deserialize` pair for TanStack Query persisters that round-trips `Date`s and the other types oRPC sends; caches persisted under oRPC 1 still restore.
 
-`createRpcLink` takes every `RPCLink` option, and `url` takes any `string` path, so a path constant needs no `as const` (a full URL throws, naming the `origin`/`url` split, as does a path without a leading `/`). It also batches parallel calls into one request, matching `mountOrpc`'s server-side batching (`batch: { maxSize, exclude, groups }`, or `false` to turn it off), in oRPC's `streaming` mode so a fast result does not wait for a slow one. A batch is one request with one client context, so by default only calls without a client context are batched; pass `groups` to batch calls that share one. A streaming response cannot be batched, and the request doesn't say whether the response will stream, so pass `streamPaths` generated from the actual router with `createStreamManifest` (or `createStreamManifestAsync` for lazy routers). Serialize it to a frontend module; importing that data needs no server runtime. The `orpc-fn` CLI does that, resolving lazy routers, sorting paths and writing only on change:
+`createRpcLink` takes every `RPCLink` option, and `url` takes any `string` path, so a path constant needs no `as const` (a full URL throws, naming the `origin`/`url` split, as does a path without a leading `/`). It also batches parallel calls into one request, matching `mountOrpc`'s server-side batching (`batch: { maxSize, mode, only, exclude, groups }`, or `false` to turn it off), in oRPC's `streaming` mode so a fast result does not wait for a slow one. `mode: 'buffered'` asks for the whole batch in one JSON answer instead, for a host or proxy that buffers the response anyway and would hold a streamed batch until its slowest call. A batch is one request with one client context, so by default only calls without a client context are batched; pass `groups` to batch calls that share one. `only: 'queries'` batches only the calls TanStack Query makes as a query (`queryOptions`, `infiniteOptions`, `fetchQuery`), so mutations and direct `client.x()` calls each get their own request; a query still opts out per call with a client context, e.g. `queryOptions({ input, context: { batch: false } })` on a link typed `createRpcLink<{ batch?: false }>`. A streaming response cannot be batched, and the request doesn't say whether the response will stream, so pass `streamPaths` generated from the actual router with `createStreamManifest` (or `createStreamManifestAsync` for lazy routers). Serialize it to a frontend module; importing that data needs no server runtime. The `orpc-fn` CLI does that, resolving lazy routers, sorting paths and writing only on change:
 
 ```sh
 orpc-fn stream-manifest src/router.ts#appRouter --out ../web/src/stream-paths.ts          # export const streamPaths = [...]

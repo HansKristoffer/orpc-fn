@@ -403,6 +403,44 @@ test('mountOrpc supports root rpcPrefix "/" and rejects invalid sseKeepAlive', a
 	).toThrow(RangeError)
 })
 
+test('mountOrpc maxBodySize limits the RPC and the OpenAPI handler', async () => {
+	const app = new Hono()
+	const size = fn({
+		name: 'limit.size',
+		procedure: 'public',
+		method: 'POST',
+		path: '/size',
+		input: z.object({ text: z.string() }),
+		handler: ({ input }) => input.text.length
+	})
+	mountOrpc(app, {
+		router: { size },
+		rpcPrefix: '/rpc',
+		maxBodySize: 256,
+		openapi: { prefix: '/api', filter: () => true, docs: false }
+	})
+	const post = (path: string, body: unknown) =>
+		app.request(path, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify(body)
+		})
+	const large = 'x'.repeat(512)
+
+	const rpc = await post('/rpc/size', { json: { text: 'ok' } })
+	expect(await rpc.json()).toEqual({ json: 2 })
+	const rpcRefused = await post('/rpc/size', { json: { text: large } })
+	expect(rpcRefused.status).toBe(413)
+	expect(await rpcRefused.json()).toMatchObject({
+		json: { code: 'PAYLOAD_TOO_LARGE' }
+	})
+
+	expect(await (await post('/api/size', { text: 'ok' })).json()).toBe(2)
+	const restRefused = await post('/api/size', { text: large })
+	expect(restRefused.status).toBe(413)
+	expect(await restRefused.json()).toMatchObject({ code: 'PAYLOAD_TOO_LARGE' })
+})
+
 test('formatServerTiming', () => {
 	expect(
 		formatServerTiming(10, { queue_ms: 1, auth_ms: 2.5, handler_ms: undefined })

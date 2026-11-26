@@ -12,10 +12,12 @@ import {
 	type Context,
 	COMMON_ERROR_STATUS_MAP,
 	type InferRouterInitialContext,
+	ORPCError,
 	onError as orpcOnError
 } from '@orpc/server'
 import {
 	BatchHandlerPlugin,
+	RequestLimitHandlerPlugin,
 	ResponseHeadersHandlerPlugin,
 	SignalSyncHandlerPlugin
 } from '@orpc/server/plugins'
@@ -81,6 +83,11 @@ type RoutingInterceptorOptions<T extends Context> =
 	StandardHandlerRoutingInterceptorOptions<T> & {
 		next(): Promise<StandardHandlerHandleResult>
 	}
+
+type StandardHandlerMatchedResponse = Extract<
+	StandardHandlerHandleResult,
+	{ matched: true }
+>['response']
 
 type OpenApiInfo = { title: string; version: string; description?: string }
 
@@ -167,6 +174,14 @@ export type HandlerConfig<R extends AnyRouter> = {
 	openapi?: OpenApiMountOptions<R> | readonly OpenApiMountOptions<R>[]
 	/** Collapse parallel RPC calls into one HTTP request. Default: true (25 calls). */
 	batch?: boolean | { maxSize: number }
+	/**
+	 * The largest request body accepted, in bytes; a larger one answers 413
+	 * `PAYLOAD_TOO_LARGE` (oRPC's `RequestLimitHandlerPlugin`, on the RPC
+	 * and OpenAPI handlers). A batch is measured as the one request it is.
+	 * Default: no limit, so set it where nothing in front of the handler
+	 * limits the body, e.g. a Next.js API route with `bodyParser: false`.
+	 */
+	maxBodySize?: number
 	/** Add a Server-Timing header from the request timing. Default: true */
 	serverTiming?: boolean
 	/**
@@ -274,7 +289,17 @@ export function matchesPrefix(path: string, prefix: Path): boolean {
 }
 
 const MOUNT_REQUEST = Symbol('orpc-fn.mountRequest')
-type MountRequest = { started: number; timing: RequestTiming }
+type MountRequest = {
+	started: number
+	timing: RequestTiming
+	/** Set when the body exceeded `maxBodySize` (see {@link bodyLimitPlugin}). */
+	bodyTooLarge?: boolean
+}
+
+const mountRequestOf = (context: Context): MountRequest | undefined =>
+	(context as Record<symbol, unknown>)[MOUNT_REQUEST] as
+		| MountRequest
+		| undefined
 
 /**
  * Builds the context for one request: the base context, the app's factory
@@ -339,7 +364,10 @@ function exposeHeader(
  * otherwise easy for nginx/Fastly to hold until an idle kill). It works on
  * oRPC's standard response, before any runtime writes it.
  */
-function mountPlugin<T extends Context>(serverTiming: boolean): Plugin<T> {
+function mountPlugin<T extends Context>(
+	serverTiming: boolean,
+	statusMap: Record<string, number> | undefined
+): Plugin<T> {
 	return {
 		name: 'orpc-fn:mount',
 		// Initialized last, so its interceptor wraps every other plugin's
@@ -352,10 +380,12 @@ function mountPlugin<T extends Context>(serverTiming: boolean): Plugin<T> {
 				const result = await interceptor.next()
 				if (!result.matched) return result
 
-				const { response } = result
+				const request = mountRequestOf(interceptor.context)
+				const response = request?.bodyTooLarge
+					? bodyTooLargeResponse(result.response, statusMap)
+					: result.response
 				const headers = { ...response.headers }
 				const context = interceptor.context as Record<symbol, unknown>
-				const request = context[MOUNT_REQUEST] as MountRequest | undefined
 				if (serverTiming && request) {
 					const invocation = context[REQUEST_TIMING] as
 						| InvocationTiming
@@ -382,6 +412,37 @@ function mountPlugin<T extends Context>(serverTiming: boolean): Plugin<T> {
 			}
 		}
 	}
+}
+
+/**
+ * oRPC's request limit, which also tells {@link mountPlugin} that it refused
+ * the body. The mark rides in the context, which plugins copy but keep.
+ */
+function bodyLimitPlugin<T extends Context>(maxBodySize: number): Plugin<T> {
+	return new RequestLimitHandlerPlugin<T>({
+		maxBodySize,
+		error: ({ context }) => {
+			const request = mountRequestOf(context)
+			if (request) request.bodyTooLarge = true
+			return new ORPCError('PAYLOAD_TOO_LARGE')
+		}
+	})
+}
+
+/**
+ * A call alone already answers with the error. oRPC's batch plugin answers
+ * a body it could not read with 400 and the error's message as text, which
+ * the link cannot read as an error, so that becomes the RPC error response.
+ */
+function bodyTooLargeResponse(
+	response: StandardHandlerMatchedResponse,
+	statusMap: Record<string, number> | undefined
+): StandardHandlerMatchedResponse {
+	const error = new ORPCError('PAYLOAD_TOO_LARGE')
+	const status = errorStatusOf(error, statusMap)
+	if (response.status === status) return response
+	// Its headers stay: the batch plugin set none, outer plugins (CORS) did.
+	return { ...response, status, body: { json: error.toJSON() } }
 }
 
 /** What the handlers of both runtimes take; each adapter adds its own options. */
@@ -422,10 +483,21 @@ export function createMounts<R extends AnyRouter, H>(
 	const {
 		router,
 		batch = true,
+		maxBodySize,
 		serverTiming = true,
 		sseKeepAlive = true
 	} = options
 	type T = InferRouterInitialContext<R>
+
+	if (
+		maxBodySize !== undefined &&
+		(typeof maxBodySize !== 'number' ||
+			!Number.isFinite(maxBodySize) ||
+			maxBodySize <= 0)
+	)
+		throw new RangeError(
+			'orpc-fn: maxBodySize must be a positive finite number of bytes'
+		)
 
 	if (
 		typeof sseKeepAlive === 'number' &&
@@ -472,11 +544,20 @@ export function createMounts<R extends AnyRouter, H>(
 
 	// A fresh object per handler: oRPC's handlers add to the arrays they get.
 	const handlerOptions = (extra: Plugin<T>[] = []): HandlerOptions<T> => {
-		const plugins: Plugin<T>[] = [...extra, mountPlugin<T>(serverTiming)]
+		const plugins: Plugin<T>[] = [
+			...extra,
+			mountPlugin<T>(serverTiming, statusMap)
+		]
 		if (!extra.some((plugin) => plugin.name === '~response-headers'))
 			plugins.push(new ResponseHeadersHandlerPlugin<T>())
 		if (!extra.some((plugin) => plugin.name === '~signal-sync'))
 			plugins.push(new SignalSyncHandlerPlugin<T>())
+		// An app's own limit plugin (say, with its own error) wins.
+		if (
+			maxBodySize !== undefined &&
+			!extra.some((plugin) => plugin.name === '~request-limit')
+		)
+			plugins.push(bodyLimitPlugin<T>(maxBodySize))
 		return {
 			plugins,
 			interceptors: options.onError ? [orpcOnError(report)] : [],

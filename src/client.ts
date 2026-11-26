@@ -12,6 +12,18 @@ import { normalizeMeta, rpcJson } from './rpc-json.js'
 import { isStreamCall } from './stream-call.js'
 
 export { STREAM_CALL, streamCall } from './stream-call.js'
+export {
+	decodeRpcBatchRequest,
+	decodeRpcBatchResponse,
+	decodeRpcRequest,
+	decodeRpcResponse,
+	encodeRpcBatchRequest,
+	encodeRpcBatchResponse,
+	encodeRpcRequest,
+	encodeRpcResponse,
+	type RpcBatchCall,
+	type RpcBatchResult
+} from './wire.js'
 
 /**
  * `@orpc/tanstack-query` attaches this symbol to every call's client context
@@ -22,11 +34,21 @@ const TANSTACK_OPERATION_CONTEXT = Symbol.for(
 	'ORPC_TANSTACK_QUERY_OPERATION_CONTEXT'
 )
 
-function isTanstackStream(context: object): boolean {
+/** `query`, `infinite`, `mutation`, `streamed` or `live`; undefined for a direct `client.x()` call. */
+function tanstackOperationType(context: object): unknown {
 	const op = (context as Record<symbol, unknown>)[TANSTACK_OPERATION_CONTEXT]
-	if (typeof op !== 'object' || op === null) return false
-	const type = (op as { type?: unknown }).type
+	if (typeof op !== 'object' || op === null) return undefined
+	return (op as { type?: unknown }).type
+}
+
+function isTanstackStream(context: object): boolean {
+	const type = tanstackOperationType(context)
 	return type === 'live' || type === 'streamed'
+}
+
+function isTanstackQuery(context: object): boolean {
+	const type = tanstackOperationType(context)
+	return type === 'query' || type === 'infinite'
 }
 
 function hasCustomContext(context: object): boolean {
@@ -69,6 +91,20 @@ export type CreateRpcLinkOptions<T extends ClientContext> = Omit<
 		| boolean
 		| {
 				maxSize?: number
+				/**
+				 * How the server answers a batch. `'streaming'` (default) sends each
+				 * result as it finishes, so a fast call does not wait behind a slow
+				 * one. `'buffered'` answers once, with every result as one JSON
+				 * array: for a host or proxy that buffers the response anyway.
+				 */
+				mode?: 'streaming' | 'buffered'
+				/**
+				 * `'queries'` batches only calls made through TanStack Query as a
+				 * query (`queryOptions`, `infiniteOptions`, `fetchQuery`); mutations
+				 * and direct `client.x()` calls are sent on their own. Default:
+				 * every call.
+				 */
+				only?: 'queries'
 				/** Calls that must not be batched. Default: {@link isSubscriptionPath}. */
 				exclude?: (path: readonly string[]) => boolean
 				groups?: BatchOptions<T>['groups']
@@ -132,17 +168,28 @@ export function createRpcLink<T extends ClientContext = ClientContext>(
 	if (batch === false) return new RPCLink<T>({ ...rest, plugins })
 	const {
 		maxSize = 25,
+		mode = 'streaming',
+		only,
 		exclude = isSubscriptionPath,
 		groups
 	} = batch === true ? {} : batch
+	if (mode !== 'streaming' && mode !== 'buffered')
+		throw new TypeError(
+			`orpc-fn: batch.mode must be 'streaming' or 'buffered', got '${String(mode)}'`
+		)
+	if (only !== undefined && only !== 'queries')
+		throw new TypeError(
+			`orpc-fn: batch.only must be 'queries', got '${String(only)}'`
+		)
 	return new RPCLink<T>({
 		...rest,
 		plugins: [
 			new BatchLinkPlugin<T>({
 				maxSize,
-				// Each result is sent as it finishes, so a fast call does not wait
-				// behind a slow one (oRPC 2 defaults to buffering the whole batch).
-				mode: 'streaming',
+				// Streaming unless asked: each result is sent as it finishes, so a
+				// fast call does not wait behind a slow one (oRPC 2's own default
+				// buffers the whole batch).
+				mode,
 				groups: groups ?? [
 					// Only context-free calls reach this group (see `filter` below),
 					// so the batch's empty context is exactly theirs.
@@ -154,6 +201,7 @@ export function createRpcLink<T extends ClientContext = ClientContext>(
 						isTanstackStream(context) ||
 						(streams.size > 0 && streams.has(JSON.stringify(path))) ||
 						exclude(path) ||
+						(only === 'queries' && !isTanstackQuery(context)) ||
 						(groups === undefined && hasCustomContext(context))
 					)
 			}),

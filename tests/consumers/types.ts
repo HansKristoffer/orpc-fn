@@ -34,7 +34,17 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { procedureCommands } from 'orpc-fn/cli'
 import {
 	createRpcLink,
+	decodeRpcBatchRequest,
+	decodeRpcBatchResponse,
+	decodeRpcRequest,
+	decodeRpcResponse,
+	encodeRpcBatchRequest,
+	encodeRpcBatchResponse,
+	encodeRpcRequest,
+	encodeRpcResponse,
 	hasOrpcErrorCode,
+	type RpcBatchCall,
+	type RpcBatchResult,
 	responseStatusOf
 } from 'orpc-fn/client'
 import { createBetterAuthExpoLink } from 'orpc-fn/expo'
@@ -550,6 +560,22 @@ listTools(router, { filter: hasTag('external'), streams: 'keep' })
 // A path constant needs no `as const`.
 const rpcPath: string = '/rpc'
 createRpcLink({ origin: 'http://localhost', url: rpcPath })
+// A host that buffers responses, and a batch of TanStack queries only.
+createRpcLink({ url: rpcPath, batch: { mode: 'buffered', only: 'queries' } })
+// @ts-expect-error the mode is oRPC's 'streaming' or 'buffered'
+createRpcLink({ url: rpcPath, batch: { mode: 'chunked' } })
+// @ts-expect-error only queries can be singled out
+createRpcLink({ url: rpcPath, batch: { only: 'mutations' } })
+// The wire format for tests: bodies are text, decoded values are unknown.
+const wireBody: string = encodeRpcResponse({ at: new Date() })
+const wireOutput: unknown = decodeRpcResponse(wireBody)
+const wireCalls: RpcBatchCall[] = decodeRpcBatchRequest(
+	encodeRpcBatchRequest([{ url: '/rpc/ping' }])
+)
+const wireResults: RpcBatchResult[] = decodeRpcBatchResponse(
+	encodeRpcBatchResponse(wireCalls.map(({ id }) => ({ id, output: 1 })))
+)
+void [wireOutput, wireResults, decodeRpcRequest(encodeRpcRequest(undefined))]
 
 // ── Fetch and Node handlers ─────────────────────────────────────────────────
 // Next.js App Router, TanStack Start: (request) => Promise<Response>.
@@ -562,6 +588,12 @@ const appRoute: (request: Request) => Promise<Response> = createFetchHandler({
 			: { headers }
 })
 void appRoute
+// The body limit is the same option on every adapter.
+createFetchHandler({ router, rpcPrefix: '/rpc', maxBodySize: 1_000_000 })
+createNodeHandler({ router, rpcPrefix: '/rpc', maxBodySize: 1_000_000 })
+mountOrpc(new Hono(), { router, rpcPrefix: '/rpc', maxBodySize: 1_000_000 })
+// @ts-expect-error the limit is a number of bytes
+createFetchHandler({ router, rpcPrefix: '/rpc', maxBodySize: '1mb' })
 // @ts-expect-error a handler serves RPC, OpenAPI or both
 createFetchHandler({ router })
 // @ts-expect-error `context` is required when the base context is not enough

@@ -3,7 +3,7 @@ import { RPCLink } from '@orpc/client/fetch'
 import { BatchLinkPlugin } from '@orpc/client/plugins'
 
 export type CapturedBatch = {
-	/** Batch path, e.g. `/rpc/__batch__`. */
+	/** Batch path: the first call's plus `/__batch__`, e.g. `/rpc/big/__batch__`. */
 	path: string
 	headers: Record<string, string>
 	body: Uint8Array

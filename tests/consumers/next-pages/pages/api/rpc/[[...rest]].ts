@@ -18,6 +18,8 @@ const handler = createNodeHandler({
 	router: appRouter,
 	rpcPrefix: '/api/rpc',
 	batch: { maxSize: 20 },
+	// Nothing else limits the body once Next's parser is off.
+	maxBodySize: 12 * 1024 * 1024,
 	errorStatusMap: { BAD_GATEWAY: 502 },
 	context: (req, base) => {
 		const scope = scopes.get(req)

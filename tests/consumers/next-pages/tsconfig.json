@@ -18,5 +18,5 @@
 		"types": ["node"],
 		"noEmit": true
 	},
-	"include": ["server", "client", "pages"]
+	"include": ["server", "client", "pages", "e2e"]
 }
