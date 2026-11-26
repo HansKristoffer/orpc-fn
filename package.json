@@ -23,6 +23,9 @@
 		"mcp",
 		"cli",
 		"hono",
+		"nextjs",
+		"express",
+		"fetch",
 		"typescript",
 		"tanstack-query",
 		"expo",
@@ -65,6 +68,14 @@
 		"./hono": {
 			"types": "./dist/hono.d.ts",
 			"import": "./dist/hono.js"
+		},
+		"./fetch": {
+			"types": "./dist/fetch.d.ts",
+			"import": "./dist/fetch.js"
+		},
+		"./node": {
+			"types": "./dist/node.d.ts",
+			"import": "./dist/node.js"
 		},
 		"./client": {
 			"types": "./dist/client.d.ts",
@@ -144,10 +155,10 @@
 		"@orpc/zod": "^1.14.0",
 		"hono": "^4.0.0",
 		"ioredis": "^5.0.0",
-		"zod": "^4.0.0",
+		"zod": "^3.25.3 || ^4.0.0",
 		"@modelcontextprotocol/sdk": "^1.32.0",
 		"@modelcontextprotocol/server": "^2.0.0",
-		"@tanstack/react-query": "^5.80.0",
+		"@tanstack/react-query": "^5.66.0",
 		"@tanstack/vue-query": "^5.80.0",
 		"react": "^18.0.0 || ^19.0.0",
 		"vue": "^3.3.0"

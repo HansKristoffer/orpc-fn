@@ -1,6 +1,6 @@
 # orpc-fn
 
-Define a backend function once. You get a typed [oRPC](https://orpc.dev) procedure with tracing, structured logging, guards, handler extras from your app, nested calls that keep the context, and optional live queries over Redis. Adapters expose the same procedure as a Mastra tool, an MCP tool, or a route on Hono, and the client helpers call it from Vue, React or Expo.
+Define a backend function once. You get a typed [oRPC](https://orpc.dev) procedure with tracing, structured logging, guards, handler extras from your app, nested calls that keep the context, and optional live queries over Redis. Adapters expose the same procedure as a Mastra tool, an MCP tool, or an HTTP route (any Fetch runtime, Node `http` or Hono), and the client helpers call it from Vue, React or Expo.
 
 Your app keeps everything app-specific: auth and session, context shape, database, queues, i18n, feature flags and permissions. You inject them once with `createFn`.
 
@@ -8,7 +8,7 @@ Your app keeps everything app-specific: auth and session, context shape, databas
 bun add orpc-fn @orpc/server @orpc/contract @orpc/client zod
 ```
 
-ESM only, Node 20+ or Bun, TypeScript 5.7+, oRPC 1.14+ (`@orpc/client` is already a dependency of `@orpc/server`), Zod 4. Optional peers per subpath are listed below.
+ESM only, Node 20+ or Bun, oRPC 1.14+ (`@orpc/client` is already a dependency of `@orpc/server`), Zod 4 or 3.25 ([which subpaths need Zod 4 schemas](#zod-325)). TypeScript 5.7+. On 5.4 to 5.6, set `skipLibCheck: true`: oRPC 1.14's declarations use `AsyncIteratorObject` (5.6) and `Blob.bytes()` (5.7). This package's own declarations check on 5.4. Optional peers per subpath are listed below.
 
 ## 30 seconds
 
@@ -80,7 +80,7 @@ It returns `fn`, `fnLive`, `fnLivePatch`, `createPubSub`, `createPublisher`, `cr
 
 Procedure builders must not set an input or output schema (`os.input(...)`); put schemas on routes. Guard keys cannot reuse route option names. Application metadata lives in a typed `meta` object and may share names with guards or route options. Unknown top-level route options and extras that shadow built-in handler params are rejected. Scoped extras replace matching shared keys, with handler types reflecting that precedence.
 
-**`fn(options)`** has four overloads (input and output schema, each given or inferred). Route options: `name` (required; operationId and span name), `procedure`, `path`, `method`, `summary`, `description`, `tags`, `deprecated`, `successStatus`, `successDescription`, `inputStructure`, `outputStructure`, configured guard keys, `guardResolvers`, `meta`, `stream` and native `errors` declarations. Core schemas use Standard Schema; Zod 4 remains the default for tool/live adapters. The handler receives `input`, `context`, `call`, `signal`, `span`, `logger`, native typed `errors`, `lastEventId` and your extras. With an output schema, the handler returns the schema's input type and callers receive its output type, so `output: z.string().transform(Number)` means the handler returns a string and callers get a number.
+**`fn(options)`** has four overloads (input and output schema, each given or inferred). Route options: `name` (required; operationId and span name), `procedure`, `path`, `method`, `summary`, `description`, `tags`, `deprecated`, `successStatus`, `successDescription`, `inputStructure`, `outputStructure`, configured guard keys, `guardResolvers`, `meta`, `stream` and native `errors` declarations. Core schemas use Standard Schema; the live and tool adapters read Zod 4 schemas ([Zod 3.25](#zod-325)). The handler receives `input`, `context`, `call`, `signal`, `span`, `logger`, native typed `errors`, `lastEventId` and your extras. With an output schema, the handler returns the schema's input type and callers receive its output type, so `output: z.string().transform(Number)` means the handler returns a string and callers get a number.
 
 **Guards** run inside the span, before the handler, and only on routes that set their option. A route's guard values are stored in its meta: `readMeta(route).guards` returns them typed (`{ permission: 'deal.read' }`) and `dynamicGuards` names the ones a resolver decides, so a tool list or an audit reads the route's own declaration. To require a decision on every route, reject the rest at definition with `routePolicy`:
 
@@ -105,6 +105,15 @@ It sees every route kind: `fn`, both `fnLive` routes and pub/sub subscriptions. 
 Completion hooks discriminate by `procedure` and `handlerStarted`. Before handler context exists (auth/input failure), they receive the initial context. Logging, tracing, metrics and completion-hook failures preserve procedure results. Custom log fields cannot overwrite canonical completion fields. Stream completion runs once when the stream ends.
 
 Also exported: `defineMeta`, `createStreamManifest`, `createStreamManifestAsync`, `renderStreamManifest`, `isExpectedClientError`, `createRouter`, `createBoundCall`, and the types `HandlerParams`, `RouteConfig`, `BoundCall`, `FnMeta`, `FnContext`, `FnCompletedEvent`, `ProcedureInput`, `ProcedureOutput`, `ProcedureContext`, `InitialContextOf`, `CurrentContextOf` and `GuardOptions`.
+
+### Zod 3.25
+
+`zod@3.25` ships Zod 4 as `zod/v4` next to Zod 3 at `zod`, and both implement Standard Schema. The floor is 3.25.3, because 3.25.0 and 3.25.2 publish a broken `zod/v4` entry. Core routes (`fn`), the HTTP adapters' RPC handler and the client subpaths take either, so a Zod 3 codebase keeps its schemas. These read Zod 4 schemas, which on 3.25 you import from `zod/v4`:
+
+- `fnLive`, `createPubSub`, `defineScopedChangeBus` and `orpc-fn/live` (event, state and input schemas);
+- `orpc-fn/mastra` and `orpc-fn/mcp` (JSON Schema through `@orpc/zod/zod4`);
+- the `openapi` mount's spec, docs and `smartCoercion`: a Zod 3 schema still validates, but appears untyped in the spec;
+- `orpc-fn/cli`, whose `hanzio/cli` types read `zod` itself, so it needs `zod` 4 installed. The `orpc-fn` bin runs on 3.25 (pnpm warns that `hanzio` asks for `zod` ^4.3.6).
 
 ## `orpc-fn/live`: pub/sub and live queries
 
@@ -290,9 +299,48 @@ await defineCli({
 
 `procedureCommands(router)` turns the routes declared with `meta: { cli: true }` into commands nested like the router, kebab-cased (`dealRoom.update` is `deal-room update`); add `cli?: boolean` to your meta type, or select routes with `filter`. Flags and positionals come from the route's `z.object()` input. A command calls the procedure through oRPC with the CLI's context, so middleware, guards and tracing run as over HTTP; `context: (cliContext, meta) => ...` maps that context per procedure and can refuse with a `CliError`. A 4xx `ORPCError` prints as `CODE: message`; anything else keeps its stack. Streams and non-object inputs throw when the commands are built. The procedure parses the already-validated flags again, so transforms must accept their own output.
 
-## `orpc-fn/hono`
+## HTTP: `orpc-fn/fetch`, `orpc-fn/node`, `orpc-fn/hono`
 
-Optional peers: `hono`; for `openapi` also `@orpc/openapi`, `@orpc/zod` and `@orpc/json-schema`, loaded on the first request to its prefix, so an RPC-only app does not install them.
+Three thin adapters over oRPC's own RPC and OpenAPI handlers share one set of options and behaviour. They need only the required peers; `hono` for `orpc-fn/hono`, and for `openapi` also `@orpc/openapi`, `@orpc/zod` and `@orpc/json-schema`, loaded on the first request to its prefix, so an RPC-only app does not install them.
+
+**`orpc-fn/fetch`** is a Web `(request) => Promise<Response>` over `@orpc/server/fetch`, for the Next.js App Router, TanStack Start, Bun, Deno and Cloudflare Workers (compression uses `node:zlib`, so Workers need `nodejs_compat`). Requests no mount matches get a 404.
+
+```ts
+// app/api/rpc/[[...rest]]/route.ts
+import { createFetchHandler } from 'orpc-fn/fetch'
+
+const handler = createFetchHandler({
+  router,
+  rpcPrefix: '/api/rpc',
+  context: async (request, base) => ({ ...base, session: await getSession(base.headers) })
+})
+export { handler as GET, handler as POST }
+// TanStack Start: server: { handlers: { ANY: ({ request }) => handler(request) } }
+```
+
+**`orpc-fn/node`** is a `(req, res, next?)` handler over `@orpc/server/node`, for Next.js Pages Router API routes, Express and `http.createServer`. Unmatched requests go to `next` when given, else get a 404. A body an earlier middleware parsed (`req.body`) is used as is, but Next.js should leave it unparsed so file uploads arrive intact. The handler runs inside whatever wraps it, so an `AsyncLocalStorage` wrapper reaches every procedure, batched or not.
+
+```ts
+// pages/api/rpc/[[...rpc]].ts
+import { createNodeHandler, timed } from 'orpc-fn/node'
+
+export const config = { api: { bodyParser: false } }
+
+export default withInRequestStorage(
+  createNodeHandler({
+    router,
+    rpcPrefix: '/api/rpc',
+    context: async (req, { headers, timing }) => ({
+      headers,
+      timing,
+      session: await timed(timing, 'auth_ms', () => getSession(headers))
+    }),
+    onError: (error, request) => errorTracker.capture(error, request)
+  })
+)
+```
+
+**`orpc-fn/hono`** has `mountOrpc(app, options)`, which adds the handlers as middleware, and unmatched paths fall through to the app.
 
 ```ts
 import { hasTag, mountOrpc, normalizeExpoOrigin, timed } from 'orpc-fn/hono'
@@ -312,19 +360,36 @@ mountOrpc(app, {
 })
 ```
 
+**Response headers.** Procedures set response headers through `context.resHeaders` (oRPC's `ResponseHeadersPlugin`, on in every adapter). A procedure opts in by declaring it in its builder's context; routes that do not mention it are unchanged. Headers set in a batched call stay on that call's result, so a CDN-cached route is called outside a batch, e.g. as an OpenAPI `GET`:
+
+```ts
+const base = os.$context<{ headers: Headers; resHeaders?: Headers }>()
+
+export const getMenu = fn({
+  name: 'menu.get',
+  method: 'GET',
+  path: '/menus/{id}',
+  input: z.object({ id: z.string() }),
+  handler: async ({ input, context, db }) => {
+    context.resHeaders?.set('cdn-cache-control', 'public, s-maxage=300, stale-while-revalidate=60')
+    return db.menu.find(input.id)
+  }
+})
+```
+
 Behaviour:
 
-- The response gets a `Server-Timing` header built from the request timing collector: app-recorded queue/auth/context metrics plus library-owned procedure time. Nested calls do not overwrite parent timing; batches aggregate their top-level procedure durations (which may overlap). `fn` does not mutate an arbitrary `context.timing` field. `formatServerTiming` and `finishOrpcHeaders` are available for composed Fetch adapters.
+- The response gets a `Server-Timing` header built from the request timing collector: app-recorded queue/auth/context metrics plus library-owned procedure time (`serverTiming: false` turns it off). Nested calls do not overwrite parent timing; batches aggregate their top-level procedure durations (which may overlap). `fn` does not mutate an arbitrary `context.timing` field. `formatServerTiming` (and `finishOrpcHeaders` on `orpc-fn/hono`) are available for composed adapters.
 - SSE responses get keep-alive comments (15 s) and anti-buffering headers.
 - RPC calls are batched (`BatchHandlerPlugin`).
-- JSON and batch responses are gzipped when the client accepts it (`compress: false` turns it off). A streaming batch sends each result as it finishes, so it is flushed after every result instead of buffered; Hono's `compress()` skips event streams entirely. Live event streams are never compressed. A response that already has a `content-encoding` is left alone.
+- JSON and batch responses are compressed when the client accepts it: brotli, or gzip when the client prefers or only accepts it (`compress: false` turns it off). Bodies under 512 bytes are sent as they are. A streaming batch sends each result as it finishes, so it is flushed after every result instead of buffered; Hono's `compress()` and oRPC's `CompressionPlugin` skip event streams entirely. Live event streams are never compressed, nor is a response that already has a `content-encoding` or `Cache-Control: no-transform`.
 - `openapi.filter` is required and decides which routes get a REST endpoint and a place in the spec; `() => true` publishes all of them. Scalar docs are served at the OpenAPI prefix and the spec at `/spec.json`, unless `docs: false`.
 - `onError` sees only unexpected errors: by default those `isExpectedClientError` rejects, which includes errors the route's `createFn({ isExpectedError })` classified as expected.
 - `openapi.smartCoercion` and `openapi.spec` (for security schemes) cover an external API with its own auth.
-- CORS belongs to Hono's `cors()` on the app, once. A cross-origin client that batches needs `x-orpc-batch` in `allowHeaders`.
+- CORS is set up once: Hono's `cors()` on a Hono app, oRPC's `CORSPlugin` in `plugins` (and `openapi.plugins`) otherwise. A cross-origin client that batches needs `x-orpc-batch` in its allowed headers.
 - `timed(timing, key, work)` adds the duration of `work` to the request timing, which `Server-Timing` reports.
-- `markRequestArrival(request)` at the front door (`Bun.serve({ fetch })`, before routing) makes `queue_ms` the time until the procedure runs: in-process queueing no handler timer sees. Pass `queueMs` to measure it another way.
-- `context` builds the router's context and is checked against it: it is required when `{ headers, timing }` alone does not satisfy the router. It may return a `Response`, for example a 401. Any field the app's auth middleware trusts when it is already set (a `user`) must only come from here: `createCall`, `createMastraTool({ context })` and `registerMcpTools({ context })` take a ready-made context too, so build a context that acts for someone in one app function.
+- `markRequestArrival(request)` at the front door (`Bun.serve({ fetch })` or `http.createServer`, before routing) makes `queue_ms` the time until the procedure runs: in-process queueing no handler timer sees. Pass `queueMs` to measure it another way.
+- `context` builds the router's context from `{ headers, timing }` and the runtime's request (the Hono context, the `Request`, the `IncomingMessage`), and is checked against the router: it is required when `{ headers, timing }` alone does not satisfy it. It may return a `Response`, for example a 401. Any field the app's auth middleware trusts when it is already set (a `user`) must only come from here: `createCall`, `createMastraTool({ context })` and `registerMcpTools({ context })` take a ready-made context too, so build a context that acts for someone in one app function.
 
 ## `orpc-fn/client`
 
@@ -436,7 +501,7 @@ useInvalidationStream({}, (o) => o.realtime.subscribeChanges.call, {
 
 ## `orpc-fn/react`
 
-Peers: `react`, `@tanstack/react-query`. Works on React Native: pausing follows TanStack's `focusManager`, so wire it to `AppState` once, as TanStack recommends:
+Peers: `react`, `@tanstack/react-query` ^5.66 (`@orpc/tanstack-query`, if you use its `queryOptions`, asks for 5.80.2 itself). Works on React Native: pausing follows TanStack's `focusManager`, so wire it to `AppState` once, as TanStack recommends:
 
 ```ts
 focusManager.setEventListener((setFocused) => {

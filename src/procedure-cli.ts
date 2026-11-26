@@ -11,7 +11,7 @@ import {
 	type CommandGroup,
 	defineCommand
 } from 'hanzio/cli'
-import { z } from 'zod'
+import { z } from 'zod/v4'
 import { isExpectedClientError } from './expected-client-error.js'
 import { formatIssue, issuesOf } from './issues.js'
 import { type FnMeta, readFnMeta } from './meta.js'

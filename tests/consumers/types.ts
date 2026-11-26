@@ -25,6 +25,9 @@ import {
 import { createMastraTool } from 'orpc-fn/mastra'
 import { hasTag, listTools } from 'orpc-fn/mcp'
 import { mountOrpc } from 'orpc-fn/hono'
+import { createFetchHandler } from 'orpc-fn/fetch'
+import { createNodeHandler, timed } from 'orpc-fn/node'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { procedureCommands } from 'orpc-fn/cli'
 import { createRpcLink, hasOrpcErrorCode } from 'orpc-fn/client'
 import { createBetterAuthExpoLink } from 'orpc-fn/expo'
@@ -471,6 +474,66 @@ mountOrpc(new Hono(), {
 	router,
 	openapi: { prefix: '/api', filter: () => true, docs: false }
 })
+
+// ── Fetch and Node handlers ─────────────────────────────────────────────────
+// Next.js App Router, TanStack Start: (request) => Promise<Response>.
+const appRoute: (request: Request) => Promise<Response> = createFetchHandler({
+	router,
+	rpcPrefix: '/api/rpc',
+	context: (request, { headers }) =>
+		request.headers.has('x-deny')
+			? new Response(null, { status: 401 })
+			: { headers }
+})
+void appRoute
+// @ts-expect-error a handler serves RPC, OpenAPI or both
+createFetchHandler({ router })
+// @ts-expect-error `context` is required when the base context is not enough
+createFetchHandler({ router: { strict }, rpcPrefix: '/rpc' })
+createFetchHandler({
+	router: { strict },
+	openapi: { prefix: '/api', filter: () => true },
+	context: () => ({ tenant: 't' })
+})
+// Next.js Pages Router: a NextApiHandler, also through a wrapper such as
+// withInRequestStorage(handler).
+type NextApiHandlerLike = (
+	req: IncomingMessage & { query: Partial<Record<string, string | string[]>> },
+	res: ServerResponse & { status(code: number): unknown }
+) => unknown
+const withRequestStorage = (handler: NextApiHandlerLike): NextApiHandlerLike =>
+	handler
+const pagesRoute: NextApiHandlerLike = withRequestStorage(
+	createNodeHandler({
+		router,
+		rpcPrefix: '/api/rpc',
+		context: async (req, { headers, timing }) => ({
+			headers,
+			user: await timed(timing, 'auth_ms', async () =>
+				req.headers.authorization
+					? { id: 'u1', locale: 'en', flags: [] }
+					: undefined
+			)
+		})
+	})
+)
+void pagesRoute
+createNodeHandler({
+	router,
+	rpcPrefix: '/rpc',
+	// @ts-expect-error the factory must return the router's context
+	context: () => ({ headers: 'not headers' })
+})
+// @ts-expect-error a handler serves RPC, OpenAPI or both
+createNodeHandler({ router })
+// Procedures opt into response headers through their context; others are unchanged.
+const cachedLookup = os
+	.$context<{ headers: Headers; resHeaders?: Headers }>()
+	.handler(({ context }) => {
+		context.resHeaders?.set('cdn-cache-control', 'public, s-maxage=300')
+		return 1
+	})
+createNodeHandler({ router: { cachedLookup, ...router }, rpcPrefix: '/rpc' })
 
 // ── Client ──────────────────────────────────────────────────────────────────
 const client: RouterClient<typeof router> = createORPCClient(
