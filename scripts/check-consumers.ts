@@ -28,11 +28,11 @@ const lockedVersion = (name: string): string =>
 	require(`${root}/node_modules/${name}/package.json`).version
 
 /**
- * Kanpla's Admin app (Next.js Pages Router), whose pins do not move with
- * ours: TypeScript 5.4.5, its compiler options (`tests/consumers/kanpla/
- * tsconfig.json`), Zod 3 and React Query 5.108 with Jotai. oRPC is ours.
+ * A Next.js Pages Router app on pins that do not move with ours: TypeScript
+ * 5.4.5 with the compiler options in `tests/consumers/next-pages/
+ * tsconfig.json`, Zod 3 and React Query 5.108 with Jotai. oRPC is ours.
  */
-async function checkKanpla() {
+async function checkNextPages() {
 	await install([
 		tarball,
 		...[
@@ -52,7 +52,9 @@ async function checkKanpla() {
 		'@types/node@22',
 		'@types/react@19'
 	])
-	await cp(join(root, 'tests/consumers/kanpla'), fixture, { recursive: true })
+	await cp(join(root, 'tests/consumers/next-pages'), fixture, {
+		recursive: true
+	})
 	await run([...tsc, '-p', 'tsconfig.json'])
 
 	// `skipLibCheck` hides errors inside declarations, ours included: a type
@@ -79,7 +81,7 @@ async function checkKanpla() {
 		throw new Error(
 			`orpc-fn's declarations do not compile on TypeScript 5.4.5:\n${ours.join('\n')}`
 		)
-	console.log('Packed consumer passed (kanpla, TypeScript 5.4.5)')
+	console.log('Packed consumer passed (next-pages, TypeScript 5.4.5)')
 }
 const install = (packages: string[]) =>
 	run([
@@ -284,7 +286,7 @@ try {
 		join(fixture, 'package.json'),
 		JSON.stringify({ private: true, type: 'module' })
 	)
-	await (profile === 'kanpla' ? checkKanpla() : checkPeers())
+	await (profile === 'next-pages' ? checkNextPages() : checkPeers())
 } finally {
 	await rm(fixture, { recursive: true, force: true })
 }

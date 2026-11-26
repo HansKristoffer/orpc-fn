@@ -142,7 +142,7 @@
 		"attw": "attw --pack . --profile esm-only",
 		"publint": "publint",
 		"test:consumers": "bun scripts/check-consumers.ts",
-		"test:consumers:kanpla": "PEER_PROFILE=kanpla bun scripts/check-consumers.ts",
+		"test:consumers:next-pages": "PEER_PROFILE=next-pages bun scripts/check-consumers.ts",
 		"verify:package": "node scripts/verify-package.mjs",
 		"test:types-performance": "bun scripts/check-types-performance.ts",
 		"test:client-bundle": "bun scripts/check-client-bundle.ts"

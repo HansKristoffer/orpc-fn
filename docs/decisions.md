@@ -133,7 +133,7 @@ On Fetch the adapter compresses the finished `Response`. On Node, oRPC writes st
 
 ## TypeScript 5.4, with `skipLibCheck`
 
-oRPC 2's declarations need TypeScript 5.7 (`Uint8Array<ArrayBuffer>`, `Blob.bytes()`), so the floor without `skipLibCheck` is 5.7. Kanpla's Admin app is pinned to 5.4.5 and, like every Next.js app, sets `skipLibCheck`. **Decision:** our own declarations stay readable by 5.4, and `test:consumers:kanpla` type-checks an app of that shape (`tests/consumers/kanpla`: its compiler options, Zod 3, Next.js Pages Router, `@orpc/tanstack-query`, Jotai) against the packed package. `skipLibCheck` also hides errors in our declarations, where a type 5.4 cannot read becomes `any` without a word, so the check runs a second time without it and fails on any diagnostic under `node_modules/orpc-fn/`; oRPC's own are expected there and ignored.
+oRPC 2's declarations need TypeScript 5.7 (`Uint8Array<ArrayBuffer>`, `Blob.bytes()`), so the floor without `skipLibCheck` is 5.7. An app pinned to an older TypeScript still has to work, and a Next.js app sets `skipLibCheck` by default. **Decision:** our own declarations stay readable by 5.4, and `test:consumers:next-pages` type-checks an app of that shape on 5.4.5 (`tests/consumers/next-pages`: `target: es2019`, Zod 3, Next.js Pages Router, `@orpc/tanstack-query`, Jotai) against the packed package. `skipLibCheck` also hides errors in our declarations, where a type 5.4 cannot read becomes `any` without a word, so the check runs a second time without it and fails on any diagnostic under `node_modules/orpc-fn/`; oRPC's own are expected there and ignored.
 
 ## Exposure and access are explicit
 

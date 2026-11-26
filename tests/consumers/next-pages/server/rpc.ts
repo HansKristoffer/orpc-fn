@@ -1,6 +1,6 @@
-// A Next.js Pages Router backend on TypeScript 5.4.5 with Zod 3 schemas, as
-// Kanpla's Admin app is built: several builders, a builder middleware that
-// reads the raw input and the route's meta, a route policy and typed meta.
+// A Next.js Pages Router backend on TypeScript 5.4.5 with Zod 3 schemas:
+// several builders, a builder middleware that reads the raw input and the
+// route's meta, a route policy and typed meta.
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { ORPCError, os } from '@orpc/server'
 import { createFn, defineMeta, readFnMeta } from 'orpc-fn'
