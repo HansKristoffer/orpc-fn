@@ -8,6 +8,7 @@ import type {
 } from '@orpc/openapi'
 import {
 	type AnyORPCError,
+	type AnyProcedure,
 	type AnyRouter,
 	type Context,
 	COMMON_ERROR_STATUS_MAP,
@@ -33,26 +34,51 @@ import {
 } from '../expected-client-error.js'
 import { allOf, type ProcedureFilter } from '../meta.js'
 import type { OpenApiComponents } from '../openapi.js'
-import { type InvocationTiming, REQUEST_TIMING } from '../timing.js'
+import {
+	enterOverlap,
+	type InvocationTiming,
+	leaveOverlap,
+	newOverlap,
+	type Overlap,
+	REQUEST_TIMING
+} from '../timing.js'
 
 /** Per-request timings in ms; `fn()` adds `handler_ms`. Sent as Server-Timing. */
 export type RequestTiming = Record<string, number>
 
+const timedWork = new WeakMap<RequestTiming, Map<string, Overlap>>()
+
 /**
  * Run `work` and add its duration to `timing[key]` (rounded to 0.01 ms),
  * whether it resolves or throws: `await timed(context.timing, 'auth_ms', () => getSession(headers))`.
+ *
+ * Work under one key that overlaps is counted once, as wall-clock: the
+ * calls of a batch that await one memoised session lookup report that
+ * lookup's duration, not it times the number of calls. The time is added
+ * when the last overlapping work ends.
  */
 export async function timed<T>(
 	timing: RequestTiming,
 	key: string,
 	work: () => T | Promise<T>
 ): Promise<T> {
-	const started = performance.now()
+	let keys = timedWork.get(timing)
+	if (!keys) {
+		keys = new Map()
+		timedWork.set(timing, keys)
+	}
+	let overlap = keys.get(key)
+	if (!overlap) {
+		overlap = newOverlap()
+		keys.set(key, overlap)
+	}
+	enterOverlap(overlap)
 	try {
 		return await work()
 	} finally {
-		timing[key] =
-			(timing[key] ?? 0) + Math.round((performance.now() - started) * 100) / 100
+		const elapsed = leaveOverlap(overlap)
+		if (overlap.active === 0)
+			timing[key] = (timing[key] ?? 0) + Math.round(elapsed * 100) / 100
 	}
 }
 
@@ -81,7 +107,9 @@ export type Path = `/${string}`
 type Plugin<T extends Context> = StandardHandlerPlugin<T>
 type RoutingInterceptorOptions<T extends Context> =
 	StandardHandlerRoutingInterceptorOptions<T> & {
-		next(): Promise<StandardHandlerHandleResult>
+		next(
+			options?: StandardHandlerRoutingInterceptorOptions<T>
+		): Promise<StandardHandlerHandleResult>
 	}
 
 type StandardHandlerMatchedResponse = Extract<
@@ -160,6 +188,23 @@ export type OpenApiMountOptions<R extends AnyRouter> = OpenApiPageFields & {
 	plugins?: Plugin<InferRouterInitialContext<R>>[]
 }
 
+/** What a `maxBodySize` function is asked about. */
+export type BodyLimitRequest = {
+	/**
+	 * The procedure the request calls. Undefined when the body is read
+	 * before a procedure is matched, which is how a batch is read.
+	 */
+	procedure: AnyProcedure | undefined
+	/** Its router path, `['order', 'get']`; empty without a procedure. */
+	path: readonly string[]
+}
+
+/**
+ * A request body limit in bytes, or a function that returns one per
+ * request; `Infinity` from the function lifts the limit for that request.
+ */
+export type MaxBodySize = number | ((request: BodyLimitRequest) => number)
+
 /** How the oRPC handlers are built, the same in every runtime. */
 export type HandlerConfig<R extends AnyRouter> = {
 	router: R
@@ -180,8 +225,13 @@ export type HandlerConfig<R extends AnyRouter> = {
 	 * and OpenAPI handlers). A batch is measured as the one request it is.
 	 * Default: no limit, so set it where nothing in front of the handler
 	 * limits the body, e.g. a Next.js API route with `bodyParser: false`.
+	 *
+	 * A function gives each procedure its own limit:
+	 * `({ path }) => (path.join('.') === 'import.upload' ? 10_000_000 : 1_000_000)`.
+	 * A batch is read before its calls are known, so it is asked about with
+	 * no procedure and gets the limit that answer gives.
 	 */
-	maxBodySize?: number
+	maxBodySize?: MaxBodySize
 	/** Add a Server-Timing header from the request timing. Default: true */
 	serverTiming?: boolean
 	/**
@@ -294,6 +344,8 @@ type MountRequest = {
 	timing: RequestTiming
 	/** Set when the body exceeded `maxBodySize` (see {@link bodyLimitPlugin}). */
 	bodyTooLarge?: boolean
+	/** The procedure matched before the body was read, for a per-procedure limit. */
+	bodyLimitFor?: BodyLimitRequest
 }
 
 const mountRequestOf = (context: Context): MountRequest | undefined =>
@@ -324,7 +376,11 @@ export async function createRequestContext<R extends AnyRouter, Arg>(
 		: { headers, timing }
 	if (context instanceof Response) return context
 
-	const invocation: InvocationTiming = { procedureMs: 0, calls: 0 }
+	const invocation: InvocationTiming = {
+		procedureMs: 0,
+		calls: 0,
+		running: newOverlap()
+	}
 	const mountRequest: MountRequest = { started, timing }
 	// The symbols ride along with the app's context; oRPC passes them through.
 	return {
@@ -344,6 +400,29 @@ function isEventIterator(body: unknown): boolean {
 			Symbol.asyncIterator
 		] === 'function'
 	)
+}
+
+/**
+ * A `streaming` batch answers when its first result is ready and sends the
+ * rest as they finish, so its headers are written before its work is done.
+ */
+function isStreamedBatch<T extends Context>(
+	{ request }: StandardHandlerRoutingInterceptorOptions<T>,
+	response: StandardHandlerMatchedResponse
+): boolean {
+	const mode = request.headers['orpc-batch']
+	return (
+		(Array.isArray(mode) ? mode.at(-1) : mode) === 'streaming' &&
+		(response.body instanceof ReadableStream || isEventIterator(response.body))
+	)
+}
+
+/** Server-Timing for a response whose work is not finished: the time to its first result. */
+function formatFirstResult(firstMs: number, queueMs: number | undefined) {
+	const first = `first;dur=${firstMs.toFixed(2)}`
+	return queueMs === undefined
+		? first
+		: `${first}, queue;dur=${queueMs.toFixed(2)}`
 }
 
 function exposeHeader(
@@ -390,10 +469,14 @@ function mountPlugin<T extends Context>(
 					const invocation = context[REQUEST_TIMING] as
 						| InvocationTiming
 						| undefined
-					headers['server-timing'] = formatServerTiming(
-						performance.now() - request.started,
-						{ ...request.timing, handler_ms: invocation?.procedureMs }
-					)
+					const elapsed = performance.now() - request.started
+					headers['server-timing'] = isStreamedBatch(interceptor, response)
+						? // Its calls are still running: only what is already final.
+							formatFirstResult(elapsed, request.timing.queue_ms)
+						: formatServerTiming(elapsed, {
+								...request.timing,
+								handler_ms: invocation?.procedureMs
+							})
 					headers['access-control-expose-headers'] = exposeHeader(
 						headers['access-control-expose-headers'],
 						'Server-Timing'
@@ -415,18 +498,105 @@ function mountPlugin<T extends Context>(
 }
 
 /**
- * oRPC's request limit, which also tells {@link mountPlugin} that it refused
- * the body. The mark rides in the context, which plugins copy but keep.
+ * oRPC's `RequestLimitHandlerPlugin` with a limit chosen per request. The
+ * handler matches a procedure before it reads the body, so the limit is
+ * decided at the first read: by then a single call has its procedure, and
+ * a batch, which oRPC's batch plugin reads first and matches by header
+ * alone, has none. It also tells {@link mountPlugin} that it refused the
+ * body; the mark rides in the context, which plugins copy but keep.
  */
-function bodyLimitPlugin<T extends Context>(maxBodySize: number): Plugin<T> {
-	return new RequestLimitHandlerPlugin<T>({
-		maxBodySize,
-		error: ({ context }) => {
-			const request = mountRequestOf(context)
-			if (request) request.bodyTooLarge = true
-			return new ORPCError('PAYLOAD_TOO_LARGE')
+function bodyLimitPlugin<T extends Context>(
+	maxBodySize: MaxBodySize
+): Plugin<T> {
+	type Routing = (
+		options: RoutingInterceptorOptions<T>
+	) => Promise<StandardHandlerHandleResult>
+	// oRPC's plugin fixes its limit when it is built: one per distinct limit.
+	const limiters = new Map<number, Routing>()
+	const limiterFor = (limit: number): Routing => {
+		let limiter = limiters.get(limit)
+		if (!limiter) {
+			const plugin = new RequestLimitHandlerPlugin<T>({
+				maxBodySize: limit,
+				error: ({ context }) => {
+					const request = mountRequestOf(context)
+					if (request) request.bodyTooLarge = true
+					return new ORPCError('PAYLOAD_TOO_LARGE')
+				}
+			})
+			;[limiter] = plugin.init({}).routingInterceptors as [Routing]
+			limiters.set(limit, limiter)
 		}
-	})
+		return limiter
+	}
+	const limitOf = (request: BodyLimitRequest | undefined): number => {
+		if (typeof maxBodySize === 'number') return maxBodySize
+		const limit = maxBodySize(request ?? { procedure: undefined, path: [] })
+		if (typeof limit !== 'number' || !(limit > 0))
+			// Not a TypeError: oRPC answers a body that fails to decode with 400.
+			throw new ORPCError('INTERNAL_SERVER_ERROR', {
+				cause: new TypeError(
+					`orpc-fn: maxBodySize returned ${String(limit)} for ${request?.path.join('.') || 'a request with no procedure'}; return a positive number of bytes`
+				)
+			})
+		return limit
+	}
+
+	return {
+		name: 'orpc-fn:body-limit',
+		// Where oRPC's own sits: around batch, inside request decompression.
+		after: ['~batch'],
+		before: ['~request-compression'],
+		init(options) {
+			const routing: Routing = ({ next, ...rest }) => {
+				type Request = typeof rest.request
+				let limited: Promise<Request> | undefined
+				const limit = async (): Promise<Request> => {
+					const size = limitOf(mountRequestOf(rest.context)?.bodyLimitFor)
+					if (size === Number.POSITIVE_INFINITY) return rest.request
+					// Run for the request it hands on, whose body it counts.
+					let request = rest.request
+					await limiterFor(size)({
+						...rest,
+						next: async (inner) => {
+							request = inner?.request ?? rest.request
+							return { matched: false }
+						}
+					})
+					return request
+				}
+				return next({
+					...rest,
+					request: {
+						...rest.request,
+						resolveBody: async (
+							hint?: Parameters<Request['resolveBody']>[0]
+						) => {
+							limited ??= limit()
+							return (await limited).resolveBody(hint)
+						}
+					}
+				})
+			}
+			return {
+				...options,
+				routingInterceptors: [routing, ...(options.routingInterceptors ?? [])],
+				interceptors:
+					typeof maxBodySize === 'number'
+						? options.interceptors
+						: [
+								({ next, context, procedure, path }) => {
+									const request = mountRequestOf(context)
+									// The first match only: a batch's calls come after its body.
+									if (request && !request.bodyLimitFor)
+										request.bodyLimitFor = { procedure, path }
+									return next()
+								},
+								...(options.interceptors ?? [])
+							]
+			}
+		}
+	}
 }
 
 /**
@@ -491,12 +661,13 @@ export function createMounts<R extends AnyRouter, H>(
 
 	if (
 		maxBodySize !== undefined &&
+		typeof maxBodySize !== 'function' &&
 		(typeof maxBodySize !== 'number' ||
 			!Number.isFinite(maxBodySize) ||
 			maxBodySize <= 0)
 	)
 		throw new RangeError(
-			'orpc-fn: maxBodySize must be a positive finite number of bytes'
+			'orpc-fn: maxBodySize must be a positive finite number of bytes, or a function that returns one'
 		)
 
 	if (

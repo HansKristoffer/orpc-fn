@@ -439,6 +439,24 @@ test('mountOrpc maxBodySize limits the RPC and the OpenAPI handler', async () =>
 	const restRefused = await post('/api/size', { text: large })
 	expect(restRefused.status).toBe(413)
 	expect(await restRefused.json()).toMatchObject({ code: 'PAYLOAD_TOO_LARGE' })
+
+	// A limit per procedure reaches the OpenAPI handler too.
+	const perProcedure = new Hono()
+	mountOrpc(perProcedure, {
+		router: { size, other: size },
+		maxBodySize: ({ path }) => (path[0] === 'size' ? 1024 : 256),
+		openapi: { prefix: '/api', filter: () => true, docs: false },
+		rpcPrefix: '/rpc'
+	})
+	const send = (path: string, body: unknown) =>
+		perProcedure.request(path, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify(body)
+		})
+	expect((await send('/api/size', { text: large })).status).toBe(200)
+	expect((await send('/rpc/size', { json: { text: large } })).status).toBe(200)
+	expect((await send('/rpc/other', { json: { text: large } })).status).toBe(413)
 })
 
 test('formatServerTiming', () => {

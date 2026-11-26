@@ -39,8 +39,10 @@ import {
 } from './otel.js'
 import {
 	EXTRAS_OVERRIDE,
-	REQUEST_TIMING,
-	type InvocationTiming
+	enterOverlap,
+	type InvocationTiming,
+	leaveOverlap,
+	REQUEST_TIMING
 } from './timing.js'
 import { createRouter } from './router.js'
 import {
@@ -658,6 +660,15 @@ export function createFn<
 							state.logger = createLogger('fn', span)
 							span?.setAttribute('fn.operation', name)
 							span?.setAttribute('fn.procedure', key)
+							// Nested calls run inside their caller's time.
+							const requestTiming = (context as Record<symbol, unknown>)[
+								INVOCATION
+							]
+								? undefined
+								: ((context as Record<symbol, unknown>)[REQUEST_TIMING] as
+										| InvocationTiming
+										| undefined)
+							if (requestTiming) enterOverlap(requestTiming.running)
 							try {
 								const result = await next({ context: { [INVOCATION]: state } })
 								if (isAsyncIteratorObject(result.output) !== stream) {
@@ -674,15 +685,11 @@ export function createFn<
 								}
 								return result.output
 							} finally {
-								const timing = (context as Record<symbol, unknown>)[
-									REQUEST_TIMING
-								] as InvocationTiming | undefined
-								if (
-									timing &&
-									!(context as Record<symbol, unknown>)[INVOCATION]
-								) {
-									timing.procedureMs += performance.now() - started
-									timing.calls++
+								if (requestTiming) {
+									requestTiming.procedureMs += leaveOverlap(
+										requestTiming.running
+									)
+									requestTiming.calls++
 								}
 							}
 						},

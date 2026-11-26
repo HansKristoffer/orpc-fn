@@ -29,7 +29,7 @@ import { CLIENT_REQUEST_HEADERS, mountOrpc } from 'orpc-fn/hono'
 import { generateOpenApiDocument } from 'orpc-fn/openapi'
 import type { OpenAPIV3_1 } from '@orpc/openapi'
 import { createFetchHandler } from 'orpc-fn/fetch'
-import { createNodeHandler, timed } from 'orpc-fn/node'
+import { createNodeHandler, type MaxBodySize, timed } from 'orpc-fn/node'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { procedureCommands } from 'orpc-fn/cli'
 import {
@@ -592,6 +592,22 @@ void appRoute
 createFetchHandler({ router, rpcPrefix: '/rpc', maxBodySize: 1_000_000 })
 createNodeHandler({ router, rpcPrefix: '/rpc', maxBodySize: 1_000_000 })
 mountOrpc(new Hono(), { router, rpcPrefix: '/rpc', maxBodySize: 1_000_000 })
+// A limit per procedure: a batch is asked about with no procedure.
+createFetchHandler({
+	router,
+	rpcPrefix: '/rpc',
+	maxBodySize: ({ procedure, path }) => {
+		// @ts-expect-error a batch has no procedure, so it is checked first
+		readFnMeta(procedure)
+		const key: string = path.join('.')
+		return procedure && key === 'import.upload' ? 10_000_000 : 1_000_000
+	}
+})
+const bodyLimit: MaxBodySize = ({ path }) =>
+	path.length ? 2_000_000 : 1_000_000
+mountOrpc(new Hono(), { router, rpcPrefix: '/rpc', maxBodySize: bodyLimit })
+// @ts-expect-error the function returns a number of bytes
+createNodeHandler({ router, rpcPrefix: '/rpc', maxBodySize: () => '1mb' })
 // @ts-expect-error the limit is a number of bytes
 createFetchHandler({ router, rpcPrefix: '/rpc', maxBodySize: '1mb' })
 // @ts-expect-error a handler serves RPC, OpenAPI or both
