@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { AnyRouter } from '@orpc/server'
 import { CliError, defineCli, defineCommand } from 'hanzio/cli'
-import { z } from 'zod'
+import { z } from 'zod/v4'
 import { createStreamManifestAsync, renderStreamManifest } from './router.js'
 
 const streamManifest = defineCommand({

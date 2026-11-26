@@ -1,6 +1,6 @@
 import type { Schema } from '@orpc/contract'
 import { type DecoratedProcedure, ORPCError } from '@orpc/server'
-import type { ZodObject, ZodRawShape, ZodType, z } from 'zod'
+import type { ZodObject, ZodRawShape, ZodType, z } from 'zod/v4'
 import type { FnLogger } from '../logger.js'
 import type { StoredFnMeta } from '../meta.js'
 import {

@@ -1,0 +1,207 @@
+// Node `http` glue for orpc-fn/node: header conversion, writing an early Web
+// `Response`, and compressing what oRPC's node handler writes.
+import type {
+	IncomingHttpHeaders,
+	OutgoingHttpHeaders,
+	ServerResponse
+} from 'node:http'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import {
+	compressBytes,
+	compressionKind,
+	createFlushingCompressor,
+	type Encoding,
+	MIN_COMPRESS_BYTES,
+	negotiateEncoding,
+	varyWithAcceptEncoding
+} from './compression.js'
+
+/** Node request headers as Web `Headers` (HTTP/2 pseudo-headers dropped). */
+export function toWebHeaders(raw: IncomingHttpHeaders): Headers {
+	const headers = new Headers()
+	for (const [key, value] of Object.entries(raw)) {
+		if (value === undefined || key.startsWith(':')) continue
+		if (Array.isArray(value))
+			for (const item of value) headers.append(key, item)
+		else headers.append(key, value)
+	}
+	return headers
+}
+
+/** Writes a Web `Response` (a context factory's early answer) to `res`. */
+export async function sendWebResponse(
+	res: ServerResponse,
+	response: Response
+): Promise<void> {
+	const headers: OutgoingHttpHeaders = {}
+	response.headers.forEach((value, key) => {
+		if (key !== 'set-cookie') headers[key] = value
+	})
+	const cookies = response.headers.getSetCookie()
+	if (cookies.length) headers['set-cookie'] = cookies
+	res.writeHead(response.status, headers)
+	if (!response.body) {
+		res.end()
+		return
+	}
+	await pipeline(Readable.fromWeb(response.body as never), res)
+}
+
+function flatten(value: unknown): string | undefined {
+	if (value === undefined) return undefined
+	return Array.isArray(value) ? value.join(', ') : String(value)
+}
+
+type Callback = (error?: Error | null) => void
+type WriteArgs = [chunk?: unknown, encoding?: unknown, callback?: unknown]
+// The overloads of `writeHead`/`write`/`end`, flattened for forwarding
+// arguments as given.
+type WriteHead = (this: ServerResponse, ...args: unknown[]) => ServerResponse
+type Write = (this: ServerResponse, ...args: unknown[]) => boolean
+type End = (this: ServerResponse, ...args: unknown[]) => ServerResponse
+
+function chunkOf([chunk, encoding]: WriteArgs): Buffer | undefined {
+	if (chunk === undefined || chunk === null || typeof chunk === 'function')
+		return undefined
+	if (typeof chunk === 'string')
+		return Buffer.from(
+			chunk,
+			typeof encoding === 'string' ? (encoding as BufferEncoding) : 'utf8'
+		)
+	const bytes = chunk as Uint8Array
+	return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+}
+
+function callbackOf(args: WriteArgs): Callback | undefined {
+	for (let index = args.length - 1; index >= 0; index--)
+		if (typeof args[index] === 'function') return args[index] as Callback
+	return undefined
+}
+
+/**
+ * Runs `send` (oRPC writing its response to `res`) and compresses JSON and
+ * batch event streams on the way out, as the Fetch adapter does. oRPC's node
+ * handler calls `writeHead(status, headers)` once and then `end(body)` or
+ * pipes a stream, so those are wrapped for this response only; oRPC's own
+ * `CompressionPlugin` does the same, but skips batch streams.
+ */
+export async function withNodeCompression<T>(
+	request: { method?: string | undefined; headers: IncomingHttpHeaders },
+	res: ServerResponse,
+	send: () => Promise<T>
+): Promise<T> {
+	if (request.method === 'HEAD') return send()
+	const encoding = negotiateEncoding(
+		flatten(request.headers['accept-encoding'])
+	)
+	if (!encoding) return send()
+
+	const batch = request.headers['x-orpc-batch'] !== undefined
+	const { writeHead, write, end } = res
+	const restore = () => {
+		res.writeHead = writeHead
+		res.write = write
+		res.end = end
+	}
+	const writeHeadRaw = writeHead as WriteHead
+	const endRaw = end as End
+
+	res.writeHead = ((statusCode: number, ...rest: unknown[]) => {
+		restore()
+		const given = rest.find((arg) => typeof arg === 'object' && arg !== null)
+		const headers: OutgoingHttpHeaders = { ...(given as OutgoingHttpHeaders) }
+		const header = (name: string) =>
+			flatten(headers[name] ?? res.getHeader(name))
+		const kind = compressionKind(batch, header)
+		if (!kind) return writeHeadRaw.call(res, statusCode, ...rest)
+
+		// A compressed body has the compressed length, or none for a stream.
+		const writeEncodedHead = (length?: number) => {
+			headers['content-encoding'] = encoding
+			if (length === undefined) delete headers['content-length']
+			else headers['content-length'] = length
+			const vary = varyWithAcceptEncoding(header('vary'))
+			if (vary) headers.vary = vary
+			writeHeadRaw.call(res, statusCode, headers)
+		}
+
+		if (kind === 'batch-stream') {
+			writeEncodedHead()
+			streamCompressed(res, encoding, write as Write, endRaw)
+			return res
+		}
+
+		collectBody(res, async (raw, callback) => {
+			restore()
+			let body: Uint8Array = raw
+			if (raw.byteLength < MIN_COMPRESS_BYTES) {
+				writeHeadRaw.call(res, statusCode, headers)
+			} else {
+				body = await compressBytes(encoding, raw)
+				// The client may have gone while the body compressed.
+				if (res.destroyed) return
+				writeEncodedHead(body.byteLength)
+			}
+			endRaw.call(res, body, ...(callback ? [callback] : []))
+		})
+		return res
+	}) as typeof res.writeHead
+
+	try {
+		return await send()
+	} finally {
+		// oRPC resolves once `res` closed, or without writing when unmatched.
+		restore()
+	}
+}
+
+/** Buffers what is written to `res` and hands the whole body to `onEnd`. */
+function collectBody(
+	res: ServerResponse,
+	onEnd: (raw: Buffer, callback: Callback | undefined) => Promise<void>
+): void {
+	const chunks: Buffer[] = []
+	res.write = ((...args: WriteArgs) => {
+		const chunk = chunkOf(args)
+		if (chunk) chunks.push(chunk)
+		callbackOf(args)?.()
+		return true
+	}) as typeof res.write
+	res.end = ((...args: WriteArgs) => {
+		const chunk = chunkOf(args)
+		if (chunk) chunks.push(chunk)
+		onEnd(Buffer.concat(chunks), callbackOf(args)).catch((error: Error) =>
+			res.destroy(error)
+		)
+		return res
+	}) as typeof res.end
+}
+
+/** Routes what is written to `res` through a compressor that flushes each chunk. */
+function streamCompressed(
+	res: ServerResponse,
+	encoding: Encoding,
+	write: Write,
+	end: End
+): void {
+	const compressor = createFlushingCompressor(encoding)
+	compressor.on('data', (chunk: Buffer) => write.call(res, chunk))
+	compressor.once('end', () => end.call(res))
+	compressor.once('error', (error) => res.destroy(error))
+	res.once('close', () => compressor.destroy())
+
+	// Results are already in memory, so the compressor buffers instead of
+	// pushing back on the pipe.
+	res.write = ((...args: WriteArgs) => {
+		const chunk = chunkOf(args)
+		if (chunk) compressor.write(chunk, callbackOf(args))
+		return true
+	}) as typeof res.write
+	res.end = ((...args: WriteArgs) => {
+		const chunk = chunkOf(args)
+		if (chunk) compressor.write(chunk)
+		compressor.end(callbackOf(args))
+		return res
+	}) as typeof res.end
+}

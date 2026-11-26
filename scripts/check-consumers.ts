@@ -92,6 +92,8 @@ try {
 					vue: '3.3.0',
 					'@tanstack/vue-query': '5.80.0',
 					react: '18.0.0',
+					// With @orpc/tanstack-query (>= 5.80.2); the 5.66 floor of
+					// orpc-fn/react is checked on its own below.
 					'@tanstack/react-query': '5.80.0'
 				}
 				return `${name}@${minimum[name] ?? '1.14.0'}`
@@ -107,6 +109,12 @@ try {
 	await install([`${pkg.name}-${pkg.version}.tgz`, ...versions(required)])
 	await cp(join(root, 'tests/consumers/smoke.mjs'), join(fixture, 'smoke.mjs'))
 	await run([...node, 'smoke.mjs'])
+	// The fetch and node mount adapters need no optional peer either.
+	await cp(
+		join(root, 'tests/consumers/http-smoke.mjs'),
+		join(fixture, 'http-smoke.mjs')
+	)
+	await run([...node, 'http-smoke.mjs'])
 
 	// Adapters and types with every optional peer installed.
 	await install([
@@ -172,6 +180,7 @@ try {
 			},
 			files: [
 				'node_modules/orpc-fn/dist/index.d.ts',
+				'node_modules/orpc-fn/dist/fetch.d.ts',
 				'node_modules/orpc-fn/dist/live/index.d.ts',
 				'node_modules/orpc-fn/dist/live/memory.d.ts',
 				'node_modules/orpc-fn/dist/live/redis-bun.d.ts',
@@ -180,6 +189,41 @@ try {
 		})
 	)
 	await run(['node', 'node_modules/typescript/bin/tsc', '-p', 'tsconfig.json'])
+	// zod 3.25 (the bridge release shipping `zod/v4`) satisfies the peer range:
+	// v3 schemas in core routes, `zod/v4` schemas for live, and the adapters.
+	await install([`zod@${profile === 'minimum' ? '3.25.3' : '3.25.76'}`])
+	await run([...node, 'smoke.mjs'])
+	await run([...node, 'http-smoke.mjs'])
+	const checkBundler = async (file: string) => {
+		await cp(join(root, 'tests/consumers', file), join(fixture, file))
+		await writeFile(
+			join(fixture, 'tsconfig.json'),
+			JSON.stringify({
+				compilerOptions: {
+					target: 'ES2022',
+					module: 'ESNext',
+					moduleResolution: 'Bundler',
+					strict: true,
+					exactOptionalPropertyTypes: true,
+					noEmit: true,
+					types: ['node'],
+					skipLibCheck: true
+				},
+				files: [file]
+			})
+		)
+		await run([
+			'node',
+			'node_modules/typescript/bin/tsc',
+			'-p',
+			'tsconfig.json'
+		])
+	}
+	await checkBundler('zod3.ts')
+	if (profile === 'minimum') {
+		await install(['@tanstack/react-query@5.66.0'])
+		await checkBundler('react-query-floor.ts')
+	}
 	const typescript = JSON.parse(
 		await readFile(
 			join(fixture, 'node_modules/typescript/package.json'),

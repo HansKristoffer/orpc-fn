@@ -275,7 +275,7 @@ describe('mountOrpc compression', () => {
 			releaseSlow = resolve
 		})
 	})
-	const gzip = { 'accept-encoding': 'gzip, br' }
+	const gzip = { 'accept-encoding': 'gzip, deflate' }
 	const batchRequest = (headers: Record<string, string> = gzip) =>
 		new Request('http://localhost/rpc/__batch__', {
 			method: 'POST',
@@ -355,7 +355,7 @@ describe('mountOrpc compression', () => {
 		expect(await response.text()).toContain('"done":true')
 	})
 
-	test('tiny JSON responses skip gzip and Accept-Encoding gzip;q=0 is respected', async () => {
+	test('tiny JSON responses skip compression and Accept-Encoding gzip;q=0 is respected', async () => {
 		const app = createApp()
 		const tinyPromise = app.request('/rpc/slow', {
 			method: 'POST',
@@ -370,7 +370,7 @@ describe('mountOrpc compression', () => {
 		const rejected = await app.request('/rpc/fast', {
 			method: 'POST',
 			headers: {
-				'accept-encoding': 'gzip;q=0, br;q=1',
+				'accept-encoding': 'gzip;q=0, identity',
 				'content-type': 'application/json'
 			},
 			body: JSON.stringify({ json: null })

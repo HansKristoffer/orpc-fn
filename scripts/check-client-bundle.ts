@@ -35,7 +35,7 @@ try {
 		inputs: Record<string, unknown>
 	}
 	const unexpected = Object.keys(metadata.inputs).filter((path) =>
-		/@orpc\/server|src\/create-fn|src\/live\/|@modelcontextprotocol|@mastra|src\/hono/.test(
+		/@orpc\/server|src\/create-fn|src\/live\/|@modelcontextprotocol|@mastra|src\/hono|src\/http\/|src\/fetch|src\/node/.test(
 			path
 		)
 	)

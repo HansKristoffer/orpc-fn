@@ -1,190 +1,62 @@
-import { Readable, pipeline } from 'node:stream'
-import { promisify } from 'node:util'
-import zlib from 'node:zlib'
-import type { OpenAPIGeneratorGenerateOptions } from '@orpc/openapi'
-import {
-	type AnyRouter,
-	type InferRouterInitialContext,
-	onError as orpcOnError
-} from '@orpc/server'
-import { RPCHandler } from '@orpc/server/fetch'
-import { BatchHandlerPlugin } from '@orpc/server/plugins'
-import type { StandardHandlerPlugin } from '@orpc/server/standard'
+import type { AnyRouter } from '@orpc/server'
 import type { Context as HonoContext, Env, Hono } from 'hono'
 import type { StatusCode } from 'hono/utils/http-status'
-import { REQUEST_TIMING, type InvocationTiming } from './timing.js'
-import { isExpectedClientError } from './expected-client-error.js'
+import { createFetchCore } from './http/fetch.js'
+import {
+	type BaseContext,
+	type ContextFactory as MountContextFactory,
+	formatServerTiming,
+	type MountOptions,
+	markArrival,
+	msSinceArrival,
+	normalizeExpoOrigin,
+	type OpenApiMountOptions,
+	type RequestTiming,
+	timed
+} from './http/mount.js'
 import { hasTag, type ProcedureFilter } from './meta.js'
 
-export { hasTag, type ProcedureFilter }
-
-/** Per-request timings in ms; `fn()` adds `handler_ms`. Sent as Server-Timing. */
-export type RequestTiming = Record<string, number>
-
-/**
- * Run `work` and add its duration to `timing[key]` (rounded to 0.01 ms),
- * whether it resolves or throws: `await timed(context.timing, 'auth_ms', () => getSession(headers))`.
- */
-export async function timed<T>(
-	timing: RequestTiming,
-	key: string,
-	work: () => T | Promise<T>
-): Promise<T> {
-	const started = performance.now()
-	try {
-		return await work()
-	} finally {
-		timing[key] =
-			(timing[key] ?? 0) + Math.round((performance.now() - started) * 100) / 100
-	}
+export {
+	type BaseContext,
+	formatServerTiming,
+	hasTag,
+	normalizeExpoOrigin,
+	type OpenApiMountOptions,
+	type ProcedureFilter,
+	type RequestTiming,
+	timed
 }
-
-/** What every request starts with; the default context when `context` is omitted. */
-export type BaseContext = { headers: Headers; timing: RequestTiming }
 
 /**
  * Builds the router's initial context from the request. Return a `Response`
  * to answer (e.g. 401) instead.
  */
-export type ContextFactory<E extends Env, R extends AnyRouter> = (
-	c: HonoContext<E>,
-	base: BaseContext
-) =>
-	| InferRouterInitialContext<R>
-	| Response
-	| Promise<InferRouterInitialContext<R> | Response>
-
-/** `context` is optional only when the base context already satisfies the router. */
-type ContextOption<E extends Env, R extends AnyRouter> =
-	BaseContext extends InferRouterInitialContext<R>
-		? { context?: ContextFactory<E, R> }
-		: { context: ContextFactory<E, R> }
-
-type Path = `/${string}`
-type Handler<C> = {
-	handle(
-		request: Request,
-		options: { prefix: Path; context: C }
-	): Promise<{ matched: boolean; response: Response | undefined }>
-}
-type Plugin<T extends object> = StandardHandlerPlugin<T>
-
-export type OpenApiMountOptions<R extends AnyRouter> = {
-	prefix: Path
-	info?: { title: string; version: string; description?: string }
-	/** Docs page, relative to `prefix` (default '/'); the spec is at `/spec.json`. */
-	docsPath?: Path
-	/** false: serve the REST routes without the docs page and `spec.json`. */
-	docs?: boolean
-	/**
-	 * The procedures to publish (also filters the spec), e.g.
-	 * `hasTag('external')`. Required, so publishing is a choice;
-	 * `() => true` publishes every route.
-	 */
-	filter: ProcedureFilter
-	/** Turn JSON strings back into `Date`s etc. for `z.date()` inputs. */
-	smartCoercion?: boolean
-	/** Extra spec fields, e.g. `components.securitySchemes` and `security`. */
-	spec?: Omit<OpenAPIGeneratorGenerateOptions, 'filter'>
-	plugins?: Plugin<InferRouterInitialContext<R>>[]
-}
-
-export type MountOrpcOptions<
+export type ContextFactory<
 	E extends Env,
 	R extends AnyRouter
-> = ContextOption<E, R> & {
-	router: R
-	/** Mount the RPC handler (oRPC's `RPCLink`) here. Omit to skip it. */
-	rpcPrefix?: Path
-	/**
-	 * Mount the OpenAPI (REST) handler and its Scalar docs here. Needs the
-	 * optional peers `@orpc/openapi`, `@orpc/json-schema` and `@orpc/zod`,
-	 * loaded on the first request to `prefix`.
-	 */
-	openapi?: OpenApiMountOptions<R>
-	/** Collapse parallel RPC calls into one HTTP request. Default: true (25 calls). */
-	batch?: boolean | { maxSize: number }
-	/** Add a Server-Timing header from the request timing. Default: true */
-	serverTiming?: boolean
-	/**
-	 * gzip JSON responses and batch event streams for clients that accept it,
-	 * flushing after every batch result. Other event streams are left alone.
-	 * Default: true
-	 */
-	compress?: boolean
-	/** SSE keep-alive comments every N ms (default 15000), or false. */
-	sseKeepAlive?: boolean | number
-	/**
-	 * Extra RPC plugins. CORS belongs to Hono's `cors()` on the app, once; a
-	 * cross-origin client with batching needs `x-orpc-batch` in its `allowHeaders`.
-	 */
-	plugins?: Plugin<InferRouterInitialContext<R>>[]
-	/** Rewrite request headers before they reach the context (see `normalizeExpoOrigin`). */
-	normalizeHeaders?: (headers: Headers) => Headers
-	/**
-	 * Time spent before the handler ran, reported as `queue`. Default: time
-	 * since {@link markRequestArrival}, when the server marked the request.
-	 */
-	queueMs?: (request: Request) => number | undefined
-	/**
-	 * Unexpected procedure errors (oRPC turns thrown errors into responses, so
-	 * Hono's `onError` never sees them). Expected client errors are skipped.
-	 */
-	onError?: (error: unknown, request: { url: string; method: string }) => void
-	/**
-	 * Default: `isExpectedClientError`, which also accepts any error the
-	 * route's `createFn({ isExpectedError })` classified as expected.
-	 */
-	isExpectedError?: (error: unknown) => boolean
-}
+> = MountContextFactory<HonoContext<E>, R>
 
-const arrivals = new WeakMap<Request, number>()
+export type MountOrpcOptions<E extends Env, R extends AnyRouter> = MountOptions<
+	R,
+	HonoContext<E>,
+	Request
+>
 
 /**
  * Marks a request at the server's front door (`Bun.serve({ fetch })`), before
  * routing and middleware. `mountOrpc` reports the time until the procedure
  * runs as `queue_ms`: in-process queueing no handler timer can see.
  */
-export function markRequestArrival(request: Request): void {
-	arrivals.set(request, performance.now())
-}
+export const markRequestArrival: (request: Request) => void = markArrival
 
 /** Milliseconds since {@link markRequestArrival}, or undefined when unmarked. */
-export function msSinceRequestArrival(request: Request): number | undefined {
-	const arrivedAt = arrivals.get(request)
-	return arrivedAt === undefined ? undefined : performance.now() - arrivedAt
-}
+export const msSinceRequestArrival: (request: Request) => number | undefined =
+	msSinceArrival
 
 /**
- * Expo native sends `expo-origin` but not `origin`; copy it so cookie-based
- * auth (e.g. Better Auth) sees the origin.
- */
-export function normalizeExpoOrigin(raw: Headers): Headers {
-	const expo = raw.get('expo-origin')
-	if (!expo || raw.get('origin')) return raw
-	const headers = new Headers(raw)
-	headers.set('origin', expo)
-	return headers
-}
-
-export function formatServerTiming(
-	totalMs: number,
-	timing: Record<string, number | undefined>
-): string {
-	const parts = [`total;dur=${totalMs.toFixed(2)}`]
-	for (const [key, value] of Object.entries(timing)) {
-		if (value !== undefined) {
-			parts.push(`${key.replace(/_ms$/, '')};dur=${value.toFixed(2)}`)
-		}
-	}
-	return parts.join(', ')
-}
-
-/**
- * Response headers plus Server-Timing. For SSE, also disable proxy buffering
- * so keep-alive comments reach the edge (empty `:` lines are otherwise easy
- * for nginx/Fastly to hold until an idle kill). A copy: some responses (e.g.
- * redirects) have immutable headers.
+ * Response headers plus Server-Timing, for composed Fetch adapters. For SSE,
+ * also disable proxy buffering. A copy: some responses (e.g. redirects) have
+ * immutable headers. `mountOrpc` and `orpc-fn/fetch` already do this.
  */
 export function finishOrpcHeaders(
 	response: Response,
@@ -202,288 +74,23 @@ export function finishOrpcHeaders(
 	return headers
 }
 
-const NO_TRANSFORM = /(?:^|,)\s*no-transform\s*(?:,|$)/i
-const GZIP_MIN_JSON_BYTES = 512
-const gzipAsync = promisify(zlib.gzip)
-
-/** RFC 9110 `Accept-Encoding` check: matches `gzip` unless explicitly rejected (`q=0`). */
-function acceptsGzip(header: string | null): boolean {
-	if (!header) return false
-	for (const part of header.split(',')) {
-		const [rawEncoding, ...params] = part.trim().split(';')
-		const encoding = rawEncoding?.trim().toLowerCase()
-		if (encoding !== 'gzip' && encoding !== 'x-gzip') continue
-		let q = 1
-		for (const param of params) {
-			const [key, value] = param.trim().split('=')
-			if (key?.trim().toLowerCase() === 'q' && value !== undefined) {
-				const parsed = Number(value.trim())
-				if (Number.isFinite(parsed)) q = parsed
-			}
-		}
-		if (q > 0) return true
-	}
-	return false
-}
-
-function appendVaryAcceptEncoding(headers: Headers): void {
-	const vary = headers.get('vary')
-	if (!vary) {
-		headers.set('vary', 'accept-encoding')
-		return
-	}
-	if (vary === '*') return
-	const parts = vary.split(',').map((part) => part.trim().toLowerCase())
-	if (!parts.includes('accept-encoding'))
-		headers.append('vary', 'accept-encoding')
-}
-
-/**
- * JSON, and the event stream oRPC answers a streaming batch with (one event
- * per result). Other event streams are live: they stay open and carry little.
- */
-function compressionKind(
-	request: Request,
-	response: Response
-): 'batch-stream' | 'json' | null {
-	if (request.method === 'HEAD') return null
-	if (!acceptsGzip(request.headers.get('accept-encoding'))) return null
-	if (response.headers.has('content-encoding')) return null
-	if (NO_TRANSFORM.test(response.headers.get('cache-control') ?? '')) {
-		return null
-	}
-	const type = response.headers.get('content-type') ?? ''
-	if (type.startsWith('text/event-stream')) {
-		// BatchHandlerPlugin keys on this header too, whatever the URL.
-		return request.headers.has('x-orpc-batch') ? 'batch-stream' : null
-	}
-	return type.startsWith('application/json') ? 'json' : null
-}
-
-/**
- * gzip that emits every chunk at once, so a fast batch result is not held
- * back by a slow one. Cancelling the result cancels `body`.
- */
-function gzipFlushingEachChunk(
-	body: ReadableStream<Uint8Array>
-): ReadableStream<Uint8Array> {
-	const gzip = zlib.createGzip({ flush: zlib.constants.Z_SYNC_FLUSH })
-	pipeline(Readable.fromWeb(body as never), gzip, () => {})
-	return Readable.toWeb(gzip) as unknown as ReadableStream<Uint8Array>
-}
-
 /** Mount oRPC's RPC and OpenAPI handlers on a Hono app. */
 export function mountOrpc<E extends Env, R extends AnyRouter>(
 	app: Hono<E>,
 	options: MountOrpcOptions<E, R>
 ): void {
-	const {
-		router,
-		batch = true,
-		serverTiming = true,
-		sseKeepAlive = true,
-		compress = true
-	} = options
-	if (
-		typeof sseKeepAlive === 'number' &&
-		(!Number.isFinite(sseKeepAlive) || sseKeepAlive <= 0)
-	)
-		throw new RangeError(
-			'orpc-fn: sseKeepAlive must be a positive finite number'
-		)
-	const isExpectedError = options.isExpectedError ?? isExpectedClientError
-	const keepAlive =
-		sseKeepAlive === false
-			? { eventIteratorKeepAliveEnabled: false }
-			: {
-					eventIteratorKeepAliveEnabled: true,
-					// Explicit keep-alive under proxy idle timers (~30s); oRPC's default is 5s.
-					eventIteratorKeepAliveInterval:
-						sseKeepAlive === true ? 15_000 : sseKeepAlive
-				}
-	const report = (
-		error: unknown,
-		{ request }: { request: { url: URL; method: string } }
-	) => {
-		try {
-			if (isExpectedError(error)) return
-			options.onError?.(error, {
-				url: request.url.pathname,
-				method: request.method
-			})
-		} catch {
-			/* Error reporting cannot replace transport outcomes. */
-		}
-	}
-
-	const mount = (
-		prefix: Path,
-		handler: Handler<InferRouterInitialContext<R>>
-	) => {
+	const core = createFetchCore<R, HonoContext<E>>(options)
+	for (const prefix of core.prefixes) {
 		const route = prefix === '/' ? '/*' : `${prefix.replace(/\/+$/, '')}/*`
 		app.use(route, async (c, next) => {
-			const timing: RequestTiming = {}
-			const queueMs = (options.queueMs ?? msSinceRequestArrival)(c.req.raw)
-			if (queueMs !== undefined)
-				timing.queue_ms = Math.round(queueMs * 100) / 100
-			const started = performance.now()
-			const headers = options.normalizeHeaders
-				? options.normalizeHeaders(c.req.raw.headers)
-				: c.req.raw.headers
-			const context = options.context
-				? await options.context(c, { headers, timing })
-				: { headers, timing }
-			if (context instanceof Response) return context
-			const invocationTiming: InvocationTiming = { procedureMs: 0, calls: 0 }
-			const { matched, response } = await handler.handle(c.req.raw, {
-				prefix,
-				context: {
-					...context,
-					[REQUEST_TIMING]: invocationTiming
-				} as InferRouterInitialContext<R>
-			})
-			if (!matched || !response) return next()
-			const timed = serverTiming
-				? formatServerTiming(performance.now() - started, {
-						...timing,
-						handler_ms: invocationTiming.procedureMs
-					})
-				: undefined
-			const responseHeaders = finishOrpcHeaders(response, timed)
-			let body: ReadableStream<Uint8Array> | Uint8Array | null = response.body
-			if (body && compress) {
-				const kind = compressionKind(c.req.raw, response)
-				if (kind === 'batch-stream') {
-					body = gzipFlushingEachChunk(body)
-					responseHeaders.set('content-encoding', 'gzip')
-					responseHeaders.delete('content-length')
-					appendVaryAcceptEncoding(responseHeaders)
-				} else if (kind === 'json') {
-					const declaredLength = response.headers.get('content-length')
-					const parsedLength =
-						declaredLength === null ? Number.NaN : Number(declaredLength)
-					if (!(parsedLength < GZIP_MIN_JSON_BYTES)) {
-						const raw = new Uint8Array(await response.arrayBuffer())
-						if (raw.byteLength >= GZIP_MIN_JSON_BYTES) {
-							const compressed = await gzipAsync(raw)
-							body = new Uint8Array(
-								compressed.buffer,
-								compressed.byteOffset,
-								compressed.byteLength
-							)
-							responseHeaders.set('content-encoding', 'gzip')
-							responseHeaders.set('content-length', String(body.byteLength))
-							appendVaryAcceptEncoding(responseHeaders)
-						} else {
-							body = raw
-						}
-					}
-				}
-			}
-			return c.newResponse(body as Parameters<typeof c.newResponse>[0], {
+			const response = await core.handle(c.req.raw, c, prefix)
+			if (!response) return next()
+			// newResponse keeps headers other middleware set with c.header().
+			return c.newResponse(response.body, {
 				// oRPC only produces valid HTTP status codes.
 				status: response.status as StatusCode,
-				headers: responseHeaders
+				headers: response.headers
 			})
 		})
 	}
-
-	if (options.rpcPrefix) {
-		const plugins: Plugin<InferRouterInitialContext<R>>[] = [
-			...(options.plugins ?? [])
-		]
-		if (batch) {
-			plugins.push(
-				new BatchHandlerPlugin({
-					maxSize: batch === true ? 25 : batch.maxSize
-				})
-			)
-		}
-		mount(
-			options.rpcPrefix,
-			new RPCHandler(router, {
-				...keepAlive,
-				plugins,
-				interceptors: options.onError ? [orpcOnError(report)] : []
-			})
-		)
-	}
-
-	if (options.openapi) {
-		const { openapi } = options
-		if (typeof openapi.filter !== 'function')
-			throw new TypeError(
-				'orpc-fn: mountOrpc openapi needs a filter; pass () => true to publish every route'
-			)
-		let loading: Promise<Handler<InferRouterInitialContext<R>>> | undefined
-		mount(openapi.prefix, {
-			handle: async (request, handleOptions) => {
-				if (!loading) {
-					loading = createOpenApiHandler(
-						router,
-						openapi,
-						keepAlive,
-						options.onError ? report : undefined
-					).catch((error) => {
-						loading = undefined
-						throw error
-					})
-				}
-				return (await loading).handle(request, handleOptions)
-			}
-		})
-	}
-}
-
-/** Loads the OpenAPI peers only for apps that mount it. */
-async function createOpenApiHandler<R extends AnyRouter>(
-	router: R,
-	openapi: OpenApiMountOptions<R>,
-	keepAlive: object,
-	report:
-		| ((
-				error: unknown,
-				options: { request: { url: URL; method: string } }
-		  ) => void)
-		| undefined
-): Promise<Handler<InferRouterInitialContext<R>>> {
-	const [
-		{ SmartCoercionPlugin },
-		{ OpenAPIHandler },
-		{ OpenAPIReferencePlugin },
-		{ ZodToJsonSchemaConverter }
-	] = await Promise.all([
-		import('@orpc/json-schema'),
-		import('@orpc/openapi/fetch'),
-		import('@orpc/openapi/plugins'),
-		import('@orpc/zod/zod4')
-	])
-	const converters = [new ZodToJsonSchemaConverter()]
-	const plugins: Plugin<InferRouterInitialContext<R>>[] = [
-		...(openapi.plugins ?? [])
-	]
-	if (openapi.smartCoercion) {
-		plugins.push(new SmartCoercionPlugin({ schemaConverters: converters }))
-	}
-	if (openapi.docs !== false) {
-		plugins.push(
-			new OpenAPIReferencePlugin({
-				docsProvider: 'scalar',
-				...(openapi.docsPath ? { docsPath: openapi.docsPath } : {}),
-				schemaConverters: converters,
-				specGenerateOptions: {
-					info: openapi.info ?? { title: 'API', version: '0.0.0' },
-					servers: [{ url: openapi.prefix }],
-					filter: openapi.filter,
-					...openapi.spec
-				}
-			})
-		)
-	}
-	return new OpenAPIHandler(router, {
-		...keepAlive,
-		filter: openapi.filter,
-		plugins,
-		interceptors: report ? [orpcOnError(report)] : []
-	})
 }

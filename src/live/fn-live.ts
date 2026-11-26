@@ -4,7 +4,7 @@ import {
 	type DecoratedProcedure,
 	ORPCError
 } from '@orpc/server'
-import type { ZodType, z } from 'zod'
+import type { ZodType, z } from 'zod/v4'
 import type { StoredFnMeta } from '../meta.js'
 import { LIVE_GAP, positiveInteger } from './lifecycle.js'
 import { snapshotKey } from './codec.js'
