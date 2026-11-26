@@ -23,7 +23,7 @@ type FetchHandler<C> = {
 	handle(
 		request: Request,
 		options: { prefix: Path; context: C }
-	): Promise<{ matched: boolean; response: Response | undefined }>
+	): Promise<{ matched: boolean; response?: Response | undefined }>
 }
 
 /**
@@ -44,11 +44,18 @@ export function createFetchCore<R extends AnyRouter, Arg>(
 ): FetchCore<Arg> {
 	type C = InferRouterInitialContext<R>
 	const mounts = createMounts<R, FetchHandler<C>>(options, {
-		rpc: (router, handlerOptions) => new RPCHandler<C>(router, handlerOptions),
+		rpc: (router, { eventStream, ...handlerOptions }) =>
+			new RPCHandler<C>(router, {
+				...handlerOptions,
+				toFetchResponse: { eventStream }
+			}),
 		openapi: async () => {
 			const { OpenAPIHandler } = await import('@orpc/openapi/fetch')
-			return (router, handlerOptions) =>
-				new OpenAPIHandler<C>(router, handlerOptions)
+			return (router, { eventStream, ...handlerOptions }) =>
+				new OpenAPIHandler<C>(router, {
+					...handlerOptions,
+					toFetchResponse: { eventStream }
+				})
 		}
 	})
 	const compress = options.compress ?? true
@@ -88,7 +95,7 @@ export function createFetchCore<R extends AnyRouter, Arg>(
 }
 
 /**
- * Brotli or gzip for JSON and batch event streams, when the client accepts
+ * Brotli or gzip for JSON and streaming batches, when the client accepts
  * it. A batch stream is flushed after every result. Cancelling the result
  * cancels the original body.
  */
@@ -100,7 +107,6 @@ async function compressResponse(
 	const encoding = negotiateEncoding(request.headers.get('accept-encoding'))
 	if (!encoding) return response
 	const kind = compressionKind(
-		request.headers.has('x-orpc-batch'),
 		(name) => response.headers.get(name) ?? undefined
 	)
 	if (!kind) return response

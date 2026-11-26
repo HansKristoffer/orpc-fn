@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test'
 import * as otel from '@opentelemetry/api'
 import { call, ORPCError, os } from '@orpc/server'
+import { getOpenAPIMeta, openapi } from '@orpc/openapi'
 import { z } from 'zod'
 import {
 	completed,
@@ -12,6 +13,7 @@ import {
 } from '../tests/fixture.js'
 import { createFn, isExpectedClientError, readFnMeta } from './index.js'
 import { memoryTransport } from './live/memory.js'
+import { hasTag, listTools } from './mcp.js'
 
 beforeEach(() => {
 	completed.length = 0
@@ -206,6 +208,47 @@ describe('meta', () => {
 		expect(meta.tags).toEqual(['external'])
 	})
 
+	test('route options are oRPC OpenAPI meta, merged with the builder', () => {
+		const admin = createFn({
+			procedures: {
+				admin: os.meta(openapi({ tags: ['admin'], prefix: '/admin' }))
+			},
+			default: 'admin'
+		})
+		const route = admin.fn({
+			name: 'admin.list',
+			method: 'GET',
+			path: '/items',
+			summary: 'List items',
+			tags: ['external'],
+			handler: () => []
+		})
+		// What @orpc/openapi itself reads: generator, handlers and the docs.
+		expect(getOpenAPIMeta(route)).toMatchObject({
+			operationId: 'admin.list',
+			method: 'GET',
+			path: '/items',
+			prefix: '/admin',
+			summary: 'List items',
+			tags: ['admin', 'external']
+		})
+		expect(admin.readMeta(route)).toMatchObject({
+			method: 'GET',
+			path: '/items',
+			tags: ['admin', 'external']
+		})
+		expect(hasTag('admin')(route, ['list'])).toBe(true)
+	})
+
+	test('tool adapters refuse stacked input schemas they cannot describe', () => {
+		const stacked = os
+			.input(z.object({ a: z.string() }))
+			.input(z.object({ b: z.string() }))
+			.handler(() => null)
+		expect(readFnMeta(stacked).inputSchema).toBeUndefined()
+		expect(() => listTools({ stacked })).toThrow('stacks 2 schemas')
+	})
+
 	test('meta options and tags are typed', () => {
 		fn({
 			name: 'test.badMeta',
@@ -229,7 +272,7 @@ describe('meta', () => {
 			meta: { readOnly: true },
 			handler: () => 1
 		})
-		const rebuilt = os.prefix('/v1').router({ tool }).tool
+		const rebuilt = os.meta(openapi({ prefix: '/v1' })).router({ tool }).tool
 		expect(rebuilt).not.toBe(tool)
 		expect(readFnMeta(rebuilt).name).toBe('test.rebuilt')
 		expect(readFnMeta(rebuilt).meta).toEqual({ readOnly: true })

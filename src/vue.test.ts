@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test'
 import { ORPCError } from '@orpc/client'
-import { focusManager } from '@tanstack/vue-query'
+import { focusManager, type QueryClient } from '@tanstack/vue-query'
 import { nextTick, ref } from 'vue'
 import {
 	useApiClient,
@@ -12,6 +12,13 @@ import {
 	useQueryState
 } from './vue.js'
 import { createOrpcMock, createTestStream, withOrpcApp } from './vue/testing.js'
+
+// vue-query's client is the core client at runtime; since 5.108 its
+// `isMutating` filter type no longer matches what `QueryCache.build` expects.
+const coreClient = (client: QueryClient) =>
+	client as unknown as Parameters<
+		ReturnType<QueryClient['getQueryCache']>['build']
+	>[0]
 
 type Item = { id: string; name: string }
 
@@ -277,8 +284,9 @@ describe('useInvalidationStream', () => {
 			})
 		)
 		const cache = app.queryClient.getQueryCache()
-		cache.build(app.queryClient, { queryKey: ['order', 'list'] })
-		cache.build(app.queryClient, {
+		const client = coreClient(app.queryClient)
+		cache.build(client, { queryKey: ['order', 'list'] })
+		cache.build(client, {
 			queryKey: ['order', 'live'],
 			meta: { live: true }
 		})
@@ -373,7 +381,7 @@ describe('useMutation invalidates', () => {
 		)
 		app.queryClient
 			.getQueryCache()
-			.build(app.queryClient, { queryKey: ['order', 'list'] })
+			.build(coreClient(app.queryClient), { queryKey: ['order', 'list'] })
 		await app.result.mutateAsync('x')
 		expect(order).toEqual(['onSuccess:true'])
 		app.stop()

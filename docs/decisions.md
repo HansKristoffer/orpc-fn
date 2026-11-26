@@ -1,10 +1,10 @@
 # Decisions
 
-What oRPC already ships, checked against 1.14.8 (lullu's pin) and 1.15.4 (latest on 2026-10-03), and what this package does on top. The rule: depend on oRPC where it covers the behaviour, keep our own code only where it falls short.
+What oRPC already ships, checked against 1.14.8 and 1.15.4 (2026-10-03) and again against 2.0.0-beta.53 (2026-11-26, the oRPC 2 move), and what this package does on top. The rule: depend on oRPC where it covers the behaviour, keep our own code only where it falls short.
 
-## `@orpc/otel` vs our spans
+## `@orpc/opentelemetry` vs our spans
 
-`@orpc/otel` is an `InstrumentationBase` that registers a global tracer with `@orpc/shared`. oRPC then wraps handling in generic spans such as `call_procedure` and `validate_input`, named by router path.
+`@orpc/opentelemetry` (`@orpc/otel` before oRPC 2) is an `InstrumentationBase` that registers a global tracer with `@orpc/shared`. oRPC then wraps handling in generic spans such as `call_procedure` and `validate_input`, named by router path.
 
 It does not give us:
 
@@ -12,11 +12,11 @@ It does not give us:
 - the `call: <name>` child span for nested calls, which is what makes a trace readable;
 - the `fn.completed` wide event, with timing write-back and the expected/unexpected error split.
 
-**Decision:** keep our spans, built through `createFn({ otel })`. An error `isExpectedError` accepts leaves its span with an unset status and no exception event, as OpenTelemetry asks of server spans; `fn.error_code` names it. Its message is written for the caller and often names what they asked for, so it has no place in a trace, and a 404 is not a failed span. They use `startActiveSpan`, so `@orpc/otel`'s spans nest under them when an app enables both. `@opentelemetry/api` stays an optional peer: the root entry never imports it, the app passes the module in, and without it `span` is `undefined` and nothing else changes.
+**Decision:** keep our spans, built through `createFn({ otel })`. An error `isExpectedError` accepts leaves its span with an unset status and no exception event, as OpenTelemetry asks of server spans; `fn.error_code` names it. Its message is written for the caller and often names what they asked for, so it has no place in a trace, and a 404 is not a failed span. They use `startActiveSpan`, so oRPC's spans nest under them when an app enables both. `@opentelemetry/api` stays an optional peer: the root entry never imports it, the app passes the module in, and without it `span` is `undefined` and nothing else changes.
 
-## `@orpc/experimental-publisher` vs `/live`
+## `@orpc/publisher` vs `/live`
 
-The publisher is an abstract `Publisher` with memory, ioredis and Upstash adapters. It publishes per event name, resumes through Redis streams (`XADD` plus `lastEventId`), and buffers subscribers with drop-oldest.
+The publisher (`@orpc/experimental-publisher` before oRPC 2) is an abstract `Publisher` with memory, ioredis and Upstash adapters. It publishes per event name, resumes through Redis streams (`XADD` plus `lastEventId`), and buffers subscribers with drop-oldest.
 
 It falls short on what lullu and gey-mono rely on:
 
@@ -24,7 +24,7 @@ It falls short on what lullu and gey-mono rely on:
 - no per-subscriber `filterFn` or `authFn`, and no overflow marker, so a dropped event leaves no signal;
 - no Bun `RedisClient` adapter (lullu uses it);
 - no per-channel fan-out that parses each payload once for every local subscriber;
-- it is still `experimental-`.
+- it was still `experimental-` when this was decided. oRPC 2 renamed it `@orpc/publisher` and moved its Redis adapter from ioredis to node-redis; the gaps above were not re-checked in that move.
 
 **Decision:** do not build on it. `/live` defines a small `PubSubTransport` (publish with optional atomic backlog, read backlog, subscribe returning an unsubscribe function) with memory, Bun and ioredis implementations. Revisit when the publisher is stable and supports backlog replay and Bun. Moving would only touch the transports.
 
@@ -37,14 +37,23 @@ It falls short on what lullu and gey-mono rely on:
 
 ## `@orpc/experimental-durable-iterator`
 
-This targets Cloudflare Durable Objects (hibernation, signed tokens, a Durable Object holding the stream). Our streams run in ordinary servers, with Redis behind them, so it does not apply. **Decision:** not used. The backlog replay in `/live` covers resume for short reconnects.
+This targeted Cloudflare Durable Objects (hibernation, signed tokens, a Durable Object holding the stream), and oRPC 2 removed it in favour of `@orpc/hibernation` and `@orpc/cloudflare`. Our streams run in ordinary servers, with Redis behind them, so neither applies. **Decision:** not used. The backlog replay in `/live` covers resume for short reconnects.
 
 ## `@orpc/server` primitives
 
 - **`call`:** used as is by the bound call (`createBoundCall` only adds the child span, the inherited signal and the context).
 - **`createRouterClient`:** not needed. Handlers call procedures one at a time with `call`, which keeps types per procedure.
 - **Middleware:** the app's procedure builders stay plain oRPC builders with middleware (auth, context). Guards are not middleware because they need typed per-route options (`fn({ permission })`). oRPC middleware cannot add typed options to the procedure definition.
-- **`.meta()`:** used instead of the `FN_*` symbols. `fn()` stores `{ name, procedure, meta }` under one key, `'orpc-fn'`, in oRPC's procedure meta. Unlike a symbol on the procedure object, oRPC's meta survives everything that rebuilds procedures (`os.router()`, `.use()` on a router, prefixes, lazy routers). There is a test for this. `readFnMeta` reads it together with oRPC's route data. All runtime access to oRPC's `~orpc` internals goes through `src/compatibility.ts`, so an upstream change surfaces in one file.
+- **`.meta()`:** used instead of the `FN_*` symbols. `fn()` stores `{ name, procedure, meta }` under one key, `'orpc-fn'`, in oRPC's procedure meta. Unlike a symbol on the procedure object, oRPC's meta survives everything that rebuilds procedures (`os.router()`, `.use()` on a router, prefixes, lazy routers). There is a test for this. `readFnMeta` reads it together with the route's OpenAPI meta. All runtime access to oRPC's `~orpc` internals goes through `src/compatibility.ts`, so an upstream change surfaces in one file.
+- **Typed meta:** oRPC 2 dropped the meta type parameter from `Procedure`, so a route's meta type no longer travels with it. `fn()` adds a type-only optional `'~orpc-fn'` property to the procedure type, which `readMeta(route)` infers from. It never exists at runtime, and oRPC types that rebuild a procedure (`.use()` on a router) drop it, so `readMeta` falls back to untyped meta there.
+
+## Route options without importing `@orpc/openapi`
+
+oRPC 2 removed `.route()`: `path`, `method`, `summary`, `tags` and the operationId are `@orpc/openapi`'s `openapi()` meta plugin, kept under `meta['~openapi']`. `@orpc/openapi` is an optional peer and the root entry imports only `@orpc/server` and `@orpc/contract`. **Decision:** `fn()` writes that key itself with a meta plugin in `src/compatibility.ts` that applies the same merge as `openapi()` for the fields `fn()` accepts (tags concatenate, the rest replace), so a builder's `.meta(openapi({ tags, prefix }))` and a route's options combine as they would in oRPC. `OpenAPIRoute` mirrors the field types. A test reads the result with `getOpenAPIMeta`, so a change to oRPC's key or shape fails there. Making `@orpc/openapi` required would have cost every RPC-only app a peer.
+
+## Stacked schemas
+
+oRPC 2 stacks `.input()` calls (object inputs merge) and pipes `.output()` calls. `createFn` still rejects builders that set a schema, so a `fn()` route has one of each. The tool and CLI adapters need one JSON Schema; a plain oRPC procedure with stacked schemas has no single equivalent, so they throw for it, and `readFnMeta(...).inputSchema` is undefined for it.
 
 ## `isPublic`/`isSupport` versus `procedure:`
 
@@ -66,7 +75,9 @@ Mastra 1.51 accepts any Standard Schema with JSON Schema attached, so `createMas
 
 ## Schema input and output
 
-oRPC parses a handler's return value through the output schema, so the handler returns the schema's input type and callers receive its output type. The same split applies to pub/sub: publishers pass the event schema's input type; subscribers, filters and channel resolvers receive its output type. The raw event travels in oRPC's own JSON format (`StandardRPCJsonSerializer`, from `@orpc/client`, which `@orpc/server` already depends on) and each receiver parses it once. Payloads without the envelope are read as plain JSON, so mixed versions keep working during a rolling deploy. A rerun-mode `fnLive` skips a snapshot that serializes the same as the last one it sent, so an organization-wide bus does not resend every subscriber's unchanged list.
+oRPC parses a handler's return value through the output schema, so the handler returns the schema's input type and callers receive its output type. The same split applies to pub/sub: publishers pass the event schema's input type; subscribers, filters and channel resolvers receive its output type. The raw event travels in oRPC's own JSON format (`RPCJsonSerializer`, from `@orpc/client`, which `@orpc/server` already depends on) and each receiver parses it once. Payloads without the envelope are read as plain JSON, so mixed versions keep working during a rolling deploy.
+
+oRPC 2 tags serialized types by name (`['date', 'at']`) where oRPC 1 used numbers (`[1, 'at']`), and reads neither the other's tags. Instances on both majors share a broker during a rolling deploy and replay each other's backlogs, so `src/rpc-json.ts` translates: payloads are still written with oRPC 1's numbers (envelope version 2, byte-identical to what orpc-fn on oRPC 1 wrote, which a test pins), and only a type oRPC 1 lacked (`Infinity`) is written with names (version 3), which oRPC 1 instances cannot read. Reading accepts both. RegExp, which oRPC 2 dropped, is kept with a custom handler. `queryCacheSerializer` reads caches persisted under oRPC 1 the same way. A rerun-mode `fnLive` skips a snapshot that serializes the same as the last one it sent, so an organization-wide bus does not resend every subscriber's unchanged list.
 
 ## Live subscriptions open eagerly
 
@@ -78,7 +89,7 @@ oRPC parses a handler's return value through the output schema, so the handler r
 
 `orpc-fn/vue` and `orpc-fn/react` hold the subscription, live-query and invalidation-stream code hellu wrote once per framework. The connection logic (generation-guarded connects, backoff, reconnect catch-up) is one framework-free core; each subpath is a thin wrapper. Pausing follows TanStack's `focusManager` instead of `document` or React Native's `AppState`, so neither subpath imports a platform module and an app sets the focus source once. The "refetch stale queries on focus" that hellu's coordinator did by hand is TanStack's own `refetchOnWindowFocus`, so it is not repeated. Persisting the cache is TanStack's persister; we only supply oRPC's serializer and the cache-owner reset.
 
-`@orpc/tanstack-query` 1.14 ships `experimental_liveOptions`, a query whose data is the latest event of a stream. For a plain `fnLive` snapshot stream it is enough, and an app can use it directly. `useLiveQuery` stays because the apps also need what it lacks: patch streams folded by `applyEvent`, an HTTP seed that a persisted or server-rendered cache can satisfy, backoff reconnects after a stream ends, and closing streams in hidden tabs.
+`@orpc/tanstack-query` ships `liveOptions` (`experimental_liveOptions` before oRPC 2), a query whose data is the latest event of a stream. For a plain `fnLive` snapshot stream it is enough, and an app can use it directly. `useLiveQuery` stays because the apps also need what it lacks: patch streams folded by `applyEvent`, an HTTP seed that a persisted or server-rendered cache can satisfy, backoff reconnects after a stream ends, and closing streams in hidden tabs.
 
 ## Guards return a decision
 
@@ -86,23 +97,27 @@ A guard returned `unknown` and its result was ignored, so `permission: () => fal
 
 ## Streams are declared, not guessed from the path
 
-The client link used to keep a call out of a batch when its router path contained `subscribe`. A stream mounted as `watch` was batched with ordinary calls and the batch failed. **Decision:** a streaming route says so, with `stream: true` or oRPC's `eventIterator` output schema, and generated live routes declare it themselves; an `async function*` handler without it throws when the route is defined. On the client the caller knows best: the Vue and React helpers open streams with `streamCall` as the client context (a `Symbol.for` key, so copies agree), and `createRpcLink` never batches such a call. `createStreamManifest` lists the streaming paths of the actual router, aliases and nesting included, for streams opened without a helper. The name heuristic remains only as a fallback.
+The client link used to keep a call out of a batch when its router path contained `subscribe`. A stream mounted as `watch` was batched with ordinary calls and the batch failed. **Decision:** a streaming route says so, with `stream: true` or oRPC's `eventIterator` output schema, and generated live routes declare it themselves; an `async function*` handler without it throws when the route is defined. On the client the caller knows best: the Vue and React helpers open streams with `streamCall` as the client context (a `Symbol.for` key, so copies agree), and `createRpcLink` never batches such a call. oRPC 2's batch can carry streams, but its default `buffered` mode would hold the whole batch until a live stream ends, so streams stay out and batches use `streaming` mode. `createStreamManifest` lists the streaming paths of the actual router, aliases and nesting included, for streams opened without a helper. The name heuristic remains only as a fallback.
 
 ## HTTP adapters: oRPC's handlers, one shared core
 
-`orpc-fn/fetch`, `orpc-fn/node` and `orpc-fn/hono` build oRPC's own runtime handlers (`@orpc/server/fetch` and `/node`, `@orpc/openapi/fetch` and `/node`), so request parsing, a body Express already parsed, abort on disconnect and streaming stay oRPC's. `src/http/mount.ts` holds what they share: options, the per-request context, the plugin list (`BatchHandlerPlugin`, `ResponseHeadersPlugin`, the OpenAPI plugins) and error reporting. Server-Timing and the SSE anti-buffering headers are a plugin on oRPC's standard response, outermost (`order` above `CORSPlugin`), so both runtimes get them before anything is written. Hono reuses the Fetch core as middleware.
+`orpc-fn/fetch`, `orpc-fn/node` and `orpc-fn/hono` build oRPC's own runtime handlers (`@orpc/server/fetch` and `/node`, `@orpc/openapi/fetch` and `/node`), so request parsing, a body Express already parsed, abort on disconnect and streaming stay oRPC's. `src/http/mount.ts` holds what they share: options, the per-request context, the plugin list (`BatchHandlerPlugin`, `ResponseHeadersHandlerPlugin`, the OpenAPI plugins) and error reporting. Server-Timing and the SSE anti-buffering headers are a plugin on oRPC's standard response, outermost (initialized after `~cors`, `~batch` and `~response-headers`, since each plugin prepends its routing interceptor), so both runtimes get them before anything is written. Hono reuses the Fetch core as middleware.
 
-`ResponseHeadersPlugin` is always on: a procedure that does not declare `resHeaders` never sees it, and one passed in `plugins` is not added twice. Headers a batched call sets stay on its batch item, which is oRPC's behaviour.
+`ResponseHeadersHandlerPlugin` is always on: a procedure that does not declare `resHeaders` never sees it, and one passed in `plugins` is not added twice. Headers a batched call sets stay on its batch item, which is oRPC's behaviour.
+
+## Errors carry no status
+
+oRPC 2 removed `ORPCError`'s `status`: a handler maps codes with `errorStatusMap` (its common map otherwise) and answers codes it does not know with 400, where oRPC 1 used 500. **Decision:** `isExpectedClientError` classifies by the status oRPC would answer with, so an unknown code counts as expected, matching what the client receives. The HTTP adapters take `errorStatusMap`, merged over oRPC's common map because oRPC replaces it, and classify `onError` under it. The factory remembers only its app's own `isExpectedError` decisions, so the default rule is re-applied by each adapter under its map rather than frozen at the route.
 
 ## The adapters compress their own responses
 
-oRPC answers a streaming batch as an event stream with one event per result, sent as each finishes. Hono's `compress()` and oRPC's `CompressionPlugin` (Fetch and Node) skip `text/event-stream`, and `CompressionStream` or a default zlib stream buffer their output, so a fast result would wait behind a slow one. Apps served without a compressing proxy sent their largest responses raw, and a Vercel function must stay under its response size limit. **Decision:** the adapters compress JSON and batch event streams themselves (`compress`, on by default) with `node:zlib`: brotli at quality 4 (about gzip's speed, smaller output) unless the client prefers or only accepts gzip, flushing after every chunk. A batch is recognised by the `x-orpc-batch` request header, as `BatchHandlerPlugin` does. Other event streams stay uncompressed: they are long-lived and small. A response that already has a `content-encoding`, or says `no-transform`, is left alone, so an outer compressor still wins.
+oRPC answers a streaming batch with one frame per result (`application/vnd.orpc.batch` since oRPC 2, an event stream before), sent as each finishes. A compressor that buffers its output (`CompressionStream`, a default zlib stream) makes a fast result wait behind a slow one, and Hono's `compress()` and oRPC 1's `CompressionPlugin` skipped event streams altogether. oRPC 2's `ResponseCompressionHandlerPlugin` was not re-evaluated. Apps served without a compressing proxy sent their largest responses raw, and a Vercel function must stay under its response size limit. **Decision:** the adapters compress JSON and batch event streams themselves (`compress`, on by default) with `node:zlib`: brotli at quality 4 (about gzip's speed, smaller output) unless the client prefers or only accepts gzip, flushing after every chunk. A batch is recognised by its content type. Event streams stay uncompressed: they are long-lived and small. A response that already has a `content-encoding`, or says `no-transform`, is left alone, so an outer compressor still wins.
 
-On Fetch the adapter compresses the finished `Response`. On Node, oRPC writes straight to `res` (`writeHead(status, headers)`, then `end(body)` or a piped stream), so an adapter interceptor wraps those three methods for that one response, as oRPC's own `CompressionPlugin` does. Because of `node:zlib`, Cloudflare Workers need `nodejs_compat`.
+On Fetch the adapter compresses the finished `Response`. On Node, oRPC writes straight to `res` (status and `setHeader`, then `end(body)` or a piped stream), so the adapter wraps `write` and `end` around its own `handle(req, res)` call for that one response and decides on the first call, when the headers are known. oRPC 2 removed the adapter interceptors this used to hook into. Because of `node:zlib`, Cloudflare Workers need `nodejs_compat`.
 
 ## Zod 3.25 is a peer, through `zod/v4`
 
-`zod@3.25` exports Zod 3 at `zod` and Zod 4 at `zod/v4`; in `zod` 4, `zod/v4` is the same module as `zod`. Core schemas are Standard Schema, so Zod 3 schemas work in `fn`. Our own Zod use (live schema types, the CLI's `.meta()`, the bin) imports `zod/v4`, so it means Zod 4 under either major; with `zod` it would load Zod 3 on 3.25, where `z.core` and `.meta()` do not exist. The JSON Schema conversion (`@orpc/zod/zod4`) reads Zod 4 only, so live, tool and OpenAPI-spec schemas are Zod 4 schemas. `orpc-fn/cli` needs `zod` 4 installed, because `hanzio/cli`'s types import `zod`.
+`zod@3.25` exports Zod 3 at `zod` and Zod 4 at `zod/v4`; in `zod` 4, `zod/v4` is the same module as `zod`. Core schemas are Standard Schema, so Zod 3 schemas work in `fn`. Our own Zod use (live schema types, the CLI's `.meta()`, the bin) imports `zod/v4`, so it means Zod 4 under either major; with `zod` it would load Zod 3 on 3.25, where `z.core` and `.meta()` do not exist. The JSON Schema conversion (`@orpc/zod`, which in oRPC 2 asks for `zod` 4.5 or later) reads Zod 4 only, so live, tool and OpenAPI-spec schemas are Zod 4 schemas, and the tool and OpenAPI adapters need `zod` 4.5 installed. The packed consumer check runs core routes on 3.25 and the adapters on 4.5. `orpc-fn/cli` needs `zod` 4 installed, because `hanzio/cli`'s types import `zod`.
 
 ## Exposure and access are explicit
 

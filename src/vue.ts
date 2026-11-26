@@ -1,4 +1,3 @@
-import { StandardRPCJsonSerializer } from '@orpc/client/standard'
 import {
 	type DefaultError,
 	type FetchQueryOptions,
@@ -22,6 +21,7 @@ import {
 	useQuery as useVueQuery,
 	useQueryClient
 } from '@tanstack/vue-query'
+import { rpcJson } from './rpc-json.js'
 import {
 	type App,
 	computed,
@@ -127,12 +127,10 @@ function useUtilsGetter<TOrpc>(
 	}
 }
 
-const inputSerializer = new StandardRPCJsonSerializer()
-
 /** Stable key for subscription inputs, preserving Date/BigInt/Map/Set and key order. */
 function serializeInputKey(input: unknown): string {
-	const [json, meta] = inputSerializer.serialize(input)
-	return hashKey([json, meta])
+	const { json, meta } = rpcJson.serializeJson(input)
+	return hashKey([json, meta ?? []])
 }
 
 let documentVisible: Ref<boolean> | null = null
@@ -368,20 +366,26 @@ function useBoundApiClient<TOrpc>(orpc: MaybeRefOrGetter<TOrpc> | undefined) {
 
 	// Each wrapper forwards TanStack's own generics, so `select`, typed errors,
 	// page params and oRPC's tagged keys infer exactly as with vue-query itself.
-	function useQuery<TQueryFnData, TError = DefaultError, TData = TQueryFnData>(
+	function useQuery<
+		TQueryFnData,
+		TError = DefaultError,
+		TData = TQueryFnData,
+		TQueryKey extends QueryKey = QueryKey
+	>(
 		optionsFn: (
 			orpc: TOrpc
-		) => UseQueryOptions<TQueryFnData, TError, TData, TQueryFnData>
+		) => UseQueryOptions<TQueryFnData, TError, TData, TQueryFnData, TQueryKey>
 	): UseQueryReturnType<TData, TError> {
 		// A computed is a ref at runtime; TypeScript cannot relate a computed of
 		// the generic options to vue-query's MaybeRef parameter, so it is asserted.
 		const options = computed(() => optionsFn(getO()))
-		return useVueQuery<TQueryFnData, TError, TData>(
+		return useVueQuery<TQueryFnData, TError, TData, TQueryKey>(
 			options as unknown as UseQueryOptions<
 				TQueryFnData,
 				TError,
 				TData,
-				TQueryFnData
+				TQueryFnData,
+				TQueryKey
 			>
 		)
 	}
@@ -504,11 +508,17 @@ function useBoundApiClient<TOrpc>(orpc: MaybeRefOrGetter<TOrpc> | undefined) {
 			mutate: (
 				variables?: TVariables,
 				mutateOptions?: MutateOptions<TData, TError, TVariables, TContext>
-			) => mutation.mutate(variables ?? inputData.value, mutateOptions),
+			) =>
+				mutateOptions === undefined
+					? mutation.mutate(variables ?? inputData.value)
+					: mutation.mutate(variables ?? inputData.value, mutateOptions),
 			mutateAsync: (
 				variables?: TVariables,
 				mutateOptions?: MutateOptions<TData, TError, TVariables, TContext>
-			) => mutation.mutateAsync(variables ?? inputData.value, mutateOptions)
+			) =>
+				mutateOptions === undefined
+					? mutation.mutateAsync(variables ?? inputData.value)
+					: mutation.mutateAsync(variables ?? inputData.value, mutateOptions)
 		}
 	}
 
@@ -648,13 +658,22 @@ export function useLiveQuery<
 	TData = TRouteData,
 	TError = Error,
 	TOrpc = RegisteredOrpcUtils,
-	TSubscriptionInput = TInput
+	TSubscriptionInput = TInput,
+	TQueryKey extends QueryKey = QueryKey
 >(
 	input: MaybeRefOrGetter<TInput>,
 	queryOptionsFn: (
 		input: TInput,
 		orpc: TOrpc
-	) => UseQueryOptions<TRouteData, TError> & { queryKey: QueryKey },
+	) => UseQueryOptions<
+		TRouteData,
+		TError,
+		TRouteData,
+		TRouteData,
+		TQueryKey
+	> & {
+		queryKey: TQueryKey
+	},
 	subscribeFn: OrpcSubscribeFn<
 		NoInfer<TSubscriptionInput>,
 		TStreamEvent,
@@ -689,13 +708,22 @@ export function useLiveQuery<
 	TData,
 	TError,
 	TOrpc,
-	TSubscriptionInput
+	TSubscriptionInput,
+	TQueryKey extends QueryKey
 >(
 	input: MaybeRefOrGetter<TInput>,
 	queryOptionsFn: (
 		input: TInput,
 		orpc: TOrpc
-	) => UseQueryOptions<TRouteData, TError> & { queryKey: QueryKey },
+	) => UseQueryOptions<
+		TRouteData,
+		TError,
+		TRouteData,
+		TRouteData,
+		TQueryKey
+	> & {
+		queryKey: TQueryKey
+	},
 	subscribeFn: OrpcSubscribeFn<TSubscriptionInput, TStreamEvent, TOrpc>,
 	options: LiveQueryOptions<
 		TInput,

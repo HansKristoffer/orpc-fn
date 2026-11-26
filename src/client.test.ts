@@ -69,12 +69,16 @@ mountOrpc(app, {
 	rpcPrefix: '/rpc',
 	normalizeHeaders: normalizeExpoOrigin
 })
-const serve = (request: Request) => Promise.resolve(app.fetch(request))
-const url = 'http://localhost/rpc'
+const serve = (input: Request | string, init?: RequestInit) =>
+	Promise.resolve(
+		app.fetch(input instanceof Request ? input : new Request(input, init))
+	)
+const origin = 'http://localhost'
+const url = '/rpc'
 
 describe('createRpcLink', () => {
 	const client: RouterClient<typeof router> = createORPCClient(
-		createRpcLink({ url, fetch: serve })
+		createRpcLink({ origin, url, fetch: serve })
 	)
 
 	test('parallel calls share one request', async () => {
@@ -107,7 +111,7 @@ describe('createRpcLink', () => {
 	test('batch: false sends one request per call', async () => {
 		hits.length = 0
 		const plain: RouterClient<typeof router> = createORPCClient(
-			createRpcLink({ url, fetch: serve, batch: false })
+			createRpcLink({ origin, url, fetch: serve, batch: false })
 		)
 		await Promise.all([plain.echo({ text: 'a' }), plain.echo({ text: 'b' })])
 		expect(hits).toHaveLength(2)
@@ -119,10 +123,11 @@ describe('createRpcLink', () => {
 		const typed: RouterClient<typeof router, { token: string }> =
 			createORPCClient(
 				createRpcLink<{ token: string }>({
+					origin,
 					url,
-					fetch: (request, _init, options) => {
+					fetch: (input, init, options) => {
 						seen.push(options.context.token)
-						return serve(request)
+						return serve(input, init)
 					}
 				})
 			)
@@ -139,6 +144,12 @@ describe('createRpcLink', () => {
 		expect(hasOrpcErrorCode(error, 'NOT_FOUND')).toBe(true)
 		expect(hasOrpcErrorCode(error, 'FORBIDDEN')).toBe(false)
 		expect(hasOrpcErrorCode(new Error('x'), 'NOT_FOUND')).toBe(false)
+	})
+
+	test('a full URL as url names the oRPC 2 origin/url split', () => {
+		expect(() =>
+			createRpcLink({ url: 'https://api.test/rpc' as `/${string}` })
+		).toThrow("pass origin: 'https://api.test' and url: '/rpc'")
 	})
 
 	test('isSubscriptionPath', () => {
@@ -160,6 +171,7 @@ describe('Expo', () => {
 		inits.length = 0
 		const client: RouterClient<typeof router> = createORPCClient(
 			createBetterAuthExpoLink({
+				origin,
 				url,
 				fetch: expoFetch,
 				native: true,
@@ -188,7 +200,7 @@ describe('Expo', () => {
 
 	test('native: aborting a subscription closes the server stream', async () => {
 		const client: RouterClient<typeof router> = createORPCClient(
-			createBetterAuthExpoLink({ url, fetch: expoFetch, native: true })
+			createBetterAuthExpoLink({ origin, url, fetch: expoFetch, native: true })
 		)
 		const abort = new AbortController()
 		const stream = await client.counter.subscribe(
@@ -210,13 +222,13 @@ describe('Expo', () => {
 		inits.length = 0
 		const original = globalThis.fetch
 		const seen: Array<RequestInit | undefined> = []
-		globalThis.fetch = ((request: Request, init?: RequestInit) => {
+		globalThis.fetch = ((input: string, init?: RequestInit) => {
 			seen.push(init)
-			return serve(request)
+			return serve(input, init)
 		}) as typeof fetch
 		try {
 			const bridged = createExpoFetch({ fetch: expoFetch, native: false })
-			await bridged(new Request(`${url}/missing`, { method: 'POST' }))
+			await bridged(`${origin}${url}/missing`, { method: 'POST' })
 			expect(inits).toHaveLength(0)
 			expect(seen[0]?.credentials).toBe('include')
 		} finally {
@@ -228,6 +240,7 @@ describe('Expo', () => {
 		let cookieCalls = 0
 		let seenHeaders: Headers | undefined
 		const link = createBetterAuthExpoLink({
+			origin,
 			url,
 			native: false,
 			fetch: expoFetch,
@@ -260,8 +273,10 @@ test('manifest excludes aliased streaming routes with ordinary names from batche
 	mountOrpc(mixedApp, { router: mixed, rpcPrefix: '/rpc' })
 	const mixedClient: RouterClient<typeof mixed> = createORPCClient(
 		createRpcLink({
+			origin,
 			url,
-			fetch: (request) => Promise.resolve(mixedApp.fetch(request)),
+			fetch: (input, init) =>
+				Promise.resolve(mixedApp.fetch(new Request(input, init))),
 			streamPaths: createStreamManifest(mixed)
 		})
 	)
@@ -287,8 +302,10 @@ test('a stream call marked with streamCall stays out of batches without a manife
 	mountOrpc(mixedApp, { router: mixed, rpcPrefix: '/rpc' })
 	const mixedClient: RouterClient<typeof mixed> = createORPCClient(
 		createRpcLink({
+			origin,
 			url,
-			fetch: (request) => Promise.resolve(mixedApp.fetch(request))
+			fetch: (input, init) =>
+				Promise.resolve(mixedApp.fetch(new Request(input, init)))
 		})
 	)
 	const abort = new AbortController()
@@ -317,8 +334,10 @@ test('symbol-keyed client context keeps calls out of batches', async () => {
 	const client: RouterClient<{ echo: typeof echo }, { [customMark]?: true }> =
 		createORPCClient(
 			createRpcLink({
+				origin,
 				url,
-				fetch: (request) => Promise.resolve(mixedApp.fetch(request))
+				fetch: (input, init) =>
+					Promise.resolve(mixedApp.fetch(new Request(input, init)))
 			})
 		)
 	const [a, b] = await Promise.all([
@@ -336,6 +355,7 @@ test('generic Expo headers support async context and browser fetch injection', a
 	const generic: RouterClient<typeof router, { token: string }> =
 		createORPCClient(
 			createExpoLink<{ token: string }>({
+				origin,
 				url,
 				native: false,
 				fetch: async () => {

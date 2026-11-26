@@ -1,4 +1,3 @@
-import { StandardRPCJsonSerializer } from '@orpc/client/standard'
 import {
 	focusManager,
 	hashKey,
@@ -9,6 +8,7 @@ import {
 	useQuery,
 	useQueryClient
 } from '@tanstack/react-query'
+import { rpcJson } from './rpc-json.js'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import {
 	createInvalidationCoordinator,
@@ -50,12 +50,10 @@ export type UseOrpcSubscriptionOptions<TInput, TEvent> = {
 	pauseWhenUnfocused?: boolean | undefined
 }
 
-const inputSerializer = new StandardRPCJsonSerializer()
-
 /** Stable key for subscription inputs, preserving Date/BigInt/Map/Set and key order. */
 function serializeInputKey(input: unknown): string {
-	const [json, meta] = inputSerializer.serialize(input)
-	return hashKey([json, meta])
+	const { json, meta } = rpcJson.serializeJson(input)
+	return hashKey([json, meta ?? []])
 }
 
 const subscribeFocus = (listener: () => void) =>
@@ -168,9 +166,9 @@ type LiveQueryOptions<
 	pauseWhenUnfocused?: boolean | undefined
 }
 
-type LiveQueryOptionsFn<TInput, TData, TError> = (
+type LiveQueryOptionsFn<TInput, TData, TError, TQueryKey extends QueryKey> = (
 	input: TInput
-) => UseQueryOptions<TData, TError, TData, QueryKey>
+) => UseQueryOptions<TData, TError, TData, TQueryKey>
 
 type LiveQueryResult<TData, TError> = UseQueryResult<TData, TError> & {
 	liveStatus: LiveConnectionStatus
@@ -194,10 +192,11 @@ export function useLiveQuery<
 	TStreamEvent,
 	TData = TRouteData,
 	TError = Error,
-	TSubscriptionInput = TInput
+	TSubscriptionInput = TInput,
+	TQueryKey extends QueryKey = QueryKey
 >(
 	input: TInput,
-	queryOptionsFn: LiveQueryOptionsFn<TInput, TRouteData, TError>,
+	queryOptionsFn: LiveQueryOptionsFn<TInput, TRouteData, TError, TQueryKey>,
 	subscribe: SubscribeFn<NoInfer<TSubscriptionInput>, TStreamEvent>,
 	...options: [TStreamEvent] extends [TData]
 		? [
@@ -225,10 +224,11 @@ export function useLiveQuery<
 	TStreamEvent,
 	TData,
 	TError,
-	TSubscriptionInput
+	TSubscriptionInput,
+	TQueryKey extends QueryKey
 >(
 	input: TInput,
-	queryOptionsFn: LiveQueryOptionsFn<TInput, TRouteData, TError>,
+	queryOptionsFn: LiveQueryOptionsFn<TInput, TRouteData, TError, TQueryKey>,
 	subscribe: SubscribeFn<TSubscriptionInput, TStreamEvent>,
 	options: LiveQueryOptions<
 		TInput,

@@ -4,6 +4,7 @@ import {
 } from './assemble-procedure.js'
 import { isAsyncIteratorObject } from './stream.js'
 import { normalizeRoute } from './route-options.js'
+import type { AnyProcedureContract } from '@orpc/contract'
 import { type AnyProcedure, ORPCError, os } from '@orpc/server'
 import { procedureDefinition } from './compatibility.js'
 import { type BoundCall, createBoundCall } from './bound-call.js'
@@ -290,7 +291,7 @@ export type FnFactory<TDef extends FnDefinition> = {
 	createPublisher: CreatePublisher
 	createRouter: typeof createRouter
 	/** `readFnMeta`, with guard values typed by this factory's guards. */
-	readMeta: <T extends AnyProcedure>(
+	readMeta: <T extends AnyProcedure | AnyProcedureContract>(
 		procedure: T
 	) => Omit<ReturnType<typeof readFnMeta<T>>, 'guards' | 'dynamicGuards'> & {
 		guards: GuardOptions<TDef['guards']>
@@ -379,7 +380,9 @@ export function createFn<
 		} catch {
 			expected = isExpectedClientError(error)
 		}
-		if (expected) markExpected(error)
+		// Only the app's own rule is remembered: adapters apply the default
+		// themselves, under their `errorStatusMap`.
+		if (expected && runtime.isExpectedError) markExpected(error)
 		return expected
 	}
 	const tracing = createTracing(runtime.otel, isExpectedError)
@@ -421,7 +424,7 @@ export function createFn<
 		throw new TypeError(`orpc-fn: unknown default procedure ${runtime.default}`)
 	for (const [key, builder] of Object.entries(runtime.procedures)) {
 		const def = procedureDefinition(builder)
-		if (def?.inputSchema !== undefined || def?.outputSchema !== undefined) {
+		if (def.inputSchemas.length > 0 || def.outputSchemas.length > 0) {
 			throw new Error(
 				`orpc-fn: procedure "${key}" sets an input or output schema; set schemas on routes instead`
 			)
@@ -736,7 +739,8 @@ export function createFn<
 		pubsub: runtime.pubsub
 	})
 
-	const readMeta = (procedure: AnyProcedure): FnMeta => readFnMeta(procedure)
+	const readMeta = (procedure: AnyProcedure | AnyProcedureContract): FnMeta =>
+		readFnMeta(procedure)
 
 	// The runtimes are untyped; `Fn`, `FnLive`, `CreatePubSub` and
 	// `CreatePublisher` are their typed surface.

@@ -90,13 +90,13 @@ try {
 					'@modelcontextprotocol/sdk': '1.32.0',
 					'@modelcontextprotocol/server': '2.0.0',
 					vue: '3.3.0',
-					'@tanstack/vue-query': '5.80.0',
+					// With @orpc/tanstack-query 2 (query-core >= 5.105); the 5.66
+					// floor of orpc-fn/react is checked on its own below.
+					'@tanstack/vue-query': '5.105.0',
 					react: '18.0.0',
-					// With @orpc/tanstack-query (>= 5.80.2); the 5.66 floor of
-					// orpc-fn/react is checked on its own below.
-					'@tanstack/react-query': '5.80.0'
+					'@tanstack/react-query': '5.105.0'
 				}
-				return `${name}@${minimum[name] ?? '1.14.0'}`
+				return `${name}@${minimum[name] ?? '2.0.0-beta.53'}`
 			}
 			if (profile === 'latest') return `${name}@${pkg.peerDependencies[name]}`
 			const resolved = require(
@@ -116,9 +116,11 @@ try {
 	)
 	await run([...node, 'http-smoke.mjs'])
 
-	// Adapters and types with every optional peer installed.
+	// Adapters and types with every optional peer installed. @orpc/zod 2
+	// converts with zod >= 4.5; core routes accept older zod (checked above).
 	await install([
 		...versions(optional),
+		...(profile === 'minimum' ? ['zod@4.5.0'] : []),
 		// The client type tests build real query utils; same version as @orpc/client.
 		versions(['@orpc/client'])[0]?.replace(
 			'@orpc/client',

@@ -1,11 +1,23 @@
-import { ORPCError } from '@orpc/server'
+import { COMMON_ERROR_STATUS_MAP, ORPCError } from '@orpc/server'
 
 // ponytail: one set per package copy; apps with two installed copies of
 // orpc-fn must still pass isExpectedError to mountOrpc and the tool adapters.
 const classifiedExpected = new WeakSet<object>()
 
 /**
- * An expected client failure: an `ORPCError` with a 4xx status (validation,
+ * The HTTP status oRPC 2 answers a code with: the handler's `errorStatusMap`,
+ * else its common map, else 400. Errors no longer carry a status.
+ */
+function statusOf(code: string, statusMap?: Record<string, number>): number {
+	return (
+		statusMap?.[code] ??
+		(COMMON_ERROR_STATUS_MAP as Record<string, number>)[code] ??
+		400
+	)
+}
+
+/**
+ * An expected client failure: an `ORPCError` oRPC answers with a 4xx (validation,
  * auth, not-found) or an `AbortError` (the client closed the connection, e.g.
  * a browser leaving a live stream). These are normal outcomes the caller
  * drives, not server defects, so they must not be logged at `error` severity
@@ -18,7 +30,16 @@ const classifiedExpected = new WeakSet<object>()
  * This is the default `isExpectedError`; extend it with `createFn({ isExpectedError })`.
  */
 export function isExpectedClientError(error: unknown): boolean {
-	if (error instanceof ORPCError && error.status < 500) return true
+	return isExpectedWithStatusMap(error)
+}
+
+/** @internal `isExpectedClientError` under an adapter's `errorStatusMap`. */
+export function isExpectedWithStatusMap(
+	error: unknown,
+	statusMap?: Record<string, number>
+): boolean {
+	if (error instanceof ORPCError && statusOf(error.code, statusMap) < 500)
+		return true
 	if (
 		typeof error === 'object' &&
 		error !== null &&

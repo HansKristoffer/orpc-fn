@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AnyRouter, InferRouterInitialContext } from '@orpc/server'
-import { type NodeHttpHandlerOptions, RPCHandler } from '@orpc/server/node'
+import { RPCHandler } from '@orpc/server/node'
 import {
 	sendWebResponse,
 	toWebHeaders,
@@ -99,33 +99,18 @@ export function createNodeHandler<R extends AnyRouter>(
 		throw new TypeError('orpc-fn: createNodeHandler needs rpcPrefix or openapi')
 	type C = InferRouterInitialContext<R>
 	const compress = options.compress ?? true
-	// A fresh array per handler: oRPC's plugins add to it.
-	const adapterInterceptors = (): NonNullable<
-		NodeHttpHandlerOptions<C>['adapterInterceptors']
-	> =>
-		compress
-			? [
-					(interceptor) =>
-						withNodeCompression(
-							interceptor.request,
-							// HTTP/2 compatibility responses have the same write methods.
-							interceptor.response as ServerResponse,
-							() => interceptor.next()
-						)
-				]
-			: []
 	const mounts = createMounts<R, Handler<C>>(options, {
-		rpc: (router, handlerOptions) =>
+		rpc: (router, { eventStream, ...handlerOptions }) =>
 			new RPCHandler<C>(router, {
 				...handlerOptions,
-				adapterInterceptors: adapterInterceptors()
+				sendStandardResponse: { eventStream }
 			}),
 		openapi: async () => {
 			const { OpenAPIHandler } = await import('@orpc/openapi/node')
-			return (router, handlerOptions) =>
+			return (router, { eventStream, ...handlerOptions }) =>
 				new OpenAPIHandler<C>(router, {
 					...handlerOptions,
-					adapterInterceptors: adapterInterceptors()
+					sendStandardResponse: { eventStream }
 				})
 		}
 	})
@@ -151,10 +136,12 @@ export function createNodeHandler<R extends AnyRouter>(
 
 				for (const mount of candidates) {
 					const handler = await mount.handler()
-					const { matched } = await handler.handle(req, res, {
-						prefix: mount.prefix,
-						context
-					})
+					const handle = () =>
+						handler.handle(req, res, { prefix: mount.prefix, context })
+					const { matched } = compress
+						? // HTTP/2 compatibility responses have the same write methods.
+							await withNodeCompression(req, res, handle)
+						: await handle()
 					if (matched) return
 				}
 			}

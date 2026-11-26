@@ -1,6 +1,6 @@
 import type { AnySchema } from '@orpc/contract'
 import { JsonSchemaCoercer } from '@orpc/json-schema'
-import { ZodToJsonSchemaConverter } from '@orpc/zod/zod4'
+import { ZodToJsonSchemaConverter } from '@orpc/zod'
 import type { SchemaIssue } from './issues.js'
 
 export type JsonSchema = Record<string, unknown>
@@ -34,15 +34,23 @@ const converter = new ZodToJsonSchemaConverter()
 const coercer = new JsonSchemaCoercer()
 
 /** Converted on first use: an app building many tools at import pays per tool used. */
-function lazyJsonSchema(
+function lazyConversion(
 	schema: AnySchema,
-	strategy: 'input' | 'output'
-): () => JsonSchema {
-	let converted: JsonSchema | undefined
+	direction: 'input' | 'output'
+): () => [schema: JsonSchema, optional: boolean] {
+	let converted: [JsonSchema, boolean] | undefined
 	return () => {
-		converted ??= converter.convert(schema, { strategy })[1] as JsonSchema
+		converted ??= converter.convert(schema, direction) as [JsonSchema, boolean]
 		return converted
 	}
+}
+
+function lazyJsonSchema(
+	schema: AnySchema,
+	direction: 'input' | 'output'
+): () => JsonSchema {
+	const conversion = lazyConversion(schema, direction)
+	return () => conversion()[0]
 }
 
 /**
@@ -54,13 +62,14 @@ function lazyJsonSchema(
  * so values are coerced back before validating.
  */
 export function rawInputSchema<TIn>(schema: AnySchema): ToolSchema<TIn> {
-	const jsonSchema = lazyJsonSchema(schema, 'input')
+	const conversion = lazyConversion(schema, 'input')
+	const jsonSchema = () => conversion()[0]
 	return {
 		'~standard': {
 			version: 1,
 			vendor: 'orpc-fn',
 			validate: (value) => {
-				const coerced = coercer.coerce(jsonSchema(), value) as TIn
+				const coerced = coercer.coerce(conversion(), value) as TIn
 				const finish = (
 					result: Awaited<ReturnType<AnySchema['~standard']['validate']>>
 				) => (result.issues ? { issues: result.issues } : { value: coerced })

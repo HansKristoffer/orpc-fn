@@ -1,8 +1,8 @@
 import { type ClientContext, ORPCError, type ORPCErrorCode } from '@orpc/client'
 import { RPCLink, type RPCLinkOptions } from '@orpc/client/fetch'
 import { BatchLinkPlugin } from '@orpc/client/plugins'
-import { StandardRPCJsonSerializer } from '@orpc/client/standard'
 import { formatIssue, issuesOf } from './issues.js'
+import { normalizeMeta, rpcJson } from './rpc-json.js'
 import { isStreamCall } from './stream-call.js'
 
 export { STREAM_CALL, streamCall } from './stream-call.js'
@@ -51,7 +51,9 @@ export const isSubscriptionPath = (path: readonly string[]) =>
  * instead of many queued on the server's event loop.
  *
  * ```ts
- * const client: RouterClient<typeof router> = createORPCClient(createRpcLink({ url }))
+ * const client: RouterClient<typeof router> = createORPCClient(
+ *   createRpcLink({ origin: 'https://api.example.com', url: '/rpc' })
+ * )
  * export const orpc = createTanstackQueryUtils(client)
  * ```
  */
@@ -59,6 +61,11 @@ export function createRpcLink<T extends ClientContext = ClientContext>(
 	options: CreateRpcLinkOptions<T>
 ): RPCLink<T> {
 	const { batch = true, plugins = [], streamPaths, ...rest } = options
+	// oRPC 2 reads `url` as a path; a full URL there fails only per request.
+	if (typeof rest.url === 'string' && /^[a-z][a-z\d+.-]*:/i.test(rest.url))
+		throw new TypeError(
+			`orpc-fn: RPCLink url is a path since oRPC 2; pass origin: '${new URL(rest.url).origin}' and url: '${new URL(rest.url).pathname}'`
+		)
 	const streams = new Set(streamPaths?.map((path) => JSON.stringify(path)))
 	if (batch === false) return new RPCLink<T>({ ...rest, plugins })
 	const {
@@ -71,18 +78,23 @@ export function createRpcLink<T extends ClientContext = ClientContext>(
 		plugins: [
 			new BatchLinkPlugin<T>({
 				maxSize,
+				// Each result is sent as it finishes, so a fast call does not wait
+				// behind a slow one (oRPC 2 defaults to buffering the whole batch).
+				mode: 'streaming',
 				groups: groups ?? [
-					// Only context-free calls reach this group (see `exclude` below),
+					// Only context-free calls reach this group (see `filter` below),
 					// so the batch's empty context is exactly theirs.
 					{ condition: () => true, context: {} as T }
 				],
-				exclude: ({ path, context }) =>
-					isStreamCall(context) ||
-					(streams.size > 0 && streams.has(JSON.stringify(path))) ||
-					exclude(path) ||
-					(groups === undefined &&
-						(Object.keys(context).length > 0 ||
-							Object.getOwnPropertySymbols(context).length > 0))
+				filter: ({ path, context }) =>
+					!(
+						isStreamCall(context) ||
+						(streams.size > 0 && streams.has(JSON.stringify(path))) ||
+						exclude(path) ||
+						(groups === undefined &&
+							(Object.keys(context).length > 0 ||
+								Object.getOwnPropertySymbols(context).length > 0))
+					)
 			}),
 			...plugins
 		]
@@ -146,12 +158,11 @@ export function formatClientError(error: unknown, fallback: string): string {
 	return fallback
 }
 
-const cacheSerializer = new StandardRPCJsonSerializer()
-
 /**
  * `serialize`/`deserialize` for a TanStack Query persister. API payloads carry
  * `Date`s (and maybe `Map`s, `Set`s, `BigInt`s) that plain JSON returns as
- * strings; oRPC's own serializer round-trips them.
+ * strings; oRPC's own serializer round-trips them. Caches persisted under
+ * oRPC 1 still restore.
  *
  * ```ts
  * createAsyncStoragePersister({ storage: AsyncStorage, ...queryCacheSerializer })
@@ -159,14 +170,11 @@ const cacheSerializer = new StandardRPCJsonSerializer()
  */
 export const queryCacheSerializer = {
 	serialize(value: unknown): string {
-		const [json, meta] = cacheSerializer.serialize(value)
-		return JSON.stringify({ json, meta })
+		const { json, meta } = rpcJson.serializeJson(value)
+		return JSON.stringify({ json, meta: meta ?? [] })
 	},
 	deserialize<T>(text: string): T {
-		const { json, meta } = JSON.parse(text) as {
-			json: unknown
-			meta: Parameters<typeof cacheSerializer.deserialize>[1]
-		}
-		return cacheSerializer.deserialize(json, meta) as T
+		const { json, meta } = JSON.parse(text) as { json: unknown; meta: unknown }
+		return rpcJson.deserializeJson({ json, meta: normalizeMeta(meta) }) as T
 	}
 }

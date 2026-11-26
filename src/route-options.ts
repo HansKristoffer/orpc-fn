@@ -1,7 +1,7 @@
 import {
 	type AnySchema,
 	type ErrorMap,
-	getEventIteratorSchemaDetails
+	getAsyncIteratorObjectSchemasDetails
 } from '@orpc/contract'
 import { ROUTE_OPTION_KEYS } from './types.js'
 
@@ -81,7 +81,9 @@ export function normalizeRoute(
 			}
 		}
 	}
-	const iterator = getEventIteratorSchemaDetails(output) !== undefined
+	const iterator =
+		output !== undefined &&
+		getAsyncIteratorObjectSchemasDetails([output]) !== undefined
 	if (stream === false && iterator)
 		throw new TypeError(
 			'orpc-fn: an event iterator schema cannot declare stream: false'

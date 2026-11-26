@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, mock, test } from 'bun:test'
 import { ORPCError, os } from '@orpc/server'
 import { Hono } from 'hono'
 import { z } from 'zod'
+import { captureStreamingBatch } from '../tests/batch.js'
 import { createRouter, fn, quiet, user } from '../tests/fixture.js'
 import { createFn } from './index.js'
 import {
@@ -276,22 +277,18 @@ describe('mountOrpc compression', () => {
 		})
 	})
 	const gzip = { 'accept-encoding': 'gzip, deflate' }
-	const batchRequest = (headers: Record<string, string> = gzip) =>
-		new Request('http://localhost/rpc/__batch__', {
+	const batch = captureStreamingBatch(['fast', 'slow'])
+	const batchRequest = async (headers: Record<string, string> = gzip) => {
+		const { path, headers: batchHeaders, body } = await batch
+		return new Request(`http://localhost${path}`, {
 			method: 'POST',
-			headers: {
-				...headers,
-				'content-type': 'application/json',
-				'x-orpc-batch': 'streaming'
-			},
-			body: JSON.stringify([
-				{ url: 'http://localhost/rpc/fast', body: { json: null } },
-				{ url: 'http://localhost/rpc/slow', body: { json: null } }
-			])
+			headers: { ...batchHeaders, ...headers },
+			body
 		})
+	}
 
 	test('a batch stream is gzipped and delivers a result before a slower one', async () => {
-		const response = await createApp().fetch(batchRequest())
+		const response = await createApp().fetch(await batchRequest())
 		expect(response.headers.get('content-encoding')).toBe('gzip')
 		expect(response.headers.get('vary')).toContain('accept-encoding')
 
@@ -340,7 +337,7 @@ describe('mountOrpc compression', () => {
 	})
 
 	test('clients without gzip get the plain batch', async () => {
-		const response = await createApp().fetch(batchRequest({}))
+		const response = await createApp().fetch(await batchRequest({}))
 		expect(response.headers.get('content-encoding')).toBeNull()
 		releaseSlow()
 		const text = await response.text()
@@ -349,7 +346,9 @@ describe('mountOrpc compression', () => {
 	})
 
 	test('compress: false turns it off', async () => {
-		const response = await createApp({ compress: false }).fetch(batchRequest())
+		const response = await createApp({ compress: false }).fetch(
+			await batchRequest()
+		)
 		expect(response.headers.get('content-encoding')).toBeNull()
 		releaseSlow()
 		expect(await response.text()).toContain('"done":true')

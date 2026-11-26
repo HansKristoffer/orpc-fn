@@ -3,13 +3,14 @@ import { call } from '@orpc/server'
 import { z } from 'zod'
 import { createRouter, fn } from '../tests/fixture.js'
 import { hasTag, listTools, type ProcedureFilter } from './mcp.js'
+import { readFnMeta } from './meta.js'
 
 const isExternal = hasTag('external')
 const isMcpSupport = hasTag('mcp-support')
 // gey-mono's rule: GET, or a non-GET route tagged as read-only.
-const readOnly: ProcedureFilter = (options) =>
-	options.contract['~orpc'].route.method === 'GET' ||
-	hasTag('mcp-readonly')(options)
+const readOnly: ProcedureFilter = (procedure, path) =>
+	readFnMeta(procedure).method === 'GET' ||
+	hasTag('mcp-readonly')(procedure, path)
 const listExternalTools = (
 	router: Parameters<typeof listTools>[0],
 	filter: ProcedureFilter = isExternal

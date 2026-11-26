@@ -1,6 +1,9 @@
 import { promisify } from 'node:util'
 import zlib from 'node:zlib'
 
+/** oRPC 2's `BATCH_CONTENT_TYPE`, from `@orpc/server/plugins`. */
+const BATCH_CONTENT_TYPE = 'application/vnd.orpc.batch'
+
 /** Response encodings the mount adapters produce. */
 export type Encoding = 'br' | 'gzip'
 
@@ -45,20 +48,17 @@ export function negotiateEncoding(
 }
 
 /**
- * JSON, and the event stream oRPC answers a streaming batch with (one event
- * per result). Other event streams are live: they stay open and carry little.
- * `batch` is whether the request carried `x-orpc-batch`, which
- * `BatchHandlerPlugin` keys on too, whatever the URL.
+ * JSON, and the framed batch oRPC answers a streaming batch with (one frame
+ * per result, `application/vnd.orpc.batch`). Event streams are live: they
+ * stay open and carry little.
  */
 export function compressionKind(
-	batch: boolean,
 	header: (name: string) => string | undefined
 ): 'batch-stream' | 'json' | undefined {
 	if (header('content-encoding')) return undefined
 	if (NO_TRANSFORM.test(header('cache-control') ?? '')) return undefined
 	const type = header('content-type') ?? ''
-	if (type.startsWith('text/event-stream'))
-		return batch ? 'batch-stream' : undefined
+	if (type.startsWith(BATCH_CONTENT_TYPE)) return 'batch-stream'
 	return type.startsWith('application/json') ? 'json' : undefined
 }
 

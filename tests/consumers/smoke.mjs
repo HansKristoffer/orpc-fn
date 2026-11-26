@@ -84,12 +84,13 @@ if (process.env.WITH_OPTIONAL_PEERS) {
 		body: JSON.stringify({ n: 2 })
 	})
 	assert.equal(await response.json(), 4)
-	const fetch = (request) => Promise.resolve(app.fetch(request))
-	const client = createORPCClient(createRpcLink({ url: 'http://localhost/rpc', fetch }))
+	const fetch = (url, init) => Promise.resolve(app.fetch(new Request(url, init)))
+	const client = createORPCClient(createRpcLink({ origin: 'http://localhost', url: '/rpc', fetch }))
 	assert.deepEqual(await Promise.all([client.inner({ n: 1 }), client.inner({ n: 2 })]), [2, 4])
 	assert.equal(hasOrpcErrorCode(new Error('x'), 'NOT_FOUND'), false)
 	const expo = createORPCClient(createBetterAuthExpoLink({
-		url: 'http://localhost/rpc',
+		origin: 'http://localhost',
+		url: '/rpc',
 		native: true,
 		fetch: (url, init) => app.fetch(new Request(url, init))
 	}))
