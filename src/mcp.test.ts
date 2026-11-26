@@ -257,3 +257,53 @@ describe('filter combinators', () => {
 		).toEqual(['thing-secret'])
 	})
 })
+
+describe('tool JSON Schema size', () => {
+	const lookup = fn({
+		name: 'thing.lookup',
+		procedure: 'public',
+		input: z.object({
+			id: z.uuid(),
+			email: z.email(),
+			ref: z.cuid(),
+			note: z.string().min(1).max(200)
+		}),
+		handler: ({ input }) => input.id
+	})
+	const inputOf = (options: { keepFormatPatterns?: boolean } = {}) => {
+		const [tool] = listTools(createRouter({ lookup }), options)
+		return tool?.config.inputSchema
+	}
+
+	test('a pattern that repeats a standard format is left out; limits and other patterns stay', async () => {
+		const schema = inputOf()
+		const json = schema?.['~standard'].jsonSchema.input() as {
+			properties: Record<string, Record<string, unknown>>
+		}
+		expect(json.properties.id).toEqual({ type: 'string', format: 'uuid' })
+		expect(json.properties.email).toEqual({ type: 'string', format: 'email' })
+		expect(json.properties.ref?.pattern).toBeString()
+		expect(json.properties.note).toEqual({
+			type: 'string',
+			minLength: 1,
+			maxLength: 200
+		})
+		// Validation still applies every check.
+		const rejected = await schema?.['~standard'].validate({
+			id: 'not-a-uuid',
+			email: 'a@b.co',
+			ref: 'cjld2cjxh0000qzrmn831i7rn',
+			note: 'x'
+		})
+		expect(rejected && 'issues' in rejected && rejected.issues?.length).toBe(1)
+	})
+
+	test('keepFormatPatterns keeps them', () => {
+		const json = inputOf({ keepFormatPatterns: true })?.[
+			'~standard'
+		].jsonSchema.input() as {
+			properties: Record<string, Record<string, unknown>>
+		}
+		expect(json.properties.id?.pattern).toBeString()
+	})
+})

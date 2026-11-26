@@ -78,7 +78,14 @@ export type FnLiveConfig<
 		stateSchema?: Schema<unknown, TOutput>
 		/** Validates patch payloads. Required when a transformer returns fnLivePatch. */
 		emitSchema?: Schema<unknown, TEmit>
-		/** Optional access check before each update; idle streams keep their initial authorization. */
+		/**
+		 * Re-run the route's guards (static values and `guardResolvers`) before
+		 * each update, so a permission or flag removed mid-stream ends the
+		 * stream with the guard's error. Default: true. Idle streams keep their
+		 * initial authorization.
+		 */
+		rerunGuards?: boolean
+		/** An extra access check before each update, after the guards. */
 		reauthorize?: AuthFn<TInput, FnContext<TDef, TKey>>
 		eventSchema: TEventSchema
 		channel: ChannelDefinition<
@@ -420,6 +427,7 @@ type RuntimeLiveConfig = Omit<ChannelOptions, 'name'> & {
 	name?: string
 	stateSchema?: AnySchema
 	emitSchema?: AnySchema
+	rerunGuards?: boolean
 	reauthorize?: AuthFn<Record<string, unknown>, unknown>
 	transformerFn?: (params: RuntimeParams & Record<string, unknown>) => unknown
 	shouldUpdate?: (params: RuntimeParams & Record<string, unknown>) => unknown
@@ -430,6 +438,13 @@ type RuntimeLiveConfig = Omit<ChannelOptions, 'name'> & {
 	description?: string
 }
 
+/** @internal Runs a route's guards for one call; throws when one refuses. */
+export type GuardRunner = (params: {
+	input: unknown
+	context: unknown
+	signal: AbortSignal | undefined
+}) => Promise<void>
+
 /**
  * @internal Wires `fnLive` onto an `fn` and channel runtime of the same
  * instance. `createFn` returns it typed as {@link FnLive}.
@@ -439,8 +454,10 @@ export function createFnLive(runtime: {
 	fn: (options: any) => AnyProcedure
 	createChannel: (options: ChannelOptions) => Channel
 	isGuard: (option: string) => boolean
+	/** The guards `fn` built for a procedure, if it has any. */
+	guardsOf: (procedure: AnyProcedure) => GuardRunner | undefined
 }) {
-	const { fn, createChannel, isGuard } = runtime
+	const { fn, createChannel, isGuard, guardsOf } = runtime
 
 	return (
 		options: {
@@ -512,6 +529,11 @@ export function createFnLive(runtime: {
 		}
 		// Generated streams inherit access policies and metadata; tool adapters reject streams.
 
+		const rerunGuards = live.rerunGuards ?? true
+		if (typeof rerunGuards !== 'boolean')
+			throw new TypeError('orpc-fn: live.rerunGuards must be a boolean')
+		// Assigned below; the handler only reads it once the stream is open.
+		let subscribeGuards: GuardRunner | undefined
 		const guardOptions = Object.fromEntries(
 			Object.entries(routeConfig).filter(([option]) => isGuard(option))
 		)
@@ -549,6 +571,14 @@ export function createFnLive(runtime: {
 
 					const rerun = () => runSnapshot(params)
 					const authorize = async () => {
+						// 0.9.1 reran snapshots through the whole procedure, guards
+						// included; reruns now call the handler, so guards run here.
+						if (rerunGuards && subscribeGuards)
+							await subscribeGuards({
+								input: params.input,
+								context: params.context,
+								signal: params.signal
+							})
 						if (
 							live.reauthorize &&
 							live.reauthorize !== true &&
@@ -627,6 +657,8 @@ export function createFnLive(runtime: {
 				}
 			}
 		})
+
+		subscribeGuards = guardsOf(subscribe)
 
 		return {
 			procedure,

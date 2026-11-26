@@ -66,6 +66,12 @@ export function listTools(
 		 * a REST surface with streams; `'throw'` fails instead.
 		 */
 		streams?: 'skip' | 'throw'
+		/**
+		 * Keep a string's `pattern` in input schemas when a standard `format`
+		 * (`uuid`, `email`, `date-time`, …) already describes it. Default:
+		 * false, which keeps tool lists short; validation is unchanged.
+		 */
+		keepFormatPatterns?: boolean
 	} = {}
 ): McpTool[] {
 	const { filter, readOnly = isGet, streams = 'skip' } = options
@@ -102,7 +108,13 @@ export function listTools(
 			procedure,
 			config: {
 				...(description === undefined ? {} : { description }),
-				...(inputSchema ? { inputSchema: rawInputSchema(inputSchema) } : {}),
+				...(inputSchema
+					? {
+							inputSchema: rawInputSchema(inputSchema, {
+								keepFormatPatterns: options.keepFormatPatterns === true
+							})
+						}
+					: {}),
 				annotations: { readOnlyHint: readOnly(contract, path) }
 			}
 		})

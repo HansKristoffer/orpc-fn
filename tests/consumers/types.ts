@@ -39,6 +39,7 @@ import {
 } from 'orpc-fn/client'
 import { createBetterAuthExpoLink } from 'orpc-fn/expo'
 import { createTanstackQueryUtils } from '@orpc/tanstack-query'
+import type { QueryKey } from '@tanstack/vue-query'
 import * as vue from 'orpc-fn/vue'
 import * as react from 'orpc-fn/react'
 import { createORPCClient } from '@orpc/client'
@@ -1173,8 +1174,15 @@ const jsonDelivery = fnLive({
 	handler: ({ input }) => ({ id: input.id, body: { status: 200 } }),
 	live: { eventSchema: z.object({ id: z.string() }), channel: 'deliveries' }
 })
+const findDelivery = fn({
+	name: 'delivery.find',
+	input: z.object({ id: z.string() }),
+	output: z.object({ id: z.string(), body: z.json() }).nullable(),
+	handler: () => null
+})
 const jsonClient: RouterClient<{
 	delivery: {
+		find: typeof findDelivery
 		get: typeof jsonDelivery.procedure
 		watch: typeof jsonDelivery.subscribe
 	}
@@ -1213,4 +1221,51 @@ export type JsonOutputHookTypes = [
 	Assert<Equal<JsonHooks[1]['data']['value'], string | undefined>>,
 	Assert<Equal<JsonHooks[2]['data']['value'], JsonDelivery | undefined>>,
 	Assert<Equal<JsonHooks[3]['data'], JsonDelivery | undefined>>
+]
+
+// An explicit data type, and an app helper that passes options along: oRPC 2
+// types `queryFn` and `throwOnError` with its tagged key, so the helper types
+// its options as `ApiQueryOptions` rather than vue-query's `UseQueryOptions`.
+type MaybeDelivery = JsonDelivery | null
+function useDeliveryLive<TInput extends { id: string }, TSnapshot, TOrpc>(
+	input: TInput,
+	route: {
+		queryOptions: (
+			input: TInput,
+			o: TOrpc
+		) => vue.ApiQueryOptions<TSnapshot, Error> & { queryKey: QueryKey }
+		subscribe: vue.OrpcSubscribeFn<TInput, TSnapshot, TOrpc>
+		orpc: TOrpc
+	}
+) {
+	return vue.useLiveQuery<
+		TInput,
+		TSnapshot,
+		TSnapshot,
+		TSnapshot,
+		Error,
+		TOrpc
+	>(input, route.queryOptions, route.subscribe, { orpc: route.orpc })
+}
+export function useExplicitQueryTypes() {
+	const api = vue.useApiClient({ orpc: jsonUtils })
+	const polled = api.useQuery<MaybeDelivery>((o) => ({
+		...o.delivery.find.queryOptions({ input: { id: '1' } }),
+		enabled: true,
+		refetchInterval: (query) => (query.state.data?.id ? 1000 : false)
+	}))
+	const live = useDeliveryLive(
+		{ id: '1' },
+		{
+			queryOptions: (input, o) => o.delivery.get.queryOptions({ input }),
+			subscribe: (o) => o.delivery.watch.call,
+			orpc: jsonUtils
+		}
+	)
+	return [polled, live] as const
+}
+type ExplicitHooks = ReturnType<typeof useExplicitQueryTypes>
+export type ExplicitQueryTypes = [
+	Assert<Equal<ExplicitHooks[0]['data']['value'], MaybeDelivery | undefined>>,
+	Assert<Equal<ExplicitHooks[1]['data']['value'], JsonDelivery | undefined>>
 ]

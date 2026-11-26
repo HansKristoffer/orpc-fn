@@ -10,6 +10,7 @@ import {
 	hasOrpcErrorCode,
 	isSubscriptionPath,
 	formatClientError,
+	operationPath,
 	queryCacheSerializer,
 	responseStatusOf,
 	streamCall,
@@ -208,6 +209,19 @@ describe('createRpcLink', () => {
 		expect(() => createRpcLink({ origin, url: 'rpc' })).toThrow(
 			"RPCLink url must be a path starting with '/', got 'rpc'"
 		)
+	})
+
+	test('operationPath reads the path of an oRPC query key, prefixed or not', () => {
+		const orpc = createTanstackQueryUtils(client)
+		expect(operationPath(orpc.counter.get.key({ input: { id: 'x' } }))).toEqual(
+			['counter', 'get']
+		)
+		expect(operationPath(orpc.counter.key())).toEqual(['counter'])
+		const prefixed = createTanstackQueryUtils(client, { prefix: 'admin' })
+		expect(operationPath(prefixed.counter.get.key())).toEqual([
+			'counter',
+			'get'
+		])
 	})
 
 	test('TanStack Query calls batch, while liveOptions stays out of batches', async () => {

@@ -31,6 +31,8 @@ export type CreateMastraToolOptions = ToolErrorOptions & {
 		durationMs: number
 		outcome: 'success' | 'error'
 	}) => void
+	/** Keep patterns that repeat a standard `format` in the tool's JSON Schema. Default: false. */
+	keepFormatPatterns?: boolean
 	/** Key holding the oRPC context in Mastra's `RequestContext`. Default 'orpcContext'. */
 	contextKey?: string
 	/**
@@ -95,9 +97,12 @@ export function createMastraTool<TProc extends AnyProcedure>(
 		definition.outputSchemas,
 		`Mastra tool ${name}`
 	)
+	const schemaOptions = {
+		keepFormatPatterns: options.keepFormatPatterns === true
+	}
 	let inputSchema: ToolSchema | undefined
 	if (procedureInput) {
-		inputSchema = rawInputSchema(procedureInput)
+		inputSchema = rawInputSchema(procedureInput, schemaOptions)
 		if (!isObjectJsonSchema(inputSchema['~standard'].jsonSchema.input())) {
 			throw new Error(`${name} must take an object input to be an agent tool`)
 		}
@@ -128,7 +133,9 @@ export function createMastraTool<TProc extends AnyProcedure>(
 				}
 			} satisfies ToolSchema),
 		...(procedureOutput
-			? { outputSchema: passThroughOutputSchema(procedureOutput) }
+			? {
+					outputSchema: passThroughOutputSchema(procedureOutput, schemaOptions)
+				}
 			: {}),
 		execute: async (input, ctx) => {
 			const startedAt = performance.now()

@@ -163,6 +163,20 @@ export function createRpcLink<T extends ClientContext = ClientContext>(
 }
 
 /**
+ * The procedure or router path in a TanStack Query key from
+ * `@orpc/tanstack-query`, which oRPC 2 starts with the path, or with a
+ * `prefix` and then the path: `operationPath(orpc.order.get.key())` is
+ * `['order', 'get']`.
+ */
+export function operationPath(
+	key:
+		| readonly [path: readonly string[], options: unknown]
+		| readonly [prefix: string, path: readonly string[], options: unknown]
+): readonly string[] {
+	return key.length === 3 ? key[1] : key[0]
+}
+
+/**
  * Typed check for a route error on the client. The RPC link rebuilds thrown
  * route errors as `ORPCError`, so `instanceof` plus `code` is the contract.
  */

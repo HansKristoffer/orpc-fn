@@ -5,7 +5,7 @@ import type {
 } from '@orpc/server'
 import { z } from 'zod'
 import { call, ORPCError } from '@orpc/server'
-import { createRouter, fnLive, transport } from '../../tests/fixture.js'
+import { createRouter, fnLive, transport, user } from '../../tests/fixture.js'
 import { fnLivePatch } from './fn-live.js'
 
 type AsyncIterableItem<T> = T extends AsyncIterable<infer U> ? U : never
@@ -278,7 +278,7 @@ describe('fnLive runtime (memory transport)', () => {
 		await stream.return(undefined)
 	})
 
-	test('subscribe and reruns run middleware, input parsing, guards and extras once while validating output', async () => {
+	test('reruns run middleware, input parsing and extras once, guards before every update, and validate output', async () => {
 		const { os } = await import('@orpc/server')
 		const { createFn } = await import('../index.js')
 		const { memoryTransport } = await import('./memory.js')
@@ -332,10 +332,95 @@ describe('fnLive runtime (memory transport)', () => {
 		version = 2
 		await live.publish({})
 		expect((await next).value).toBe('V7:2')
+		// Guards ran when the stream opened, and again before the update.
 		expect([middlewareRuns, inputParses, guardRuns, extrasRuns]).toEqual([
-			1, 1, 1, 1
+			1, 1, 2, 1
 		])
 		await stream.return(undefined)
 		await factory.shutdown()
+	})
+})
+
+describe('live updates repeat the route guards', () => {
+	const event = { organizationId: 'o', itemId: 'i', kind: 'updated' } as const
+	const Count = z.object({ count: z.number() })
+	const route = {
+		name: 'test.guarded',
+		procedure: 'protected' as const,
+		neededFeatureFlags: ['live'],
+		input: z.object({}),
+		output: Count,
+		handler: () => ({ count: 0 })
+	}
+	const fold = {
+		stateSchema: Count,
+		transformerFn: ({ previous }: { previous: { count: number } }) => ({
+			count: previous.count + 1
+		})
+	}
+	const open = async (subscribe: Parameters<typeof call>[0]) => {
+		const member = user({ featureFlags: ['live'] })
+		const stream = (await call(
+			subscribe,
+			{},
+			{
+				context: { user: member }
+			}
+		)) as AsyncGenerator<unknown>
+		expect((await stream.next()).value).toEqual({ count: 0 })
+		return { member, stream }
+	}
+
+	test('a flag removed mid-stream ends a rerun stream with the guard error', async () => {
+		const live = fnLive({
+			...route,
+			live: { eventSchema, channel: 'guarded:rerun' }
+		})
+		const { member, stream } = await open(live.subscribe)
+		// The rerun would send nothing new; the guard must still refuse it.
+		member.featureFlags = []
+		await live.publish(event)
+		await expect(stream.next()).rejects.toMatchObject({
+			code: 'FORBIDDEN',
+			message: "Feature flag 'live' is not available"
+		})
+		expect(transport.listenerCount('guarded:rerun')).toBe(0)
+	})
+
+	test('a transformer stream is refused before it folds the event', async () => {
+		const live = fnLive({
+			...route,
+			live: { eventSchema, channel: 'guarded:fold', ...fold }
+		})
+		const { member, stream } = await open(live.subscribe)
+		await live.publish(event)
+		expect((await stream.next()).value).toEqual({ count: 1 })
+		member.featureFlags = []
+		await live.publish(event)
+		await expect(stream.next()).rejects.toMatchObject({ code: 'FORBIDDEN' })
+	})
+
+	test('rerunGuards: false keeps the authorization the stream opened with', async () => {
+		const live = fnLive({
+			...route,
+			live: {
+				eventSchema,
+				channel: 'guarded:open',
+				rerunGuards: false,
+				...fold
+			}
+		})
+		const { member, stream } = await open(live.subscribe)
+		member.featureFlags = []
+		await live.publish(event)
+		expect((await stream.next()).value).toEqual({ count: 1 })
+		await stream.return(undefined)
+		expect(() =>
+			fnLive({
+				...route,
+				// @ts-expect-error a boolean
+				live: { eventSchema, channel: 'guarded:bad', rerunGuards: 'sometimes' }
+			})
+		).toThrow('live.rerunGuards must be a boolean')
 	})
 })

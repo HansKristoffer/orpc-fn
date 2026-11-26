@@ -189,6 +189,36 @@ describe('createMastraTool runtime behavior', () => {
 		expect(JSON.stringify(requestContext.toJSON())).not.toContain('"s"')
 	})
 
+	test('tool schemas leave out patterns a standard format repeats, unless kept', () => {
+		const byId = fn({
+			name: 'test.byId',
+			procedure: 'public',
+			input: zod.object({ id: zod.uuid() }),
+			output: zod.object({ id: zod.uuid() }),
+			handler: ({ input }) => input
+		})
+		// The schema a model reads for the `id` field.
+		const idOf = (schema: unknown) =>
+			(
+				schema as {
+					'~standard': {
+						jsonSchema: { input: () => { properties: { id: unknown } } }
+					}
+				}
+			)['~standard'].jsonSchema.input().properties.id
+		const compact = createMastraTool(byId)
+		expect(idOf(compact.inputSchema)).toEqual({
+			type: 'string',
+			format: 'uuid'
+		})
+		expect(idOf(compact.outputSchema)).toEqual({
+			type: 'string',
+			format: 'uuid'
+		})
+		const kept = createMastraTool(byId, { keepFormatPatterns: true })
+		expect(idOf(kept.inputSchema)).toHaveProperty('pattern')
+	})
+
 	test('allowMissingInputSchema exposes no-input procedures', () => {
 		const tool = createMastraTool(noInputProcedure, {
 			allowMissingInputSchema: true

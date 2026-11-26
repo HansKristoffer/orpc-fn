@@ -53,12 +53,70 @@ function lazyConversion(
 	}
 }
 
-function lazyJsonSchema(
-	schema: AnySchema,
-	direction: 'input' | 'output'
+/**
+ * JSON Schema formats that say what a string is, so a `pattern` beside one
+ * repeats it (Zod writes both: `format: 'uuid'` and a 150-character regex).
+ * Zod's own formats (`cuid`, `nanoid`, `e164`, …) keep their pattern: a
+ * model cannot tell what those names mean.
+ */
+const DESCRIBED_FORMATS = new Set([
+	'date-time',
+	'date',
+	'time',
+	'duration',
+	'email',
+	'idn-email',
+	'hostname',
+	'idn-hostname',
+	'ipv4',
+	'ipv6',
+	'uri',
+	'uri-reference',
+	'iri',
+	'iri-reference',
+	'uuid'
+])
+
+/** How tool JSON Schemas are written for a model. */
+export type ToolSchemaOptions = {
+	/**
+	 * Keep a string's `pattern` when a standard `format` (`uuid`, `email`,
+	 * `date-time`, …) already describes it. Default: false, which keeps tool
+	 * prompts short; validation still applies every check of the schema.
+	 */
+	keepFormatPatterns?: boolean
+}
+
+/** `schema` without patterns that repeat a standard format, as a copy. */
+export function compactToolJsonSchema(schema: JsonSchema): JsonSchema {
+	const compact = (value: unknown): unknown => {
+		if (Array.isArray(value)) return value.map(compact)
+		if (typeof value !== 'object' || value === null) return value
+		const node = value as Record<string, unknown>
+		const dropPattern =
+			typeof node.format === 'string' &&
+			DESCRIBED_FORMATS.has(node.format) &&
+			typeof node.pattern === 'string'
+		const copy: Record<string, unknown> = {}
+		for (const [key, child] of Object.entries(node))
+			if (!(dropPattern && key === 'pattern')) copy[key] = compact(child)
+		return copy
+	}
+	return compact(schema) as JsonSchema
+}
+
+/** The JSON Schema a model reads, written once from `conversion`. */
+function toolJsonSchema(
+	conversion: () => [schema: JsonSchema, optional: boolean],
+	options: ToolSchemaOptions
 ): () => JsonSchema {
-	const conversion = lazyConversion(schema, direction)
-	return () => conversion()[0]
+	let written: JsonSchema | undefined
+	return () => {
+		written ??= options.keepFormatPatterns
+			? conversion()[0]
+			: compactToolJsonSchema(conversion()[0])
+		return written
+	}
 }
 
 /**
@@ -69,9 +127,13 @@ function lazyJsonSchema(
  * (dates become string/date-time), and clients send those dates as strings,
  * so values are coerced back before validating.
  */
-export function rawInputSchema<TIn>(schema: AnySchema): ToolSchema<TIn> {
+export function rawInputSchema<TIn>(
+	schema: AnySchema,
+	options: ToolSchemaOptions = {}
+): ToolSchema<TIn> {
+	// Coercion reads the full conversion; the model reads the compact one.
 	const conversion = lazyConversion(schema, 'input')
-	const jsonSchema = () => conversion()[0]
+	const jsonSchema = toolJsonSchema(conversion, options)
 	return {
 		'~standard': {
 			version: 1,
@@ -91,9 +153,10 @@ export function rawInputSchema<TIn>(schema: AnySchema): ToolSchema<TIn> {
 
 /** Tool output the procedure already validated: described, passed through. */
 export function passThroughOutputSchema<TOut>(
-	schema: AnySchema
+	schema: AnySchema,
+	options: ToolSchemaOptions = {}
 ): ToolSchema<TOut> {
-	const jsonSchema = lazyJsonSchema(schema, 'output')
+	const jsonSchema = toolJsonSchema(lazyConversion(schema, 'output'), options)
 	return {
 		'~standard': {
 			version: 1,

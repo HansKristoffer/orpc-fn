@@ -83,6 +83,10 @@ oRPC 2 tags serialized types by name (`['date', 'at']`) where oRPC 1 used number
 
 `fnLive` authorizes and subscribes before it builds the initial snapshot. The earlier pattern, calling the subscribe procedure and then loading the snapshot, sent the snapshot before `authFn` ran (an async generator does not run until its first `next()`). It also missed events published while the snapshot loaded. lullu's in-repo `fn-live.ts` has both problems.
 
+## Live updates repeat the route's guards
+
+0.9.1 reran a snapshot by calling the procedure, so guards ran before every update. 0.9.2 called the handler directly, to stop middleware, input parsing and extras running per update, and guards silently ran only when the stream opened: a feature flag removed mid-stream kept the stream alive, and a rerun that changed nothing hid it entirely. **Decision:** `fn` keeps each guarded route's guard runner, and `fnLive` runs the subscribe route's guards before each update (rerun, fold or gap), on by default; `live.rerunGuards: false` opts out. Middleware still runs once: an app that loads permissions in middleware reads them through a guard to have them rechecked. `createPubSub` streams forward events and never reran guards, so they are unchanged.
+
 ## Client helpers
 
 `orpc-fn/client` and `orpc-fn/expo` hold only what the apps wrote by hand: a batching link that sends subscriptions on their own, and the `expo/fetch` bridge with the Better Auth headers. `createORPCClient` and `createTanstackQueryUtils` are already one line each in `@orpc/client` and `@orpc/tanstack-query`, so they are not wrapped. Expo and React Native are passed in (`fetch`, `native`) rather than imported, so the package has no Expo dependency.
@@ -150,6 +154,8 @@ Pub/sub subscriptions used to skip guards, extras and completion logging. Comple
 ## Tool schemas
 
 The core accepts any Standard Schema, oRPC's own `eventIterator` included. Executable tools (MCP, Mastra) need JSON Schema, so they convert through oRPC's `DelegatingJsonSchemaConverter` (`ZodToJsonSchemaConverter` plus `StandardJsonSchemaConverter`) and check object schemas with `extractJsonObjectSchemaEntries` from `@orpc/json-schema`, supporting both Zod 4.5+ and any Standard JSON Schema v1 validator. A widened core does not promise that every validator works with every adapter. Validation and execution can both parse the raw tool input, so transforms and refinements must be pure.
+
+oRPC 2's Zod converter writes string checks oRPC 1's dropped: `minLength`/`maxLength`, and for a format both `format` and Zod's whole regex as `pattern` (about 150 characters for a uuid). Tool schemas are prompt text, and one app's tool prefix grew by about 25%. **Decision:** the schema a model reads leaves out a `pattern` beside a standard JSON Schema `format` that already names the shape (`uuid`, `email`, `date-time`, …), keeping limits and Zod's own formats (`cuid`, `e164`, …, which a model cannot read from the name); validation and coercion use the full conversion. `keepFormatPatterns: true` keeps them.
 
 ## `trpc-cli` vs `/cli`
 
