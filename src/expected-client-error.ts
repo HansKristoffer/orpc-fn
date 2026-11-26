@@ -11,15 +11,31 @@ function ownStatus(
 	return map && Object.hasOwn(map, code) ? map[code] : undefined
 }
 
-/**
- * The HTTP status oRPC 2 answers a code with: the handler's `errorStatusMap`,
- * else its common map, else 400. Errors no longer carry a status.
- */
 function statusOf(code: string, statusMap?: Record<string, number>): number {
 	return (
 		ownStatus(statusMap, code) ??
 		ownStatus(COMMON_ERROR_STATUS_MAP as Record<string, number>, code) ??
 		400
+	)
+}
+
+/**
+ * The HTTP status a handler answers `error` with: oRPC 2 errors carry no
+ * status, so it is the code's entry in `errorStatusMap` (the one given to
+ * `mountOrpc`), else oRPC's common map, else 400. Any other thrown value
+ * answers as `INTERNAL_SERVER_ERROR` (500), as oRPC does.
+ *
+ * ```ts
+ * errorResponseBodyEncoder: (error) => ({ ...error.toJSON(), status: errorStatusOf(error, statusMap) })
+ * ```
+ */
+export function errorStatusOf(
+	error: unknown,
+	errorStatusMap?: Record<string, number>
+): number {
+	return statusOf(
+		error instanceof ORPCError ? error.code : 'INTERNAL_SERVER_ERROR',
+		errorStatusMap
 	)
 }
 

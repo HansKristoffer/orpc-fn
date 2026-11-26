@@ -1,6 +1,10 @@
 import type { ClientContext } from '@orpc/client'
 import type { RPCLink } from '@orpc/client/fetch'
 import { type CreateRpcLinkOptions, createRpcLink } from './client.js'
+import {
+	EXPO_ORIGIN_HEADER,
+	SKIP_OAUTH_PROXY_HEADER
+} from './request-headers.js'
 
 /** What `fetch` from `expo/fetch` accepts from this bridge. */
 export type ExpoFetchInit = {
@@ -125,9 +129,9 @@ export function createBetterAuthExpoLink<
 			if (options.native) {
 				const cookie = await getCookie?.()
 				if (cookie) headers.set('Cookie', cookie)
-				headers.set('x-skip-oauth-proxy', 'true')
+				headers.set(SKIP_OAUTH_PROXY_HEADER, 'true')
 				const origin = await getExpoOrigin?.()
-				if (origin) headers.set('expo-origin', origin)
+				if (origin) headers.set(EXPO_ORIGIN_HEADER, origin)
 			}
 			return headers
 		}

@@ -237,7 +237,7 @@ test('procedure-scoped extras and hooks retain context correlation', async () =>
 	)
 })
 
-test('tool object unions work; collisions and streams fail clearly', () => {
+test('tool object unions work; collisions fail clearly and streams are skipped or fail', () => {
 	const { fn } = createFn({ procedures: { public: os }, default: 'public' })
 	const union = fn({
 		name: 'union',
@@ -253,17 +253,15 @@ test('tool object unions work; collisions and streams fail clearly', () => {
 	expect(() =>
 		listTools({ first, second: fn({ name: 'order-get', handler: () => 2 }) })
 	).toThrow('collision')
-	expect(() =>
-		listTools({
-			watch: fn({
-				name: 'watch',
-				stream: true,
-				handler: async function* () {
-					yield 1
-				}
-			})
-		})
-	).toThrow('streaming')
+	const watch = fn({
+		name: 'watch',
+		stream: true,
+		handler: async function* () {
+			yield 1
+		}
+	})
+	expect(listTools({ watch })).toEqual([])
+	expect(() => listTools({ watch }, { streams: 'throw' })).toThrow('streaming')
 })
 
 test('client error code is a real predicate', () => {

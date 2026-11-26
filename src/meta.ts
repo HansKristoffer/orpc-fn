@@ -29,6 +29,28 @@ export const hasTag =
 	(procedure) =>
 		openapiRoute(procedure).tags?.includes(tag) ?? false
 
+/** Procedures every filter accepts: `allOf(hasTag('external'), not(hasTag('beta')))`. */
+export const allOf =
+	(...filters: readonly ProcedureFilter[]): ProcedureFilter =>
+	(procedure, path) =>
+		filters.every((filter) => filter(procedure, path))
+
+/** Procedures whose route has every one of `tags`: `hasTags('external', 'mcp-support')`. */
+export const hasTags = (...tags: readonly string[]): ProcedureFilter =>
+	allOf(...tags.map(hasTag))
+
+/** Procedures at least one filter accepts. */
+export const anyOf =
+	(...filters: readonly ProcedureFilter[]): ProcedureFilter =>
+	(procedure, path) =>
+		filters.some((filter) => filter(procedure, path))
+
+/** Procedures `filter` rejects. */
+export const not =
+	(filter: ProcedureFilter): ProcedureFilter =>
+	(procedure, path) =>
+		!filter(procedure, path)
+
 export type StoredFnMeta<
 	TMeta extends object = Record<string, unknown>,
 	TKey extends string = string

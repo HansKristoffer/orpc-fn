@@ -100,11 +100,11 @@ It sees every route kind: `fn`, both `fnLive` routes and pub/sub subscriptions. 
 
 **Meta** is stored in oRPC's own procedure meta. It survives `os.router()`, `.meta(openapi({ prefix }))` on a router and lazy routers. The OpenAPI route options (`path`, `method`, `summary`, `tags`, …) and `name` as `operationId` are oRPC's OpenAPI meta, the same `getOpenAPIMeta(route)` from `@orpc/openapi` reads, and tags a builder sets with `.meta(openapi({ tags }))` come first. Declare the contract with `defineMeta<AppMeta>()` (no runtime defaults), then use `fn({ meta: { readOnly: true }, ... })`. Both `readMeta(procedure)` and `readFnMeta(procedure)` infer metadata from the passed procedure, including procedures from another factory.
 
-**Errors.** `fn.completed` carries `error_type`, `error_code` (an `ORPCError`'s code) and `error_message`. An error `isExpectedError` accepts logs at `warn`, and its span keeps an unset status with no exception event, as OpenTelemetry asks of server spans; `fn.error_code` names it. Its message was written for the caller and may name what they asked for, so `errorMessages: 'unexpected'` leaves it out of the log too. `mountOrpc` and the tool adapters treat errors this factory classified as expected the same way without being told again. To turn the app's own error classes into `ORPCError`s, put one middleware on the base builder rather than a mapper in every route. oRPC 2 errors carry no status: by default an `ORPCError` is expected when oRPC answers its code with a 4xx (its common map, and 400 for codes it does not know). Map your own codes with the HTTP adapters' `errorStatusMap`, and pass `isExpectedError` here when a code of yours is a defect.
+**Errors.** `fn.completed` carries `error_type`, `error_code` (an `ORPCError`'s code) and `error_message`. An error `isExpectedError` accepts logs at `warn`, and its span keeps an unset status with no exception event, as OpenTelemetry asks of server spans; `fn.error_code` names it. Its message was written for the caller and may name what they asked for, so `errorMessages: 'unexpected'` leaves it out of the log too. `mountOrpc` and the tool adapters treat errors this factory classified as expected the same way without being told again. To turn the app's own error classes into `ORPCError`s, put one middleware on the base builder rather than a mapper in every route. oRPC 2 errors carry no status: by default an `ORPCError` is expected when oRPC answers its code with a 4xx (its common map, and 400 for codes it does not know). Map your own codes with the HTTP adapters' `errorStatusMap`, and pass `isExpectedError` here when a code of yours is a defect. `errorStatusOf(error, errorStatusMap?)` returns the status a handler answers an error with (500 for anything but an `ORPCError`).
 
 Completion hooks discriminate by `procedure` and `handlerStarted`. Before handler context exists (auth/input failure), they receive the initial context. Logging, tracing, metrics and completion-hook failures preserve procedure results. Custom log fields cannot overwrite canonical completion fields. Stream completion runs once when the stream ends.
 
-Also exported: `defineMeta`, `createStreamManifest`, `createStreamManifestAsync`, `renderStreamManifest`, `isExpectedClientError`, `createRouter`, `createBoundCall`, and the types `HandlerParams`, `RouteConfig`, `BoundCall`, `FnMeta`, `FnContext`, `FnCompletedEvent`, `ProcedureInput`, `ProcedureOutput`, `ProcedureContext`, `InitialContextOf`, `CurrentContextOf` and `GuardOptions`.
+Also exported: `defineMeta`, `createStreamManifest`, `createStreamManifestAsync`, `renderStreamManifest`, `isExpectedClientError`, `errorStatusOf`, `createRouter`, `createBoundCall`, and the types `HandlerParams`, `RouteConfig`, `BoundCall`, `FnMeta`, `FnContext`, `FnCompletedEvent`, `ProcedureInput`, `ProcedureOutput`, `ProcedureContext`, `InitialContextOf`, `CurrentContextOf` and `GuardOptions`.
 
 ### Zod 3.25
 
@@ -112,7 +112,7 @@ Also exported: `defineMeta`, `createStreamManifest`, `createStreamManifestAsync`
 
 - `fnLive`, `createPubSub`, `defineScopedChangeBus` and `orpc-fn/live` (event, state and input schemas);
 - `orpc-fn/mastra` and `orpc-fn/mcp` (JSON Schema through `@orpc/zod`, which needs `zod` 4.5 or later installed);
-- the `openapi` mount's spec, docs and `smartCoercion` (also through `@orpc/zod`): a Zod 3 schema still validates, but appears untyped in the spec;
+- the `openapi` mount's spec, docs and `smartCoercion`, and `orpc-fn/openapi` (also through `@orpc/zod`): a Zod 3 schema still validates, but appears untyped in the spec, and `components` must be Zod 4 schemas;
 - `orpc-fn/cli`, whose `hanzio/cli` types read `zod` itself, so it needs `zod` 4 installed. The `orpc-fn` bin runs on 3.25 (pnpm warns that `hanzio` asks for `zod` ^4.3.6).
 
 ## `orpc-fn/live`: pub/sub and live queries
@@ -267,9 +267,11 @@ registerMcpTools(mcp.server, router, { filter: hasTag('external'), context })
 
 An app that builds a server per request lists and converts its tools once with `prepareMcpTools(router, { filter })` (from either entry) and registers the result with `registerPreparedMcpTools(server, prepared, { context })`. `prepared.names` lists the tool names without a server.
 
-The adapter installs the SDK list/call handlers on a low-level `Server` (also accessible as `McpServer.server`). Use one registration per server; these handlers own its tool list. It forwards cancellation, validates/coerces arguments, applies procedure authorization, and formats results as JSON/text MCP content. Override `formatResult` for images, structured content or other presentation. A failed call answers as on `orpc-fn/mastra`: expected errors as `CODE: message` with the paths of rejected arguments, anything else as a fixed sentence reported to `onError`. Tool selection is required. Object unions are supported; streams are rejected. Resolve lazy routers first with oRPC's `unlazyRouter`.
+The adapter installs the SDK list/call handlers on a low-level `Server` (also accessible as `McpServer.server`). Use one registration per server; these handlers own its tool list. It forwards cancellation, validates/coerces arguments, applies procedure authorization, and formats results as JSON/text MCP content. Override `formatResult` for images, structured content or other presentation. A failed call answers as on `orpc-fn/mastra`: expected errors as `CODE: message` with the paths of rejected arguments, anything else as a fixed sentence reported to `onError`. Tool selection is required. Object unions are supported. A stream cannot be a tool, so a streaming procedure the filter accepts is left out, and one filter such as `hasTag('external')` can describe a REST surface that has streams too; pass `streams: 'throw'` (also to `listTools` and `prepareMcpTools`) to fail on one instead. Resolve lazy routers first with oRPC's `unlazyRouter`.
 
 Sanitized tool-name collisions between distinct procedures throw; identical aliases are deduplicated. Override `name` to resolve deliberate collisions. Tool names are the sanitized `fn` names (`user.me` becomes `user-me`). Input schemas carry the same JSON Schema as your OpenAPI docs (dates become `string`/`date-time`), and validation turns them back into `Date`s. Validation returns the raw arguments, and `call(procedure, args, { context })` parses those: transforms/refinements must be pure: SDK validation and procedure execution may run them more than once, always on raw input. `readOnlyHint` defaults to GET routes; pass `readOnly` to change it. `hasTag(tag)` also works as an oRPC `OpenAPIHandler` filter.
+
+Filters combine without spelling out `(procedure, path)`: `hasTags('external', 'mcp-support')` needs every tag, and `allOf(...filters)`, `anyOf(...filters)` and `not(filter)` compose any filters, e.g. `allOf(hasTag('external'), not(hasTag('beta')))`. They are exported wherever `hasTag` is (`orpc-fn/mcp`, `orpc-fn/openapi` and the HTTP adapters).
 
 ## `orpc-fn/cli`
 
@@ -383,15 +385,74 @@ Behaviour:
 - SSE responses get keep-alive comments (15 s) and anti-buffering headers.
 - RPC calls are batched (`BatchHandlerPlugin`).
 - JSON and batch responses are compressed when the client accepts it: brotli, or gzip when the client prefers or only accepts it (`compress: false` turns it off). Bodies under 512 bytes are sent as they are. A streaming batch (`application/vnd.orpc.batch`) sends each result as it finishes, so it is flushed after every result instead of buffered. Live event streams are never compressed, nor is a response that already has a `content-encoding` or `Cache-Control: no-transform`.
-- `openapi.filter` is required and decides which routes get a REST endpoint and a place in the spec; `() => true` publishes all of them. Scalar docs are served at the OpenAPI prefix and the spec at `/spec.json`, unless `docs: false`.
+- `openapi.filter` is required and decides which routes get a REST endpoint and a place in the spec; `() => true` publishes all of them. Scalar docs are served at the OpenAPI prefix (or `docsPath` under it) and the spec at `/spec.json`, unless `docs: false`.
+- `openapi` takes an array for several REST surfaces, each with its own `prefix`, `filter` and options. `docs` takes an array for several reference pages on one surface, each with its own `path`, `specPath`, `filter` (within the surface's), `info`, `spec` (oRPC's generator options, such as `version`), `components` and `document`; the surface's own fields are their defaults. Two pages may not share a path. Auth for a surface stays in the app, e.g. a Hono middleware in front that `context` reads:
+
+  ```ts
+  mountOrpc(app, {
+    router,
+    rpcPrefix: '/api/rpc',
+    context: (c, base) => ({ ...base, user: c.get('apiUser') }), // set by your Basic-auth middleware on /api/v1
+    openapi: [
+      { prefix: '/api/openapi', filter: () => true },
+      {
+        prefix: '/api/v1',
+        filter: hasTag('external'),
+        spec: { version: '3.1.1', base: { components: { securitySchemes }, security: [{ basicAuth: [] }] } },
+        docs: [
+          { path: '/customer', specPath: '/customer/spec.json', filter: hasTag('customer-api'), info: { title: 'Customer API', version: '1.0.0' } },
+          { info: { title: 'External API', version: '1.0.0' } } // at /api/v1, spec at /api/v1/spec.json
+        ]
+      }
+    ]
+  })
+  ```
+- `openapi.components` (or a page's) names shared schemas in `components.schemas`, as `generateOpenApiDocument` does (see [`orpc-fn/openapi`](#orpc-fnopenapi)). `document: () => myDocument()` serves a document the app builds instead, on the docs page and its `spec.json`, so there is one spec, not a second route beside the generated one.
+- `openapi.errorResponseBodyEncoder: (error, status) => body` replaces oRPC's REST error body `{ defined, code, message, data }` (oRPC's own handler option, given the status the response answers with under `errorStatusMap`). RPC errors keep oRPC's format, which its client reads. Document the same shape with oRPC's `spec.errorResponseBodySchema`:
+
+  ```ts
+  openapi: {
+    prefix: '/api',
+    filter: hasTag('v1'),
+    errorResponseBodyEncoder: (error, status) => ({ ...error.toJSON(), status }),
+    spec: {
+      errorResponseBodySchema: (_defined, status, defaultSchema) => ({
+        allOf: [defaultSchema(), { type: 'object', properties: { status: { const: status } }, required: ['status'] }]
+      })
+    }
+  }
+  ```
 - `onError` sees only unexpected errors: by default those `isExpectedClientError` rejects under `errorStatusMap`, and never errors the route's `createFn({ isExpectedError })` classified as expected.
 - `errorStatusMap` sets the HTTP status per error code over oRPC's common map (`{ RATE_LIMITED: 429 }`); oRPC 2 errors no longer carry one, and unknown codes answer 400.
 - `openapi.smartCoercion` and `openapi.spec` cover an external API with its own auth. `spec` takes oRPC's generator options; document fields go in `base`: `spec: { base: { components: { securitySchemes }, security } }`.
 - A filter (`openapi.filter`, `listTools`, `registerMcpTools`) is oRPC's `(procedure, path) => boolean`; `readFnMeta(procedure)` reads a route's `method`, `tags` and meta inside one.
-- CORS is set up once: Hono's `cors()` on a Hono app, oRPC's `CORSHandlerPlugin` in `plugins` (and `openapi.plugins`) otherwise. Its default `origin` is `*` since oRPC 2, so list origins when you send credentials. A cross-origin client that batches needs `orpc-batch` in its allowed headers.
+- CORS is set up once: Hono's `cors()` on a Hono app, oRPC's `CORSHandlerPlugin` in `plugins` (and `openapi.plugins`) otherwise. Its default `origin` is `*` since oRPC 2, so list origins when you send credentials. Spread `CLIENT_REQUEST_HEADERS` (from any HTTP adapter) into its allowed headers: the headers orpc-fn's links send (`content-type`, `orpc-batch` for batching, and the Expo link's `expo-origin` and `x-skip-oauth-proxy`), so the list follows orpc-fn: `cors({ origin, credentials: true, allowHeaders: [...CLIENT_REQUEST_HEADERS, 'authorization'] })`.
 - `timed(timing, key, work)` adds the duration of `work` to the request timing, which `Server-Timing` reports.
 - `markRequestArrival(request)` at the front door (`Bun.serve({ fetch })` or `http.createServer`, before routing) makes `queue_ms` the time until the procedure runs: in-process queueing no handler timer sees. Pass `queueMs` to measure it another way.
 - `context` builds the router's context from `{ headers, timing }` and the runtime's request (the Hono context, the `Request`, the `IncomingMessage`), and is checked against the router: it is required when `{ headers, timing }` alone does not satisfy it. It may return a `Response`, for example a 401. Any field the app's auth middleware trusts when it is already set (a `user`) must only come from here: `createCall`, `createMastraTool({ context })` and `registerMcpTools({ context })` take a ready-made context too, so build a context that acts for someone in one app function.
+
+## `orpc-fn/openapi`
+
+Optional peers: `@orpc/openapi`, `@orpc/zod`, `@orpc/json-schema`.
+
+`generateOpenApiDocument(router, options)` is oRPC's `OpenAPIGenerator` with a required `filter` and named components, for a document the app serves, publishes or post-processes itself (the HTTP adapters' docs pages use it too). Options are oRPC's generator options (`version`, `base`, `errorStatusMap`, …) plus:
+
+```ts
+import { generateOpenApiDocument, hasTag } from 'orpc-fn/openapi'
+
+const document = await generateOpenApiDocument(router, {
+  filter: hasTag('v1'),
+  version: '3.1.1', // oRPC 2 defaults to 3.2; many client generators expect 3.1
+  base: { info: { title: 'API', version: '1.0.0' }, servers: [{ url: '/api' }] },
+  components: {
+    Error: ErrorSchema,
+    Reporter: { schema: ReporterSchema, only: 'input' },
+    WebhookEvent: { schema: WebhookEventSchema, only: 'output' }
+  }
+})
+```
+
+`components` replaces oRPC 1's `commonSchemas`. Each named Zod 4 schema is written once under `components.schemas` and referred to by `$ref` wherever a route's input or output uses it; `only` names it in one direction alone. Components no route refers to, such as a webhook payload, are listed too. The names are kept in a private registry, not Zod's global one, so the JSON Schema the MCP and Mastra tools build from the same schemas does not change.
 
 ## `orpc-fn/client`
 
@@ -416,11 +477,13 @@ if (hasOrpcErrorCode(error, 'NOT_FOUND')) { /* … */ }
 toast(userFacingErrorMessage(error, t('errors.generic'))) // server text only when it opts in
 ```
 
+`responseStatusOf(error)` is the HTTP status a failed call got, or `undefined` when no response arrived (offline, aborted). oRPC 2's `ORPCError` has no `status`; it is read from the response the link keeps on the error, and from the `MalformedResponseError` a non-oRPC answer (a proxy's 502 page) throws. It is the client half of the server's `errorStatusOf`.
+
 Route error messages are developer text, so `userFacingErrorMessage` shows your localized fallback unless the server opted in with `new ORPCError('BAD_REQUEST', { message, data: { userMessage } })`. `formatClientError(error, fallback)` does the same but lists the rejected fields of a failed input validation (`lines.0.sku: Required`) before falling back.
 
 Streams cannot be batched. The Vue and React helpers mark the streams they open (`streamCall` as the client context), so `createRpcLink` keeps them out of batches without a stream manifest; pass `context: streamCall` when you iterate a stream by hand. The manifest (`streamPaths`) remains for streams opened without either. `queryCacheSerializer` is a `serialize`/`deserialize` pair for TanStack Query persisters that round-trips `Date`s and the other types oRPC sends; caches persisted under oRPC 1 still restore.
 
-`createRpcLink` takes every `RPCLink` option (a full URL in `url` throws, naming the `origin`/`url` split). It also batches parallel calls into one request, matching `mountOrpc`'s server-side batching (`batch: { maxSize, exclude, groups }`, or `false` to turn it off), in oRPC's `streaming` mode so a fast result does not wait for a slow one. A batch is one request with one client context, so by default only calls without a client context are batched; pass `groups` to batch calls that share one. A streaming response cannot be batched, and the request doesn't say whether the response will stream, so pass `streamPaths` generated from the actual router with `createStreamManifest` (or `createStreamManifestAsync` for lazy routers). Serialize it to a frontend module; importing that data needs no server runtime. The `orpc-fn` CLI does that, resolving lazy routers, sorting paths and writing only on change:
+`createRpcLink` takes every `RPCLink` option, and `url` takes any `string` path, so a path constant needs no `as const` (a full URL throws, naming the `origin`/`url` split, as does a path without a leading `/`). It also batches parallel calls into one request, matching `mountOrpc`'s server-side batching (`batch: { maxSize, exclude, groups }`, or `false` to turn it off), in oRPC's `streaming` mode so a fast result does not wait for a slow one. A batch is one request with one client context, so by default only calls without a client context are batched; pass `groups` to batch calls that share one. A streaming response cannot be batched, and the request doesn't say whether the response will stream, so pass `streamPaths` generated from the actual router with `createStreamManifest` (or `createStreamManifestAsync` for lazy routers). Serialize it to a frontend module; importing that data needs no server runtime. The `orpc-fn` CLI does that, resolving lazy routers, sorting paths and writing only on change:
 
 ```sh
 orpc-fn stream-manifest src/router.ts#appRouter --out ../web/src/stream-paths.ts          # export const streamPaths = [...]
@@ -499,7 +562,7 @@ useInvalidationStream({}, (o) => o.realtime.subscribeChanges.call, {
 })
 ```
 
-`useApiClient()` also returns the utils as `orpc`, for calls outside a composable such as `queryClient.fetchQuery(orpc.unit.list.queryOptions({ input }))`. `useOrpcSubscription` (also `useApiClient().useSubscription`) reconnects with jittered backoff and closes while the page is hidden (`respectVisibility: false` keeps it). `useLiveQuery` writes each stream event under the key it was opened for, so an event in flight from a previous input is dropped. A stream whose events are not the cached type (an `fnLive` patch route, or a `select`ed cache) does not compile without `applyEvent`, and the stream's input must match the query's unless you pass `subscriptionInput`. Use `mergeSeed` when the seed can resolve after stream events. For large live payloads such as chat timelines, pass vue-query's `shallow: true` in the query options so the data is not made deeply reactive; mutate it only through `setQueryData`. Live queries carry `meta.live`, so invalidation streams skip them. Leave `refetchType` at TanStack's `'active'`: `'all'` refetches every cached query of a domain on each event, including screens nobody has open, which refetch on their next visit anyway. `useSubscriptionInvalidates` treats a stream as a "something changed" ping, and `useQueryErrorMessage` is `userFacingErrorMessage` as a computed. A surface that talks to another API passes `orpc` to each composable instead of using `provideOrpc`; `useOrpc({ optional: true })` returns null instead of throwing when nothing was provided. `useDocumentVisible()` is the visibility ref the streams pause on.
+`useQuery` and `useLiveQuery` infer data and error types from the options but leave the query key's type alone, so a route whose output is recursive (`z.json()`) does not hit TypeScript's "excessively deep" limit in vue-query's option types. `useApiClient()` also returns the utils as `orpc`, for calls outside a composable such as `queryClient.fetchQuery(orpc.unit.list.queryOptions({ input }))`. `useOrpcSubscription` (also `useApiClient().useSubscription`) reconnects with jittered backoff and closes while the page is hidden (`respectVisibility: false` keeps it). `useLiveQuery` writes each stream event under the key it was opened for, so an event in flight from a previous input is dropped. A stream whose events are not the cached type (an `fnLive` patch route, or a `select`ed cache) does not compile without `applyEvent`, and the stream's input must match the query's unless you pass `subscriptionInput`. Use `mergeSeed` when the seed can resolve after stream events. For large live payloads such as chat timelines, pass vue-query's `shallow: true` in the query options so the data is not made deeply reactive; mutate it only through `setQueryData`. Live queries carry `meta.live`, so invalidation streams skip them. Leave `refetchType` at TanStack's `'active'`: `'all'` refetches every cached query of a domain on each event, including screens nobody has open, which refetch on their next visit anyway. `useSubscriptionInvalidates` treats a stream as a "something changed" ping, and `useQueryErrorMessage` is `userFacingErrorMessage` as a computed. A surface that talks to another API passes `orpc` to each composable instead of using `provideOrpc`; `useOrpc({ optional: true })` returns null instead of throwing when nothing was provided. `useDocumentVisible()` is the visibility ref the streams pause on.
 
 `orpc-fn/vue/testing` runs composables in a real app without a DOM: `withOrpcApp(setup, { utils })`, `createTestStream()` for a subscription the test drives (`await stream.push(event)` resolves once it was handled), and `createOrpcMock({ fn: mock })` for a deep stand-in of the utils.
 

@@ -84,6 +84,13 @@ if (process.env.WITH_OPTIONAL_PEERS) {
 		body: JSON.stringify({ n: 2 })
 	})
 	assert.equal(await response.json(), 4)
+	const { generateOpenApiDocument } = await import('orpc-fn/openapi')
+	const { z: z4 } = await import('zod/v4')
+	const document = await generateOpenApiDocument({ inner }, {
+		filter: () => true,
+		components: { Unused: z4.object({ id: z4.string() }) }
+	})
+	assert.ok(document.components.schemas.Unused)
 	const fetch = (url, init) => Promise.resolve(app.fetch(new Request(url, init)))
 	const client = createORPCClient(createRpcLink({ origin: 'http://localhost', url: '/rpc', fetch }))
 	assert.deepEqual(await Promise.all([client.inner({ n: 1 }), client.inner({ n: 2 })]), [2, 4])

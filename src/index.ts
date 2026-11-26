@@ -6,7 +6,10 @@ export {
 	type RoutePolicyParams,
 	type TestCallExtras
 } from './create-fn.js'
-export { isExpectedClientError } from './expected-client-error.js'
+export {
+	errorStatusOf,
+	isExpectedClientError
+} from './expected-client-error.js'
 export {
 	createDefaultLogger,
 	type FnLogger,

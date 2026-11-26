@@ -2,10 +2,12 @@
 // per-request context and the oRPC handler wiring. Each adapter only adds its
 // runtime's handler classes and response compression.
 import type {
+	OpenAPIDocument,
 	OpenAPIGeneratorGenerateOptions,
 	OpenAPIVersion
 } from '@orpc/openapi'
 import {
+	type AnyORPCError,
 	type AnyRouter,
 	type Context,
 	COMMON_ERROR_STATUS_MAP,
@@ -23,8 +25,12 @@ import type {
 	StandardHandlerPlugin,
 	StandardHandlerRoutingInterceptorOptions
 } from '@orpc/server/standard'
-import { isExpectedWithStatusMap } from '../expected-client-error.js'
-import type { ProcedureFilter } from '../meta.js'
+import {
+	errorStatusOf,
+	isExpectedWithStatusMap
+} from '../expected-client-error.js'
+import { allOf, type ProcedureFilter } from '../meta.js'
+import type { OpenApiComponents } from '../openapi.js'
 import { type InvocationTiming, REQUEST_TIMING } from '../timing.js'
 
 /** Per-request timings in ms; `fn()` adds `handler_ms`. Sent as Server-Timing. */
@@ -76,13 +82,59 @@ type RoutingInterceptorOptions<T extends Context> =
 		next(): Promise<StandardHandlerHandleResult>
 	}
 
-export type OpenApiMountOptions<R extends AnyRouter> = {
+type OpenApiInfo = { title: string; version: string; description?: string }
+
+/** What a docs page shows. On a surface, the defaults for its pages. */
+type OpenApiPageFields = {
+	/** The document's `info`, also the docs page's title. */
+	info?: OpenApiInfo
+	/**
+	 * Spec generator options, e.g. `version: '3.1.1'`. Document fields go in
+	 * `base`: `{ base: { components: { securitySchemes }, security } }`. A
+	 * page's keys replace the surface's.
+	 */
+	spec?: Omit<OpenAPIGeneratorGenerateOptions<OpenAPIVersion>, 'filter'>
+	/**
+	 * Named `components.schemas`, listed even when no route refers to them
+	 * (see `generateOpenApiDocument` in `orpc-fn/openapi`).
+	 */
+	components?: OpenApiComponents
+	/**
+	 * Serve this document instead of generating one, e.g. one the app
+	 * finishes itself: `() => generateOpenApiDocument(router, { ... })`.
+	 * Called once, on the first request for the docs or the spec, and again
+	 * after a failure.
+	 */
+	document?: () => AnyOpenApiDocument | Promise<AnyOpenApiDocument>
+}
+
+type AnyOpenApiDocument = OpenAPIDocument<OpenAPIVersion>
+
+/** One API reference page of an OpenAPI surface, with its own spec. */
+export type OpenApiDocsPage = OpenApiPageFields & {
+	/** The page, relative to the surface's `prefix` (default '/'). */
+	path?: Path
+	/** Its spec JSON, relative to `prefix` (default '/spec.json'). */
+	specPath?: Path
+	/**
+	 * The routes it lists, within the surface's `filter` (default: all the
+	 * surface serves), e.g. `hasTag('customer-api')`.
+	 */
+	filter?: ProcedureFilter
+}
+
+/** One OpenAPI (REST) handler under `prefix`, with its docs pages. */
+export type OpenApiMountOptions<R extends AnyRouter> = OpenApiPageFields & {
 	prefix: Path
-	info?: { title: string; version: string; description?: string }
-	/** Docs page, relative to `prefix` (default '/'); the spec is at `/spec.json`. */
+	/** The docs page, relative to `prefix` (default '/'); the spec is at `/spec.json`. */
 	docsPath?: Path
-	/** false: serve the REST routes without the docs page and `spec.json`. */
-	docs?: boolean
+	/**
+	 * false: serve the REST routes without docs. An array: several pages,
+	 * each with its own path, filter and spec; the surface's `info`,
+	 * `spec`, `components` and `document` are their defaults:
+	 * `[{ path: '/customer', specPath: '/customer/spec.json', filter: hasTag('customer') }, {}]`.
+	 */
+	docs?: boolean | readonly OpenApiDocsPage[]
 	/**
 	 * The procedures to publish (also filters the spec), e.g.
 	 * `hasTag('external')`. Required, so publishing is a choice;
@@ -92,10 +144,12 @@ export type OpenApiMountOptions<R extends AnyRouter> = {
 	/** Turn JSON strings back into `Date`s etc. for `z.date()` inputs. */
 	smartCoercion?: boolean
 	/**
-	 * Spec generator options. Document fields go in `base`, e.g.
-	 * `{ base: { components: { securitySchemes }, security } }`.
+	 * The body of an error response, in place of oRPC's `{ defined, code,
+	 * message, data }`; `status` is what the response answers with, under
+	 * `errorStatusMap`. Document it with `spec.errorResponseBodySchema`:
+	 * `(error, status) => ({ ...error.toJSON(), status })`.
 	 */
-	spec?: Omit<OpenAPIGeneratorGenerateOptions<OpenAPIVersion>, 'filter'>
+	errorResponseBodyEncoder?: (error: AnyORPCError, status: number) => unknown
 	plugins?: Plugin<InferRouterInitialContext<R>>[]
 }
 
@@ -105,11 +159,12 @@ export type HandlerConfig<R extends AnyRouter> = {
 	/** Serve the RPC handler (oRPC's `RPCLink`) here. Omit to skip it. */
 	rpcPrefix?: Path
 	/**
-	 * Serve the OpenAPI (REST) handler and its Scalar docs here. Needs the
-	 * optional peers `@orpc/openapi`, `@orpc/json-schema` and `@orpc/zod`,
-	 * loaded on the first request to `prefix`.
+	 * Serve the OpenAPI (REST) handler and its Scalar docs here; an array
+	 * serves several surfaces, each with its own prefix and filter. Needs
+	 * the optional peers `@orpc/openapi`, `@orpc/json-schema` and
+	 * `@orpc/zod`, loaded on the first request to `prefix`.
 	 */
-	openapi?: OpenApiMountOptions<R>
+	openapi?: OpenApiMountOptions<R> | readonly OpenApiMountOptions<R>[]
 	/** Collapse parallel RPC calls into one HTTP request. Default: true (25 calls). */
 	batch?: boolean | { maxSize: number }
 	/** Add a Server-Timing header from the request timing. Default: true */
@@ -168,8 +223,11 @@ export type MountOptions<R extends AnyRouter, Arg, Req> = ContextOption<
 
 /** Where a standalone handler serves: RPC, OpenAPI or both, at least one. */
 export type MountTarget<R extends AnyRouter> =
-	| { rpcPrefix: Path; openapi?: OpenApiMountOptions<R> }
-	| { rpcPrefix?: Path; openapi: OpenApiMountOptions<R> }
+	| { rpcPrefix: Path; openapi?: HandlerConfig<R>['openapi'] }
+	| {
+			rpcPrefix?: Path
+			openapi: NonNullable<HandlerConfig<R>['openapi']>
+	  }
 
 const arrivals = new WeakMap<object, number>()
 
@@ -333,6 +391,8 @@ export type HandlerOptions<T extends Context> = {
 	/** Event stream options; each runtime passes them to its response writer. */
 	eventStream: { keepAlive: boolean | { interval: number } }
 	errorStatusMap?: Record<string, number>
+	/** OpenAPI only: the error body (oRPC's handler option). */
+	errorResponseBodyEncoder?: (error: AnyORPCError) => unknown
 }
 
 /** A runtime's oRPC handler classes, as factories. */
@@ -374,10 +434,21 @@ export function createMounts<R extends AnyRouter, H>(
 		throw new RangeError(
 			'orpc-fn: sseKeepAlive must be a positive finite number'
 		)
-	if (options.openapi && typeof options.openapi.filter !== 'function')
-		throw new TypeError(
-			'orpc-fn: openapi needs a filter; pass () => true to publish every route'
-		)
+	const surfaces = options.openapi === undefined ? [] : [options.openapi].flat()
+	const prefixes = new Set<string>()
+	for (const surface of surfaces) {
+		if (typeof surface.filter !== 'function')
+			throw new TypeError(
+				'orpc-fn: openapi needs a filter; pass () => true to publish every route'
+			)
+		const prefix = surface.prefix.replace(/\/+$/, '')
+		if (prefixes.has(prefix))
+			throw new TypeError(
+				`orpc-fn: two openapi surfaces share the prefix ${surface.prefix}`
+			)
+		prefixes.add(prefix)
+		docsPages(surface)
+	}
 
 	const statusMap = options.errorStatusMap
 	const isExpectedError =
@@ -435,8 +506,7 @@ export function createMounts<R extends AnyRouter, H>(
 		mounts.push({ prefix: options.rpcPrefix, handler: () => handler })
 	}
 
-	const { openapi } = options
-	if (openapi) {
+	for (const openapi of surfaces) {
 		let loading: Promise<H> | undefined
 		mounts.push({
 			prefix: openapi.prefix,
@@ -459,6 +529,47 @@ export function createMounts<R extends AnyRouter, H>(
 	return mounts
 }
 
+type ResolvedPage = Omit<OpenApiDocsPage, 'filter'> & {
+	path: Path
+	specPath: Path
+	filter: ProcedureFilter
+}
+
+/**
+ * A surface's docs pages, with the surface's fields as their defaults.
+ * Throws when two pages share a path, so it runs when the app mounts.
+ */
+function docsPages<R extends AnyRouter>(
+	surface: OpenApiMountOptions<R>
+): ResolvedPage[] {
+	const { docs = true } = surface
+	const pages = docs === false ? [] : docs === true ? [{}] : docs
+	const seen = new Set<string>()
+	return pages.map((page: OpenApiDocsPage) => {
+		const resolved: ResolvedPage = {
+			path: page.path ?? surface.docsPath ?? '/',
+			specPath: page.specPath ?? '/spec.json',
+			filter: page.filter ? allOf(surface.filter, page.filter) : surface.filter
+		}
+		const info = page.info ?? surface.info
+		if (info) resolved.info = info
+		if (surface.spec || page.spec)
+			resolved.spec = { ...surface.spec, ...page.spec }
+		const components = page.components ?? surface.components
+		if (components) resolved.components = components
+		const document = page.document ?? surface.document
+		if (document) resolved.document = document
+		for (const path of [resolved.path, resolved.specPath]) {
+			if (seen.has(path))
+				throw new TypeError(
+					`orpc-fn: two openapi docs pages under ${surface.prefix} use ${path}; give each its own path and specPath`
+				)
+			seen.add(path)
+		}
+		return resolved
+	})
+}
+
 /** Loads the OpenAPI peers only for apps that mount it. */
 async function createOpenApiHandler<R extends AnyRouter, H>(
 	router: R,
@@ -468,56 +579,70 @@ async function createOpenApiHandler<R extends AnyRouter, H>(
 ): Promise<H> {
 	const [
 		{ SmartCoercionHandlerPlugin },
-		{ OpenAPIGenerator },
 		{ OpenAPIReferenceHandlerPlugin },
 		{ ZodToJsonSchemaConverter },
+		{ generateOpenApiDocument },
 		createHandler
 	] = await Promise.all([
 		import('@orpc/json-schema'),
-		import('@orpc/openapi'),
 		import('@orpc/openapi/plugins'),
 		import('@orpc/zod'),
+		import('../openapi.js'),
 		loadHandler()
 	])
-	const converters = [new ZodToJsonSchemaConverter()]
 	if (openapi.smartCoercion) {
-		options.plugins.push(new SmartCoercionHandlerPlugin({ converters }))
+		options.plugins.push(
+			new SmartCoercionHandlerPlugin({
+				converters: [new ZodToJsonSchemaConverter()]
+			})
+		)
 	}
-	if (openapi.docs !== false) {
-		const generator = new OpenAPIGenerator({ converters })
-		const { base, errorStatusMap, ...generate } = openapi.spec ?? {}
+	for (const page of docsPages(openapi)) {
+		const { base, errorStatusMap, ...generate } = page.spec ?? {}
 		const resolvedErrorStatusMap = errorStatusMap ?? options.errorStatusMap
-		let spec: ReturnType<typeof generator.generate> | undefined
+		const { document } = page
+		const load = (): Promise<AnyOpenApiDocument> =>
+			document
+				? Promise.resolve().then(document)
+				: generateOpenApiDocument(router, {
+						...generate,
+						...(resolvedErrorStatusMap
+							? { errorStatusMap: resolvedErrorStatusMap }
+							: {}),
+						...(page.components ? { components: page.components } : {}),
+						filter: page.filter,
+						base: {
+							info: page.info ?? { title: 'API', version: '0.0.0' },
+							servers: [{ url: openapi.prefix }],
+							...base
+						}
+					})
+		let spec: Promise<AnyOpenApiDocument> | undefined
 		options.plugins.push(
 			new OpenAPIReferenceHandlerPlugin({
 				provider: 'scalar',
-				...(openapi.docsPath ? { docsPath: openapi.docsPath } : {}),
+				docsPath: page.path,
+				specPath: page.specPath,
 				// Generated once, on the first request for the docs or the spec.
 				spec: () => {
-					spec ??= generator
-						.generate(router, {
-							...generate,
-							...(resolvedErrorStatusMap
-								? { errorStatusMap: resolvedErrorStatusMap }
-								: {}),
-							filter: openapi.filter,
-							base: {
-								info: openapi.info ?? { title: 'API', version: '0.0.0' },
-								servers: [{ url: openapi.prefix }],
-								...base
-							}
-						})
-						.catch((error) => {
-							spec = undefined
-							throw error
-						})
+					spec ??= load().catch((error) => {
+						spec = undefined
+						throw error
+					})
 					return spec
 				}
 			})
 		)
 	}
+	const encode = openapi.errorResponseBodyEncoder
 	return createHandler(router, {
 		...options,
+		...(encode
+			? {
+					errorResponseBodyEncoder: (error: AnyORPCError) =>
+						encode(error, errorStatusOf(error, options.errorStatusMap))
+				}
+			: {}),
 		filter: (procedure, path) => openapi.filter(procedure, path)
 	})
 }

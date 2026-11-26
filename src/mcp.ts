@@ -10,9 +10,18 @@ import {
 	soleSchema
 } from './compatibility.js'
 import { rawInputSchema, type ToolSchema } from './json-schema.js'
-import { hasTag, type ProcedureFilter, readFnMeta, toToolName } from './meta.js'
+import {
+	allOf,
+	anyOf,
+	hasTag,
+	hasTags,
+	not,
+	type ProcedureFilter,
+	readFnMeta,
+	toToolName
+} from './meta.js'
 
-export { hasTag, toToolName }
+export { allOf, anyOf, hasTag, hasTags, not, toToolName }
 export { rawInputSchema as toolInputSchema }
 export type { ProcedureFilter, ToolSchema }
 
@@ -51,19 +60,29 @@ export function listTools(
 			procedure: AnyProcedureContract | AnyProcedure,
 			path: readonly string[]
 		) => string
+		/**
+		 * A streaming procedure the filter accepts: `'skip'` leaves it out
+		 * (default), so one filter such as `hasTag('external')` can describe
+		 * a REST surface with streams; `'throw'` fails instead.
+		 */
+		streams?: 'skip' | 'throw'
 	} = {}
 ): McpTool[] {
-	const { filter, readOnly = isGet } = options
+	const { filter, readOnly = isGet, streams = 'skip' } = options
+	if (streams !== 'skip' && streams !== 'throw')
+		throw new TypeError("orpc-fn: streams must be 'skip' or 'throw'")
 	const tools: McpTool[] = []
 	const names = new Map<string, AnyProcedure>()
 	const unresolved = walkProcedureContractsSync(router, (contract, path) => {
 		if (filter && !filter(contract, path)) return
 		const procedure = contract as AnyProcedure
 		const meta = readFnMeta(procedure)
-		if (meta.stream)
+		if (meta.stream) {
+			if (streams === 'skip') return
 			throw new TypeError(
 				`orpc-fn: streaming procedure ${meta.name ?? path.join('.')} cannot be an MCP tool`
 			)
+		}
 		const name =
 			options.name?.(contract, path) ?? toToolName(meta.name ?? path.join('.'))
 		const previous = names.get(name)

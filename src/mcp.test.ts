@@ -2,7 +2,15 @@ import { describe, expect, test } from 'bun:test'
 import { call } from '@orpc/server'
 import { z } from 'zod'
 import { createRouter, fn } from '../tests/fixture.js'
-import { hasTag, listTools, type ProcedureFilter } from './mcp.js'
+import {
+	allOf,
+	anyOf,
+	hasTag,
+	hasTags,
+	listTools,
+	not,
+	type ProcedureFilter
+} from './mcp.js'
 import { readFnMeta } from './meta.js'
 
 const isExternal = hasTag('external')
@@ -195,5 +203,57 @@ describe('listExternalTools', () => {
 		expect(
 			await tool?.config.inputSchema?.['~standard'].validate({})
 		).toMatchObject({ issues: [{ message: 'Expected { query: string }' }] })
+	})
+})
+
+describe('streaming procedures', () => {
+	const watch = fn({
+		name: 'thing.watch',
+		procedure: 'public',
+		tags: ['external'],
+		stream: true,
+		async *handler() {
+			yield { ok: true }
+		}
+	})
+	const withStream = createRouter({ external, watch })
+
+	test('are left out by default, so one filter serves REST and MCP', () => {
+		expect(listExternalTools(withStream).map((t) => t.name)).toEqual([
+			'thing-get'
+		])
+	})
+
+	test("streams: 'throw' fails on one the filter accepts", () => {
+		expect(() =>
+			listTools(withStream, { filter: isExternal, streams: 'throw' })
+		).toThrow('streaming procedure thing.watch cannot be an MCP tool')
+	})
+})
+
+describe('filter combinators', () => {
+	const names = (filter: ProcedureFilter) =>
+		listTools(router, { filter }).map((t) => t.name)
+
+	test('hasTags needs every tag; allOf, anyOf and not combine filters', () => {
+		expect(names(hasTags('external', 'mcp-support'))).toEqual(['thing-support'])
+		expect(names(allOf(isExternal, isMcpSupport))).toEqual(['thing-support'])
+		expect(names(anyOf(isMcpSupport, hasTag('mcp-readonly')))).toEqual([
+			'thing-support',
+			'thing-report'
+		])
+		expect(names(not(isExternal))).toEqual(['thing-secret'])
+		expect(names(allOf())).toHaveLength(4)
+		expect(names(anyOf())).toEqual([])
+	})
+
+	test('filters see the router path', () => {
+		const underOther: ProcedureFilter = (_procedure, path) =>
+			path[0] === 'other'
+		expect(
+			listTools(router, { filter: allOf(underOther, not(isExternal)) }).map(
+				(t) => t.name
+			)
+		).toEqual(['thing-secret'])
 	})
 })
