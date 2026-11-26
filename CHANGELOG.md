@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.9.2...v0.10.0) (2026-11-26)
+
+
+### Features
+
+* add orpc-fn/fetch and orpc-fn/node HTTP adapters ([#36](https://github.com/HansKristoffer/orpc-fn/issues/36)) ([d3fd7be](https://github.com/HansKristoffer/orpc-fn/commit/d3fd7be8216f0a92735313728922ec8ccf895757))
+
 ## [0.9.2](https://github.com/HansKristoffer/orpc-fn/compare/v0.9.1...v0.9.2) (2026-11-23)
 
 
