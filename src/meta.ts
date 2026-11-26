@@ -5,10 +5,14 @@ import {
 } from '@orpc/contract'
 import type { AnyProcedure } from '@orpc/server'
 import {
+	FN_META_KEY,
 	type LibraryMeta,
 	openapiRoute,
-	procedureDefinition
+	procedureDefinition,
+	readStoredFnMeta
 } from './compatibility.js'
+
+export { FN_META_KEY }
 
 /**
  * Picks procedures by `(procedure, path)`; also fits oRPC's handler and
@@ -24,14 +28,6 @@ export const hasTag =
 	(tag: string): ProcedureFilter =>
 	(procedure) =>
 		openapiRoute(procedure).tags?.includes(tag) ?? false
-
-/**
- * Key under which `fn()` stores its metadata in oRPC's procedure meta
- * (`.meta()`). Living in oRPC's own meta means it survives everything that
- * rebuilds a procedure (`os.router()`, `.use()` on a router, lazy routers),
- * unlike a symbol property on the procedure object.
- */
-export const FN_META_KEY = 'orpc-fn'
 
 export type StoredFnMeta<
 	TMeta extends object = Record<string, unknown>,
@@ -101,7 +97,7 @@ export function readFnMeta<T extends AnyProcedure | AnyProcedureContract>(
 	procedure: T
 ): FnMeta<MetaFrom<T>, KeyFrom<T>> {
 	const def = procedureDefinition(procedure)
-	const stored = def.meta[FN_META_KEY] as StoredFnMeta | undefined
+	const stored = readStoredFnMeta(procedure) as StoredFnMeta | undefined
 	const route = openapiRoute(procedure)
 	return {
 		name: stored?.name,

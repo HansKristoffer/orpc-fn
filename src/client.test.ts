@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { createORPCClient, ORPCError } from '@orpc/client'
 import type { RouterClient } from '@orpc/server'
+import { createTanstackQueryUtils } from '@orpc/tanstack-query'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { createRouter, fn, fnLive, transport } from '../tests/fixture.js'
@@ -148,8 +149,73 @@ describe('createRpcLink', () => {
 
 	test('a full URL as url names the oRPC 2 origin/url split', () => {
 		expect(() =>
-			createRpcLink({ url: 'https://api.test/rpc' as `/${string}` })
-		).toThrow("pass origin: 'https://api.test' and url: '/rpc'")
+			createRpcLink({ url: 'https://api.test/rpc?v=2' as `/${string}` })
+		).toThrow("pass origin: 'https://api.test' and url: '/rpc?v=2'")
+		expect(() => createRpcLink({ url: 'http://[' as `/${string}` })).toThrow(
+			'RPCLink url is a path since oRPC 2'
+		)
+	})
+
+	test('TanStack Query calls batch, while liveOptions stays out of batches', async () => {
+		const orpc = createTanstackQueryUtils(client)
+		const q1 = orpc.echo.queryOptions({ input: { text: 'a' } })
+		const q2 = orpc.echo.queryOptions({ input: { text: 'b' } })
+		const signal = new AbortController().signal
+		hits.length = 0
+		const results = await Promise.all([
+			q1.queryFn({ queryKey: q1.queryKey, signal, meta: undefined } as never),
+			q2.queryFn({ queryKey: q2.queryKey, signal, meta: undefined } as never)
+		])
+		expect(results.map((r) => r.text)).toEqual(['a', 'b'])
+		expect(hits).toHaveLength(1)
+
+		// TanStack `liveOptions` attaches the same symbol with `type: 'live'`,
+		// keeping streams out of batches even without a stream manifest or name hint.
+		const watch = fn({
+			name: 'client.watch',
+			procedure: 'public',
+			stream: true,
+			handler: async function* () {
+				yield 1
+			}
+		})
+		const mixed = createRouter({ echo, watch })
+		const mixedApp = new Hono()
+		const mixedHits: string[] = []
+		mixedApp.use('*', async (c, next) => {
+			mixedHits.push(new URL(c.req.url).pathname)
+			await next()
+		})
+		mountOrpc(mixedApp, { router: mixed, rpcPrefix: '/rpc' })
+		const mixedClient: RouterClient<typeof mixed> = createORPCClient(
+			createRpcLink({
+				origin,
+				url,
+				fetch: (input, init) =>
+					Promise.resolve(mixedApp.fetch(new Request(input, init)))
+			})
+		)
+		const mixedUtils = createTanstackQueryUtils(mixedClient)
+		const live = mixedUtils.watch.liveOptions()
+		const query = mixedUtils.echo.queryOptions({ input: { text: 'c' } })
+		const abort = new AbortController()
+		const [value, echoed] = await Promise.all([
+			live.queryFn({
+				queryKey: live.queryKey,
+				signal: abort.signal,
+				meta: undefined,
+				client: { setQueryData: () => {} }
+			} as never),
+			query.queryFn({
+				queryKey: query.queryKey,
+				signal: abort.signal,
+				meta: undefined
+			} as never)
+		])
+		abort.abort()
+		expect(value).toBe(1)
+		expect(echoed.text).toBe('c')
+		expect(mixedHits.sort()).toEqual(['/rpc/echo', '/rpc/watch'])
 	})
 
 	test('isSubscriptionPath', () => {

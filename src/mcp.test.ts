@@ -149,4 +149,51 @@ describe('listExternalTools', () => {
 		const result = await tool?.config.inputSchema?.['~standard'].validate({})
 		expect(result && 'issues' in result && result.issues?.length).toBeTruthy()
 	})
+
+	test('supports non-Zod Standard JSON Schema v1 inputs via StandardJsonSchemaConverter', async () => {
+		const standardInput = {
+			'~standard': {
+				version: 1 as const,
+				vendor: 'custom',
+				types: {} as { input: { query: string }; output: { query: string } },
+				validate: (value: unknown) =>
+					typeof value === 'object' &&
+					value !== null &&
+					typeof (value as { query?: unknown }).query === 'string'
+						? { value: value as { query: string } }
+						: { issues: [{ message: 'Expected { query: string }' }] },
+				jsonSchema: {
+					input: () => ({
+						type: 'object',
+						properties: { query: { type: 'string' } },
+						required: ['query']
+					}),
+					output: () => ({
+						type: 'object',
+						properties: { query: { type: 'string' } },
+						required: ['query']
+					})
+				}
+			}
+		}
+		const search = fn({
+			name: 'thing.search',
+			procedure: 'public',
+			input: standardInput,
+			handler: ({ input }) => input.query
+		})
+		const [tool] = listTools(createRouter({ search }))
+		const json = tool?.config.inputSchema?.['~standard'].jsonSchema.input()
+		expect(json).toMatchObject({
+			type: 'object',
+			properties: { query: { type: 'string' } },
+			required: ['query']
+		})
+		expect(
+			await tool?.config.inputSchema?.['~standard'].validate({ query: 'abc' })
+		).toEqual({ value: { query: 'abc' } })
+		expect(
+			await tool?.config.inputSchema?.['~standard'].validate({})
+		).toMatchObject({ issues: [{ message: 'Expected { query: string }' }] })
+	})
 })

@@ -22,9 +22,9 @@ It falls short on what lullu and gey-mono rely on:
 
 - no backlog-list replay (`useBacklog`/`backlogSize`/`backlogTtl`) and no atomic publish+backlog;
 - no per-subscriber `filterFn` or `authFn`, and no overflow marker, so a dropped event leaves no signal;
-- no Bun `RedisClient` adapter (lullu uses it);
+- no Bun `RedisClient` adapter in `@orpc/publisher` itself (oRPC 2 added `experimental_BunRedisPublisher` in a separate `@orpc/bun` package, and moved `@orpc/publisher`'s Redis adapter from `ioredis` to `node-redis`);
 - no per-channel fan-out that parses each payload once for every local subscriber;
-- it was still `experimental-` when this was decided. oRPC 2 renamed it `@orpc/publisher` and moved its Redis adapter from ioredis to node-redis; the gaps above were not re-checked in that move.
+- oRPC 2 promoted `@orpc/publisher` out of `experimental-`, but the gaps above still hold.
 
 **Decision:** do not build on it. `/live` defines a small `PubSubTransport` (publish with optional atomic backlog, read backlog, subscribe returning an unsubscribe function) with memory, Bun and ioredis implementations. Revisit when the publisher is stable and supports backlog replay and Bun. Moving would only touch the transports.
 
@@ -103,7 +103,7 @@ The client link used to keep a call out of a batch when its router path containe
 
 `orpc-fn/fetch`, `orpc-fn/node` and `orpc-fn/hono` build oRPC's own runtime handlers (`@orpc/server/fetch` and `/node`, `@orpc/openapi/fetch` and `/node`), so request parsing, a body Express already parsed, abort on disconnect and streaming stay oRPC's. `src/http/mount.ts` holds what they share: options, the per-request context, the plugin list (`BatchHandlerPlugin`, `ResponseHeadersHandlerPlugin`, the OpenAPI plugins) and error reporting. Server-Timing and the SSE anti-buffering headers are a plugin on oRPC's standard response, outermost (initialized after `~cors`, `~batch` and `~response-headers`, since each plugin prepends its routing interceptor), so both runtimes get them before anything is written. Hono reuses the Fetch core as middleware.
 
-`ResponseHeadersHandlerPlugin` is always on: a procedure that does not declare `resHeaders` never sees it, and one passed in `plugins` is not added twice. Headers a batched call sets stay on its batch item, which is oRPC's behaviour.
+`ResponseHeadersHandlerPlugin` and `SignalSyncHandlerPlugin` are always on (unless passed in `plugins`, so neither is added twice): a procedure that does not declare `resHeaders` never sees it, and cancelling a streaming response aborts the procedure's `signal` (and vice versa). Headers a batched call sets stay on its batch item, which is oRPC's behaviour.
 
 ## Errors carry no status
 
@@ -111,7 +111,7 @@ oRPC 2 removed `ORPCError`'s `status`: a handler maps codes with `errorStatusMap
 
 ## The adapters compress their own responses
 
-oRPC answers a streaming batch with one frame per result (`application/vnd.orpc.batch` since oRPC 2, an event stream before), sent as each finishes. A compressor that buffers its output (`CompressionStream`, a default zlib stream) makes a fast result wait behind a slow one, and Hono's `compress()` and oRPC 1's `CompressionPlugin` skipped event streams altogether. oRPC 2's `ResponseCompressionHandlerPlugin` was not re-evaluated. Apps served without a compressing proxy sent their largest responses raw, and a Vercel function must stay under its response size limit. **Decision:** the adapters compress JSON and batch event streams themselves (`compress`, on by default) with `node:zlib`: brotli at quality 4 (about gzip's speed, smaller output) unless the client prefers or only accepts gzip, flushing after every chunk. A batch is recognised by its content type. Event streams stay uncompressed: they are long-lived and small. A response that already has a `content-encoding`, or says `no-transform`, is left alone, so an outer compressor still wins.
+oRPC answers a streaming batch with one frame per result (`application/vnd.orpc.batch` since oRPC 2, an event stream before), sent as each finishes. A compressor that buffers its output (`CompressionStream`, a default zlib stream) makes a fast result wait behind a slow one, and Hono's `compress()` and oRPC 1's `CompressionPlugin` skipped event streams altogether. oRPC 2's `ResponseCompressionHandlerPlugin` uses `CompressionStream`, so it lacks brotli (`gzip`/`deflate` only) and cannot flush per batch frame. Apps served without a compressing proxy sent their largest responses raw, and a Vercel function must stay under its response size limit. **Decision:** the adapters compress JSON and batch event streams themselves (`compress`, on by default) with `node:zlib`: brotli at quality 4 (about gzip's speed, smaller output) unless the client prefers or only accepts gzip, flushing after every chunk. A batch is recognised by its content type. Event streams stay uncompressed: they are long-lived and small. Responses that already have `content-encoding`, say `no-transform`, or carry `206`/`content-range` are left alone, so an outer compressor still wins; strong ETags are weakened on compressed responses.
 
 On Fetch the adapter compresses the finished `Response`. On Node, oRPC writes straight to `res` (status and `setHeader`, then `end(body)` or a piped stream), so the adapter wraps `write` and `end` around its own `handle(req, res)` call for that one response and decides on the first call, when the headers are known. oRPC 2 removed the adapter interceptors this used to hook into. Because of `node:zlib`, Cloudflare Workers need `nodejs_compat`.
 
@@ -137,7 +137,7 @@ Pub/sub subscriptions used to skip guards, extras and completion logging. Comple
 
 ## Tool schemas
 
-The core accepts any Standard Schema, oRPC's own `eventIterator` included. Executable tools (MCP, Mastra) need JSON Schema, so they go through the Zod to JSON Schema conversion in `@orpc/zod`. A widened core does not promise that every validator works with every adapter. Validation and execution can both parse the raw tool input, so transforms and refinements must be pure.
+The core accepts any Standard Schema, oRPC's own `eventIterator` included. Executable tools (MCP, Mastra) need JSON Schema, so they convert through oRPC's `DelegatingJsonSchemaConverter` (`ZodToJsonSchemaConverter` plus `StandardJsonSchemaConverter`) and check object schemas with `extractJsonObjectSchemaEntries` from `@orpc/json-schema`, supporting both Zod 4.5+ and any Standard JSON Schema v1 validator. A widened core does not promise that every validator works with every adapter. Validation and execution can both parse the raw tool input, so transforms and refinements must be pure.
 
 ## `trpc-cli` vs `/cli`
 

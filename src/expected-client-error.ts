@@ -4,14 +4,21 @@ import { COMMON_ERROR_STATUS_MAP, ORPCError } from '@orpc/server'
 // orpc-fn must still pass isExpectedError to mountOrpc and the tool adapters.
 const classifiedExpected = new WeakSet<object>()
 
+function ownStatus(
+	map: Record<string, number> | undefined,
+	code: string
+): number | undefined {
+	return map && Object.hasOwn(map, code) ? map[code] : undefined
+}
+
 /**
  * The HTTP status oRPC 2 answers a code with: the handler's `errorStatusMap`,
  * else its common map, else 400. Errors no longer carry a status.
  */
 function statusOf(code: string, statusMap?: Record<string, number>): number {
 	return (
-		statusMap?.[code] ??
-		(COMMON_ERROR_STATUS_MAP as Record<string, number>)[code] ??
+		ownStatus(statusMap, code) ??
+		ownStatus(COMMON_ERROR_STATUS_MAP as Record<string, number>, code) ??
 		400
 	)
 }

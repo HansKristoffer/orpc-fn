@@ -1,7 +1,7 @@
 import type { AnyMetaPlugin, AnySchema } from '@orpc/contract'
 import type { AnyProcedure } from '@orpc/server'
-import { openapiMetaPlugin, setMetaPlugin } from './compatibility.js'
-import { FN_META_KEY, type StoredFnMeta } from './meta.js'
+import { fnMetaPlugin, openapiMetaPlugin } from './compatibility.js'
+import type { StoredFnMeta } from './meta.js'
 import type { BuildProcedure } from './types.js'
 
 export type BuilderChain = {
@@ -35,7 +35,7 @@ export function createProcedureAssembler(
 					Object.entries(route.route).filter(([, value]) => value !== undefined)
 				)
 			}),
-			setMetaPlugin(FN_META_KEY, stored)
+			fnMetaPlugin(stored)
 		)
 		if (route.errors) builder = builder.errors(route.errors)
 		if (route.input) builder = builder.input(route.input)

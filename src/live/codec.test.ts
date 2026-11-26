@@ -39,6 +39,19 @@ describe('pub/sub payloads across oRPC majors', () => {
 	test('payloads without the envelope stay plain JSON', () => {
 		expect(decodeMessage('{"n":1}')).toEqual({ id: undefined, value: { n: 1 } })
 	})
+
+	test('invalid serialized RegExp throws TypeError', () => {
+		expect(() =>
+			decodeMessage(
+				JSON.stringify({
+					'orpc-fn': 2,
+					id: 'bad',
+					json: { re: 'not-a-regex' },
+					meta: [[5, 're']]
+				})
+			)
+		).toThrow(TypeError)
+	})
 })
 
 describe('queryCacheSerializer', () => {

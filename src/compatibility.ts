@@ -1,5 +1,14 @@
-import type { AnyMetaPlugin, AnySchema, ErrorMap, Meta } from '@orpc/contract'
-import type { Procedure } from '@orpc/server'
+import {
+	type AnySchema,
+	defineMeta as defineOrpcMeta,
+	type ErrorMap,
+	type Meta
+} from '@orpc/contract'
+import {
+	type AnyProcedure,
+	DecoratedProcedure,
+	type Procedure
+} from '@orpc/server'
 
 /** All runtime access to oRPC's implementation namespace is audited here. */
 export type ProcedureDefinition = {
@@ -65,32 +74,64 @@ export type OpenAPIRoute = {
 
 const OPENAPI_META_KEY = '~openapi'
 
+/**
+ * The same merge `openapi()` applies for these fields: tags set on a builder
+ * and on the route concatenate, every other field replaces. Built with oRPC's
+ * native `defineMeta`.
+ */
+export const [openapiMetaPlugin, readNativeOpenAPIMeta] = defineOrpcMeta(
+	OPENAPI_META_KEY,
+	(route: OpenAPIRoute, existing) => {
+		const tags =
+			existing?.tags && route.tags
+				? [...existing.tags, ...route.tags]
+				: (route.tags ?? existing?.tags)
+		return { ...existing, ...route, ...(tags !== undefined ? { tags } : {}) }
+	}
+)
+
 export function openapiRoute(procedure: object): OpenAPIRoute {
-	return (procedureDefinition(procedure).meta[OPENAPI_META_KEY] ??
-		{}) as OpenAPIRoute
+	const meta =
+		'~orpc' in procedure &&
+		typeof procedure['~orpc'] === 'object' &&
+		procedure['~orpc'] !== null &&
+		'meta' in procedure['~orpc']
+			? readNativeOpenAPIMeta(procedure as { '~orpc': { meta: Meta } })
+			: undefined
+	return meta ?? {}
 }
 
 /**
- * The same merge `openapi()` applies for these fields: tags set on a builder
- * and on the route concatenate, every other field replaces.
+ * Key under which `fn()` stores its metadata in oRPC's procedure meta
+ * (`.meta()`). Living in oRPC's own meta means it survives everything that
+ * rebuilds a procedure (`os.router()`, `.use()` on a router, lazy routers),
+ * unlike a symbol property on the procedure object.
  */
-export function openapiMetaPlugin(route: OpenAPIRoute): AnyMetaPlugin {
-	return {
-		name: OPENAPI_META_KEY,
-		init(meta) {
-			const existing = meta[OPENAPI_META_KEY] as OpenAPIRoute | undefined
-			const tags =
-				existing?.tags && route.tags
-					? [...existing.tags, ...route.tags]
-					: (route.tags ?? existing?.tags)
-			return { ...meta, [OPENAPI_META_KEY]: { ...existing, ...route, tags } }
-		}
-	}
+export const FN_META_KEY = 'orpc-fn'
+
+export const [fnMetaPlugin, readNativeFnMeta] = defineOrpcMeta(
+	FN_META_KEY,
+	(incoming: unknown) => incoming
+)
+
+export function readStoredFnMeta(procedure: object): unknown {
+	return '~orpc' in procedure &&
+		typeof procedure['~orpc'] === 'object' &&
+		procedure['~orpc'] !== null &&
+		'meta' in procedure['~orpc']
+		? readNativeFnMeta(procedure as { '~orpc': { meta: Meta } })
+		: undefined
 }
 
-/** A meta plugin that stores `value` under `name`, replacing what was there. */
-export function setMetaPlugin(name: string, value: unknown): AnyMetaPlugin {
-	return { name, init: (meta) => ({ ...meta, [name]: value }) }
+/**
+ * `os.use(...).router(...)` returns a plain `Procedure` without `.meta()`,
+ * `.errors()` or `.use()`. Re-wrap it as `DecoratedProcedure` so runtime
+ * routes support the methods `fn()`'s return type exposes.
+ */
+export function decorateProcedure(procedure: AnyProcedure): AnyProcedure {
+	return procedure instanceof DecoratedProcedure
+		? procedure
+		: new DecoratedProcedure(procedure['~orpc'])
 }
 
 /**

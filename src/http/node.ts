@@ -14,7 +14,8 @@ import {
 	type Encoding,
 	MIN_COMPRESS_BYTES,
 	negotiateEncoding,
-	varyWithAcceptEncoding
+	varyWithAcceptEncoding,
+	weakenEtag
 } from './compression.js'
 
 /** Node request headers as Web `Headers` (HTTP/2 pseudo-headers dropped). */
@@ -116,12 +117,17 @@ export async function withNodeCompression<T>(
 		else res.setHeader('content-length', length)
 		const vary = varyWithAcceptEncoding(header('vary'))
 		if (vary) res.setHeader('vary', vary)
+		const weakEtag = weakenEtag(header('etag'))
+		if (weakEtag) res.setHeader('etag', weakEtag)
+		res.removeHeader('accept-ranges')
 	}
 
 	// Wraps `res` for the response's kind; false leaves it as oRPC wrote it.
 	const start = (): boolean => {
 		restore()
-		const kind = res.headersSent ? undefined : compressionKind(header)
+		const kind = res.headersSent
+			? undefined
+			: compressionKind(header, res.statusCode)
 		if (kind === 'batch-stream') {
 			setEncodedHeaders()
 			streamCompressed(res, encoding, writeRaw, endRaw)

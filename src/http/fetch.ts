@@ -8,7 +8,8 @@ import {
 	createFlushingCompressor,
 	MIN_COMPRESS_BYTES,
 	negotiateEncoding,
-	varyWithAcceptEncoding
+	varyWithAcceptEncoding,
+	weakenEtag
 } from './compression.js'
 import {
 	createMounts,
@@ -107,7 +108,8 @@ async function compressResponse(
 	const encoding = negotiateEncoding(request.headers.get('accept-encoding'))
 	if (!encoding) return response
 	const kind = compressionKind(
-		(name) => response.headers.get(name) ?? undefined
+		(name) => response.headers.get(name) ?? undefined,
+		response.status
 	)
 	if (!kind) return response
 
@@ -134,6 +136,9 @@ async function compressResponse(
 	headers.set('content-encoding', encoding)
 	const vary = varyWithAcceptEncoding(headers.get('vary') ?? undefined)
 	if (vary) headers.set('vary', vary)
+	const weakEtag = weakenEtag(headers.get('etag') ?? undefined)
+	if (weakEtag) headers.set('etag', weakEtag)
+	headers.delete('accept-ranges')
 	return new Response(body as ConstructorParameters<typeof Response>[0], {
 		...init,
 		headers

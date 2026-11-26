@@ -12,6 +12,7 @@ import type { AddressInfo } from 'node:net'
 import zlib from 'node:zlib'
 import { createORPCClient } from '@orpc/client'
 import { ORPCError, os, type RouterClient } from '@orpc/server'
+import { CORSHandlerPlugin } from '@orpc/server/plugins'
 import { z } from 'zod'
 import { captureStreamingBatch } from '../tests/batch.js'
 import { quiet } from '../tests/fixture.js'
@@ -82,8 +83,27 @@ const router = createRouter({
 	}),
 	limited: fn({
 		name: 'limited',
+		method: 'GET',
+		path: '/limited',
+		tags: ['external'],
+		errors: { RATE_LIMITED: {} },
 		handler: () => {
 			throw new ORPCError('RATE_LIMITED')
+		}
+	}),
+	bigTagged: fn({
+		name: 'bigTagged',
+		handler: ({ context }) => {
+			context.resHeaders?.set('etag', '"v1"')
+			context.resHeaders?.set('accept-ranges', 'bytes')
+			return { rows }
+		}
+	}),
+	partial: fn({
+		name: 'partial',
+		handler: ({ context }) => {
+			context.resHeaders?.set('content-range', 'bytes 0-99/200')
+			return { rows }
 		}
 	}),
 	upstream: fn({
@@ -575,6 +595,7 @@ for (const adapter of adapters) {
 
 		test('the OpenAPI mount serves REST routes, the spec and docs', async () => {
 			const url = await serve({
+				errorStatusMap: { RATE_LIMITED: 429 },
 				openapi: {
 					prefix: '/api',
 					filter: hasTag('external'),
@@ -582,11 +603,38 @@ for (const adapter of adapters) {
 				}
 			})
 			const spec = await raw(`${url}/api/spec.json`, { method: 'GET' })
-			const paths = Object.keys(decode(spec).paths)
-			expect(paths).toEqual(['/echo', '/cached'])
+			const doc = decode(spec)
+			expect(Object.keys(doc.paths)).toEqual(['/echo', '/cached', '/limited'])
+			// errorStatusMap flows into the generated spec so it agrees with the server.
+			expect(doc.paths['/limited'].get.responses['429']).toBeDefined()
 			const docs = await raw(`${url}/api`, { method: 'GET' })
 			expect(docs.headers['content-type']).toContain('text/html')
 			expect((await raw(`${url}/api/big`, { method: 'GET' })).status).toBe(404)
+		})
+
+		test('compression weakens strong ETags, skips content-range and deduplicates exposed headers', async () => {
+			const url = await serve({
+				plugins: [
+					new CORSHandlerPlugin({ exposeHeaders: ['Server-Timing', 'X-Other'] })
+				]
+			})
+			const tagged = await raw(`${url}/rpc/bigTagged`, {
+				headers: { 'accept-encoding': 'gzip', origin: 'https://app.test' },
+				body: rpcBody()
+			})
+			expect(tagged.headers['content-encoding']).toBe('gzip')
+			expect(tagged.headers.etag).toBe('W/"v1"')
+			expect(tagged.headers['accept-ranges']).toBeUndefined()
+			expect(tagged.headers['access-control-expose-headers']).toBe(
+				'Server-Timing, X-Other'
+			)
+
+			const partial = await raw(`${url}/rpc/partial`, {
+				headers: { 'accept-encoding': 'gzip' },
+				body: rpcBody()
+			})
+			expect(partial.headers['content-encoding']).toBeUndefined()
+			expect(partial.headers['content-range']).toBe('bytes 0-99/200')
 		})
 
 		test('requests outside the prefixes or matching no procedure get a 404', async () => {
@@ -600,6 +648,37 @@ for (const adapter of adapters) {
 }
 
 describe('adapter-specific behaviour', () => {
+	test('SignalSyncHandlerPlugin aborts procedure signal when a streaming response is cancelled', async () => {
+		let signalAborted!: () => void
+		const aborted = new Promise<void>((resolve) => {
+			signalAborted = resolve
+		})
+		const stream = fn({
+			name: 'stream.cancel',
+			stream: true,
+			handler: async function* ({ signal }) {
+				signal?.addEventListener('abort', () => signalAborted(), { once: true })
+				yield 1
+				await aborted
+			}
+		})
+		const handler = createFetchHandler({
+			router: createRouter({ stream }),
+			rpcPrefix: '/rpc'
+		})
+		const response = await handler(
+			new Request('http://localhost/rpc/stream', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: rpcBody()
+			})
+		)
+		const reader = response.body!.getReader()
+		await reader.read()
+		await reader.cancel()
+		await aborted
+	})
+
 	test('createFetchHandler hands the Request to the context factory and validates options', async () => {
 		const seen: string[] = []
 		const handler = createFetchHandler({

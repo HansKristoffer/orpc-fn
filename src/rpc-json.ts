@@ -15,9 +15,16 @@ const LEGACY_CODES: Record<string, number> = {
 	set: 6,
 	map: 7
 }
-const LEGACY_TYPES: Record<number, string> = Object.fromEntries(
-	Object.entries(LEGACY_CODES).map(([type, code]) => [code, type])
-)
+const LEGACY_TYPES: Record<number, string> = {
+	0: 'bigint',
+	1: 'date',
+	2: 'nan',
+	3: 'undefined',
+	4: 'url',
+	5: 'regexp',
+	6: 'set',
+	7: 'map'
+}
 
 export type LegacyMeta = [code: number, ...path: (string | number)[]]
 
@@ -31,9 +38,16 @@ export const rpcJson = new RPCJsonSerializer({
 			condition: (value) => value instanceof RegExp,
 			serialize: (value: RegExp) => value.toString(),
 			deserialize: (serialized) => {
-				const [, source = '', flags] =
-					/^\/(.*)\/([a-z]*)$/s.exec(String(serialized)) ?? []
-				return new RegExp(source, flags)
+				if (typeof serialized !== 'string')
+					throw new TypeError(
+						'Invalid RPC serialized data: type "regexp" expects a string.'
+					)
+				const match = /^\/(.*)\/([a-z]*)$/s.exec(serialized)
+				if (!match)
+					throw new TypeError(
+						'Invalid RPC serialized data: type "regexp" expects "/pattern/flags".'
+					)
+				return new RegExp(match[1] ?? '', match[2])
 			},
 			isTerminal: true
 		}

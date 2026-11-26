@@ -14,7 +14,8 @@ import {
 } from '@orpc/server'
 import {
 	BatchHandlerPlugin,
-	ResponseHeadersHandlerPlugin
+	ResponseHeadersHandlerPlugin,
+	SignalSyncHandlerPlugin
 } from '@orpc/server/plugins'
 import type {
 	StandardHandlerHandleResult,
@@ -262,6 +263,18 @@ function isEventIterator(body: unknown): boolean {
 	)
 }
 
+function exposeHeader(
+	existing: string | string[] | undefined,
+	name: string
+): string {
+	if (existing === undefined) return name
+	const flat = Array.isArray(existing) ? existing.join(', ') : existing
+	if (!flat.trim()) return name
+	const parts = flat.split(',').map((part) => part.trim().toLowerCase())
+	if (parts.includes('*') || parts.includes(name.toLowerCase())) return flat
+	return `${flat}, ${name}`
+}
+
 /**
  * Adds Server-Timing to the final response, and for SSE disables proxy
  * buffering so keep-alive comments reach the edge (empty `:` lines are
@@ -293,11 +306,10 @@ function mountPlugin<T extends Context>(serverTiming: boolean): Plugin<T> {
 						performance.now() - request.started,
 						{ ...request.timing, handler_ms: invocation?.procedureMs }
 					)
-					const exposed = headers['access-control-expose-headers']
-					headers['access-control-expose-headers'] =
-						exposed === undefined
-							? 'Server-Timing'
-							: [exposed, 'Server-Timing'].flat().join(', ')
+					headers['access-control-expose-headers'] = exposeHeader(
+						headers['access-control-expose-headers'],
+						'Server-Timing'
+					)
 				}
 				if (isEventIterator(response.body)) {
 					headers['cache-control'] = 'no-cache'
@@ -391,6 +403,8 @@ export function createMounts<R extends AnyRouter, H>(
 		const plugins: Plugin<T>[] = [...extra, mountPlugin<T>(serverTiming)]
 		if (!extra.some((plugin) => plugin.name === '~response-headers'))
 			plugins.push(new ResponseHeadersHandlerPlugin<T>())
+		if (!extra.some((plugin) => plugin.name === '~signal-sync'))
+			plugins.push(new SignalSyncHandlerPlugin<T>())
 		return {
 			plugins,
 			interceptors: options.onError ? [orpcOnError(report)] : [],
@@ -471,7 +485,8 @@ async function createOpenApiHandler<R extends AnyRouter, H>(
 	}
 	if (openapi.docs !== false) {
 		const generator = new OpenAPIGenerator({ converters })
-		const { base, ...generate } = openapi.spec ?? {}
+		const { base, errorStatusMap, ...generate } = openapi.spec ?? {}
+		const resolvedErrorStatusMap = errorStatusMap ?? options.errorStatusMap
 		let spec: ReturnType<typeof generator.generate> | undefined
 		options.plugins.push(
 			new OpenAPIReferenceHandlerPlugin({
@@ -482,6 +497,9 @@ async function createOpenApiHandler<R extends AnyRouter, H>(
 					spec ??= generator
 						.generate(router, {
 							...generate,
+							...(resolvedErrorStatusMap
+								? { errorStatusMap: resolvedErrorStatusMap }
+								: {}),
 							filter: openapi.filter,
 							base: {
 								info: openapi.info ?? { title: 'API', version: '0.0.0' },

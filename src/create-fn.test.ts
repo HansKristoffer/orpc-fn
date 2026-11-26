@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test'
 import * as otel from '@opentelemetry/api'
-import { call, ORPCError, os } from '@orpc/server'
+import { call, DecoratedProcedure, ORPCError, os } from '@orpc/server'
 import { getOpenAPIMeta, openapi } from '@orpc/openapi'
 import { z } from 'zod'
 import {
@@ -276,6 +276,31 @@ describe('meta', () => {
 		expect(rebuilt).not.toBe(tool)
 		expect(readFnMeta(rebuilt).name).toBe('test.rebuilt')
 		expect(readFnMeta(rebuilt).meta).toEqual({ readOnly: true })
+	})
+
+	test('fn routes are DecoratedProcedures with working .meta(), .errors() and .use()', async () => {
+		const route = fn({
+			name: 'test.decorated',
+			procedure: 'public',
+			handler: () => 'ok'
+		})
+		expect(route).toBeInstanceOf(DecoratedProcedure)
+		const withMeta = route.meta(openapi({ tags: ['extra'] }))
+		expect(getOpenAPIMeta(withMeta)?.tags).toEqual(['extra'])
+		expect(readFnMeta(withMeta).name).toBe('test.decorated')
+
+		let mwRan = false
+		const withMw = withMeta.errors({ EXTRA: {} }).use(async ({ next }) => {
+			mwRan = true
+			return next()
+		})
+		expect(await call(withMw, undefined, { context: {} })).toBe('ok')
+		expect(mwRan).toBe(true)
+	})
+
+	test('isExpectedClientError ignores prototype property names', () => {
+		expect(isExpectedClientError(new ORPCError('toString'))).toBe(true)
+		expect(isExpectedClientError(new ORPCError('constructor'))).toBe(true)
 	})
 
 	test('procedures not made by fn() have no name', () => {
