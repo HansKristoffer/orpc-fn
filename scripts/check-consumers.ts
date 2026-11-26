@@ -23,6 +23,64 @@ async function run(
 	if (code)
 		throw new Error(`Consumer check failed (${code}): ${args.join(' ')}`)
 }
+const tsc = ['node', 'node_modules/typescript/bin/tsc']
+const lockedVersion = (name: string): string =>
+	require(`${root}/node_modules/${name}/package.json`).version
+
+/**
+ * Kanpla's Admin app (Next.js Pages Router), whose pins do not move with
+ * ours: TypeScript 5.4.5, its compiler options (`tests/consumers/kanpla/
+ * tsconfig.json`), Zod 3 and React Query 5.108 with Jotai. oRPC is ours.
+ */
+async function checkKanpla() {
+	await install([
+		tarball,
+		...[
+			'@orpc/server',
+			'@orpc/contract',
+			'@orpc/client',
+			'@orpc/tanstack-query'
+		].map((name) => `${name}@${lockedVersion(name)}`),
+		'typescript@5.4.5',
+		'zod@3.25.76',
+		'next@16.4.5',
+		'react@19.1.1',
+		'react-dom@19.1.1',
+		'@tanstack/react-query@5.108.4',
+		'jotai@2.12.1',
+		'jotai-tanstack-query@0.9.0',
+		'@types/node@22',
+		'@types/react@19'
+	])
+	await cp(join(root, 'tests/consumers/kanpla'), fixture, { recursive: true })
+	await run([...tsc, '-p', 'tsconfig.json'])
+
+	// `skipLibCheck` hides errors inside declarations, ours included: a type
+	// TypeScript 5.4 cannot read would silently become `any`. So check again
+	// without it and fail on what our own declarations report (oRPC's need 5.7).
+	const strict = Bun.spawn(
+		[
+			...tsc,
+			'-p',
+			'tsconfig.json',
+			'--skipLibCheck',
+			'false',
+			'--pretty',
+			'false'
+		],
+		{ cwd: fixture, stdout: 'pipe', stderr: 'inherit' }
+	)
+	const output = await new Response(strict.stdout).text()
+	await strict.exited
+	const ours = output
+		.split('\n')
+		.filter((line) => line.startsWith('node_modules/orpc-fn/'))
+	if (ours.length)
+		throw new Error(
+			`orpc-fn's declarations do not compile on TypeScript 5.4.5:\n${ours.join('\n')}`
+		)
+	console.log('Packed consumer passed (kanpla, TypeScript 5.4.5)')
+}
 const install = (packages: string[]) =>
 	run([
 		'npm',
@@ -46,24 +104,12 @@ const node = process.env.NODE_VERSION
 		]
 	: ['node']
 
-try {
-	await run(
-		[
-			'npm',
-			'pack',
-			'--ignore-scripts',
-			'--silent',
-			'--pack-destination',
-			fixture
-		],
-		root
-	)
-	const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
-	await writeFile(
-		join(fixture, 'package.json'),
-		JSON.stringify({ private: true, type: 'module' })
-	)
-	const profile = process.env.PEER_PROFILE ?? 'locked'
+const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
+const tarball = `${pkg.name}-${pkg.version}.tgz`
+const profile = process.env.PEER_PROFILE ?? 'locked'
+
+/** The package against a peer profile: our locked versions, the floors or the newest. */
+async function checkPeers() {
 	const required = ['@orpc/server', '@orpc/contract', '@orpc/client', 'zod']
 	const optional = [
 		'@orpc/openapi',
@@ -99,14 +145,11 @@ try {
 				return `${name}@${minimum[name] ?? '2.0.0-beta.53'}`
 			}
 			if (profile === 'latest') return `${name}@${pkg.peerDependencies[name]}`
-			const resolved = require(
-				`${root}/node_modules/${name}/package.json`
-			).version
-			return `${name}@${resolved}`
+			return `${name}@${lockedVersion(name)}`
 		})
 
 	// Root and live entries need only the required peers.
-	await install([`${pkg.name}-${pkg.version}.tgz`, ...versions(required)])
+	await install([tarball, ...versions(required)])
 	await cp(join(root, 'tests/consumers/smoke.mjs'), join(fixture, 'smoke.mjs'))
 	await run([...node, 'smoke.mjs'])
 	// The fetch and node mount adapters need no optional peer either.
@@ -160,12 +203,7 @@ try {
 				include: ['types.ts', 'examples/*.ts']
 			})
 		)
-		await run([
-			'node',
-			'node_modules/typescript/bin/tsc',
-			'-p',
-			'tsconfig.json'
-		])
+		await run([...tsc, '-p', 'tsconfig.json'])
 	}
 	// Our own declarations must compile without skipLibCheck.
 	await writeFile(
@@ -190,7 +228,7 @@ try {
 			]
 		})
 	)
-	await run(['node', 'node_modules/typescript/bin/tsc', '-p', 'tsconfig.json'])
+	await run([...tsc, '-p', 'tsconfig.json'])
 	// zod 3.25 (the bridge release shipping `zod/v4`) satisfies the peer range:
 	// v3 schemas in core routes, `zod/v4` schemas for live, and the adapters.
 	await install([`zod@${profile === 'minimum' ? '3.25.3' : '3.25.76'}`])
@@ -214,12 +252,7 @@ try {
 				files: [file]
 			})
 		)
-		await run([
-			'node',
-			'node_modules/typescript/bin/tsc',
-			'-p',
-			'tsconfig.json'
-		])
+		await run([...tsc, '-p', 'tsconfig.json'])
 	}
 	await checkBundler('zod3.ts')
 	if (profile === 'minimum') {
@@ -233,6 +266,25 @@ try {
 		)
 	).version
 	console.log(`Packed consumers passed (${profile}, TypeScript ${typescript})`)
+}
+
+try {
+	await run(
+		[
+			'npm',
+			'pack',
+			'--ignore-scripts',
+			'--silent',
+			'--pack-destination',
+			fixture
+		],
+		root
+	)
+	await writeFile(
+		join(fixture, 'package.json'),
+		JSON.stringify({ private: true, type: 'module' })
+	)
+	await (profile === 'kanpla' ? checkKanpla() : checkPeers())
 } finally {
 	await rm(fixture, { recursive: true, force: true })
 }

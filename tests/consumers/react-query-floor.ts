@@ -1,6 +1,7 @@
 // orpc-fn/react against @tanstack/react-query 5.66, its declared floor, with
-// plain TanStack query options. (@orpc/tanstack-query asks for 5.80.2 itself,
-// so the main type suite pairs it with 5.80.)
+// plain TanStack query options. (@orpc/tanstack-query 2 needs query-core
+// 5.105 and fails at import on 5.90 and earlier, so the main type suite
+// pairs it with 5.105.)
 import { keepPreviousData } from '@tanstack/react-query'
 import {
 	useInvalidationStream,

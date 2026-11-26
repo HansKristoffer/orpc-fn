@@ -1,0 +1,22 @@
+{
+	"compilerOptions": {
+		"target": "es2019",
+		"module": "esnext",
+		"moduleResolution": "bundler",
+		"lib": ["es2022", "dom"],
+		"strict": true,
+		"isolatedModules": true,
+		"skipLibCheck": true,
+		"skipDefaultLibCheck": true,
+		"jsx": "preserve",
+		"esModuleInterop": true,
+		"experimentalDecorators": true,
+		"emitDecoratorMetadata": true,
+		"forceConsistentCasingInFileNames": true,
+		"noFallthroughCasesInSwitch": true,
+		"allowUnreachableCode": false,
+		"types": ["node"],
+		"noEmit": true
+	},
+	"include": ["server", "client", "pages"]
+}
