@@ -1,3 +1,4 @@
+import type { LibraryBrand } from '../compatibility.js'
 import type { Schema } from '@orpc/contract'
 import { type DecoratedProcedure, ORPCError } from '@orpc/server'
 import type { ZodObject, ZodRawShape, ZodType, z } from 'zod/v4'
@@ -171,17 +172,15 @@ export type PubSub<
 > = {
 	subscribe: DecoratedProcedure<
 		TDef['procedures'][TKey]['initial'],
-		TDef['procedures'][TKey]['current'],
+		TDef['procedures'][TKey]['injected'],
 		TInputSchema,
 		Schema<
 			AsyncGenerator<z.output<TEventSchema>, void, unknown>,
 			AsyncGenerator<z.output<TEventSchema>, void, unknown>
 		>,
-		TDef['procedures'][TKey]['errors'],
-		TDef['procedures'][TKey]['meta'] & {
-			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
-		}
-	>
+		TDef['procedures'][TKey]['errors']
+	> &
+		LibraryBrand<StoredFnMeta<TDef['meta'], TKey>>
 	publish: (data: z.input<TEventSchema>) => Promise<void>
 	/** Publish a batch in one atomic round-trip; items may target different channels. */
 	publishMany: (items: readonly z.input<TEventSchema>[]) => Promise<void>

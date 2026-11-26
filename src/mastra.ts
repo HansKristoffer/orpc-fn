@@ -1,6 +1,7 @@
 import type { RequestContext } from '@mastra/core/request-context'
 import { createTool, type Tool } from '@mastra/core/tools'
 import { type AnyProcedure, call } from '@orpc/server'
+import { procedureDefinition, soleSchema } from './compatibility.js'
 import {
 	isObjectJsonSchema,
 	passThroughOutputSchema,
@@ -85,9 +86,18 @@ export function createMastraTool<TProc extends AnyProcedure>(
 			'Procedure must be created with fn() to use createMastraTool'
 		)
 	}
+	const definition = procedureDefinition(procedure)
+	const procedureInput = soleSchema(
+		definition.inputSchemas,
+		`Mastra tool ${name}`
+	)
+	const procedureOutput = soleSchema(
+		definition.outputSchemas,
+		`Mastra tool ${name}`
+	)
 	let inputSchema: ToolSchema | undefined
-	if (meta.inputSchema) {
-		inputSchema = rawInputSchema(meta.inputSchema)
+	if (procedureInput) {
+		inputSchema = rawInputSchema(procedureInput)
 		if (!isObjectJsonSchema(inputSchema['~standard'].jsonSchema.input())) {
 			throw new Error(`${name} must take an object input to be an agent tool`)
 		}
@@ -117,8 +127,8 @@ export function createMastraTool<TProc extends AnyProcedure>(
 					}
 				}
 			} satisfies ToolSchema),
-		...(meta.outputSchema
-			? { outputSchema: passThroughOutputSchema(meta.outputSchema) }
+		...(procedureOutput
+			? { outputSchema: passThroughOutputSchema(procedureOutput) }
 			: {}),
 		execute: async (input, ctx) => {
 			const startedAt = performance.now()
@@ -158,7 +168,7 @@ export function createMastraTool<TProc extends AnyProcedure>(
 			try {
 				const result = await call(
 					procedure,
-					meta.inputSchema ? input : undefined,
+					procedureInput ? input : undefined,
 					ctx?.abortSignal ? { context, signal: ctx.abortSignal } : { context }
 				)
 				finish('success')

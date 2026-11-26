@@ -142,7 +142,7 @@ describe('procedureCommands', () => {
 	})
 
 	test('rejects kebab-case command collisions and unresolved lazy routers', async () => {
-		const { lazy } = await import('@orpc/server')
+		const { os } = await import('@orpc/server')
 		const colliding = createRouter({
 			getUser: fn({ name: 'getUser', meta: { cli: true }, handler: () => 1 }),
 			'get-user': fn({
@@ -154,7 +154,7 @@ describe('procedureCommands', () => {
 		expect(() => procedureCommands(colliding)).toThrow('collision')
 
 		const lazyRouter = {
-			nested: lazy(async () => ({ default: router }))
+			nested: os.lazy(async () => ({ default: router }))
 		}
 		expect(() => procedureCommands(lazyRouter)).toThrow('unlazyRouter')
 	})

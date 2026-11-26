@@ -4,8 +4,9 @@ import {
 } from './assemble-procedure.js'
 import { isAsyncIteratorObject } from './stream.js'
 import { normalizeRoute } from './route-options.js'
+import type { AnyProcedureContract } from '@orpc/contract'
 import { type AnyProcedure, ORPCError, os } from '@orpc/server'
-import { procedureDefinition } from './compatibility.js'
+import { decorateProcedure, procedureDefinition } from './compatibility.js'
 import { type BoundCall, createBoundCall } from './bound-call.js'
 import { isExpectedClientError, markExpected } from './expected-client-error.js'
 import { createFnLive, type FnLive, fnLivePatch } from './live/fn-live.js'
@@ -290,7 +291,7 @@ export type FnFactory<TDef extends FnDefinition> = {
 	createPublisher: CreatePublisher
 	createRouter: typeof createRouter
 	/** `readFnMeta`, with guard values typed by this factory's guards. */
-	readMeta: <T extends AnyProcedure>(
+	readMeta: <T extends AnyProcedure | AnyProcedureContract>(
 		procedure: T
 	) => Omit<ReturnType<typeof readFnMeta<T>>, 'guards' | 'dynamicGuards'> & {
 		guards: GuardOptions<TDef['guards']>
@@ -379,7 +380,9 @@ export function createFn<
 		} catch {
 			expected = isExpectedClientError(error)
 		}
-		if (expected) markExpected(error)
+		// Only the app's own rule is remembered: adapters apply the default
+		// themselves, under their `errorStatusMap`.
+		if (expected && runtime.isExpectedError) markExpected(error)
 		return expected
 	}
 	const tracing = createTracing(runtime.otel, isExpectedError)
@@ -421,7 +424,7 @@ export function createFn<
 		throw new TypeError(`orpc-fn: unknown default procedure ${runtime.default}`)
 	for (const [key, builder] of Object.entries(runtime.procedures)) {
 		const def = procedureDefinition(builder)
-		if (def?.inputSchema !== undefined || def?.outputSchema !== undefined) {
+		if (def.inputSchemas.length > 0 || def.outputSchemas.length > 0) {
 			throw new Error(
 				`orpc-fn: procedure "${key}" sets an input or output schema; set schemas on routes instead`
 			)
@@ -624,70 +627,75 @@ export function createFn<
 		})
 		// Prepending middleware shifts oRPC's validation indexes, covering auth,
 		// input validation, output validation, and the final stream lifetime.
-		return os
-			.use(async ({ context, next }) => {
-				const started = performance.now()
-				const state: Invocation = {
-					span: undefined,
-					logger: defaultLogger,
-					input: undefined,
-					context,
-					handlerStarted: false
-				}
-				const result = await tracing.inSpan(
-					name,
-					'SERVER',
-					async (span) => {
-						state.span = span
-						state.logger = createLogger('fn', span)
-						span?.setAttribute('fn.operation', name)
-						span?.setAttribute('fn.procedure', key)
-						try {
-							const result = await next({ context: { [INVOCATION]: state } })
-							if (isAsyncIteratorObject(result.output) !== stream) {
-								if (isAsyncIteratorObject(result.output)) {
-									try {
-										await result.output.return?.()
-									} catch {
-										/* Release the unexpected stream. */
-									}
-								}
-								throw new TypeError(
-									`orpc-fn: ${name} returned a result inconsistent with stream; declare stream: true for iterators`
-								)
-							}
-							return result.output
-						} finally {
-							const timing = (context as Record<symbol, unknown>)[
-								REQUEST_TIMING
-							] as InvocationTiming | undefined
-							if (timing && !(context as Record<symbol, unknown>)[INVOCATION]) {
-								timing.procedureMs += performance.now() - started
-								timing.calls++
-							}
-						}
-					},
-					(span, ...error) => {
-						const durationMs =
-							Math.round((performance.now() - started) * 100) / 100
-						span?.setAttribute('fn.duration_ms', durationMs)
-						logCompleted(state.logger, {
-							name,
-							procedure: key,
-							durationMs,
-							success: error.length === 0,
-							error: error[0],
-							input: state.input,
-							context: state.context,
-							span,
-							meta,
-							handlerStarted: state.handlerStarted
-						})
+		return decorateProcedure(
+			os
+				.use(async ({ context, next }) => {
+					const started = performance.now()
+					const state: Invocation = {
+						span: undefined,
+						logger: defaultLogger,
+						input: undefined,
+						context,
+						handlerStarted: false
 					}
-				)
-				return { output: result, context }
-			})
-			.router({ route: built }).route
+					const result = await tracing.inSpan(
+						name,
+						'SERVER',
+						async (span) => {
+							state.span = span
+							state.logger = createLogger('fn', span)
+							span?.setAttribute('fn.operation', name)
+							span?.setAttribute('fn.procedure', key)
+							try {
+								const result = await next({ context: { [INVOCATION]: state } })
+								if (isAsyncIteratorObject(result.output) !== stream) {
+									if (isAsyncIteratorObject(result.output)) {
+										try {
+											await result.output.return?.()
+										} catch {
+											/* Release the unexpected stream. */
+										}
+									}
+									throw new TypeError(
+										`orpc-fn: ${name} returned a result inconsistent with stream; declare stream: true for iterators`
+									)
+								}
+								return result.output
+							} finally {
+								const timing = (context as Record<symbol, unknown>)[
+									REQUEST_TIMING
+								] as InvocationTiming | undefined
+								if (
+									timing &&
+									!(context as Record<symbol, unknown>)[INVOCATION]
+								) {
+									timing.procedureMs += performance.now() - started
+									timing.calls++
+								}
+							}
+						},
+						(span, ...error) => {
+							const durationMs =
+								Math.round((performance.now() - started) * 100) / 100
+							span?.setAttribute('fn.duration_ms', durationMs)
+							logCompleted(state.logger, {
+								name,
+								procedure: key,
+								durationMs,
+								success: error.length === 0,
+								error: error[0],
+								input: state.input,
+								context: state.context,
+								span,
+								meta,
+								handlerStarted: state.handlerStarted
+							})
+						}
+					)
+					return { output: result, context }
+				})
+				.router({ route: built }).route
+		)
 	}
 
 	const logCompleted = (logger: FnLogger, event: FnCompletedEvent) => {
@@ -736,7 +744,8 @@ export function createFn<
 		pubsub: runtime.pubsub
 	})
 
-	const readMeta = (procedure: AnyProcedure): FnMeta => readFnMeta(procedure)
+	const readMeta = (procedure: AnyProcedure | AnyProcedureContract): FnMeta =>
+		readFnMeta(procedure)
 
 	// The runtimes are untyped; `Fn`, `FnLive`, `CreatePubSub` and
 	// `CreatePublisher` are their typed surface.

@@ -1,3 +1,4 @@
+import type { LibraryBrand } from '../compatibility.js'
 import type { AnySchema, ErrorMap, Schema } from '@orpc/contract'
 import {
 	type AnyProcedure,
@@ -165,24 +166,20 @@ export type FnLiveReturn<
 > = {
 	procedure: DecoratedProcedure<
 		TDef['procedures'][TKey]['initial'],
-		TDef['procedures'][TKey]['current'],
+		TDef['procedures'][TKey]['injected'],
 		TInput,
 		TOutputSchema,
-		ResolvedErrorMap<TDef, TKey, TErrors>,
-		TDef['procedures'][TKey]['meta'] & {
-			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
-		}
-	>
+		ResolvedErrorMap<TDef, TKey, TErrors>
+	> &
+		LibraryBrand<StoredFnMeta<TDef['meta'], TKey>>
 	subscribe: DecoratedProcedure<
 		TDef['procedures'][TKey]['initial'],
-		TDef['procedures'][TKey]['current'],
+		TDef['procedures'][TKey]['injected'],
 		TInput,
 		Schema<AsyncGenerator<TOutput | TEmit>, AsyncGenerator<TOutput | TEmit>>,
-		ResolvedErrorMap<TDef, TKey, TErrors>,
-		TDef['procedures'][TKey]['meta'] & {
-			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
-		}
-	>
+		ResolvedErrorMap<TDef, TKey, TErrors>
+	> &
+		LibraryBrand<StoredFnMeta<TDef['meta'], TKey>>
 	publish: (event: z.input<TEventSchema>) => Promise<void>
 	getSubscriptionChannelName: (params: {
 		input: z.output<TInput>

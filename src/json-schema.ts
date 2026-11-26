@@ -1,6 +1,11 @@
 import type { AnySchema } from '@orpc/contract'
-import { JsonSchemaCoercer } from '@orpc/json-schema'
-import { ZodToJsonSchemaConverter } from '@orpc/zod/zod4'
+import {
+	DelegatingJsonSchemaConverter,
+	extractJsonObjectSchemaEntries,
+	JsonSchemaCoercer,
+	StandardJsonSchemaConverter
+} from '@orpc/json-schema'
+import { ZodToJsonSchemaConverter } from '@orpc/zod'
 import type { SchemaIssue } from './issues.js'
 
 export type JsonSchema = Record<string, unknown>
@@ -30,19 +35,30 @@ export type ToolSchema<TIn = unknown, TOut = TIn> = {
 	}
 }
 
-const converter = new ZodToJsonSchemaConverter()
+const converter = new DelegatingJsonSchemaConverter([
+	new ZodToJsonSchemaConverter(),
+	new StandardJsonSchemaConverter()
+])
 const coercer = new JsonSchemaCoercer()
 
 /** Converted on first use: an app building many tools at import pays per tool used. */
-function lazyJsonSchema(
+function lazyConversion(
 	schema: AnySchema,
-	strategy: 'input' | 'output'
-): () => JsonSchema {
-	let converted: JsonSchema | undefined
+	direction: 'input' | 'output'
+): () => [schema: JsonSchema, optional: boolean] {
+	let converted: [JsonSchema, boolean] | undefined
 	return () => {
-		converted ??= converter.convert(schema, { strategy })[1] as JsonSchema
+		converted ??= converter.convert(schema, direction) as [JsonSchema, boolean]
 		return converted
 	}
+}
+
+function lazyJsonSchema(
+	schema: AnySchema,
+	direction: 'input' | 'output'
+): () => JsonSchema {
+	const conversion = lazyConversion(schema, direction)
+	return () => conversion()[0]
 }
 
 /**
@@ -54,13 +70,14 @@ function lazyJsonSchema(
  * so values are coerced back before validating.
  */
 export function rawInputSchema<TIn>(schema: AnySchema): ToolSchema<TIn> {
-	const jsonSchema = lazyJsonSchema(schema, 'input')
+	const conversion = lazyConversion(schema, 'input')
+	const jsonSchema = () => conversion()[0]
 	return {
 		'~standard': {
 			version: 1,
 			vendor: 'orpc-fn',
 			validate: (value) => {
-				const coerced = coercer.coerce(jsonSchema(), value) as TIn
+				const coerced = coercer.coerce(conversion(), value) as TIn
 				const finish = (
 					result: Awaited<ReturnType<AnySchema['~standard']['validate']>>
 				) => (result.issues ? { issues: result.issues } : { value: coerced })
@@ -87,63 +104,7 @@ export function passThroughOutputSchema<TOut>(
 	}
 }
 
-function resolveLocalRef(
-	root: JsonSchema,
-	ref: string
-): JsonSchema | undefined {
-	if (!ref.startsWith('#/')) return undefined
-	let current: unknown = root
-	for (const segment of ref.slice(2).split('/')) {
-		if (typeof current !== 'object' || current === null) return undefined
-		const key = segment.replace(/~1/g, '/').replace(/~0/g, '~')
-		current = (current as Record<string, unknown>)[key]
-	}
-	return typeof current === 'object' && current !== null
-		? (current as JsonSchema)
-		: undefined
-}
-
-function checkObjectJsonSchema(
-	schema: JsonSchema,
-	root: JsonSchema,
-	visited: Set<JsonSchema>
-): boolean {
-	if (visited.has(schema)) return false
-	visited.add(schema)
-	if (schema.type === 'object') return true
-	if (typeof schema.$ref === 'string') {
-		const target = resolveLocalRef(root, schema.$ref)
-		if (target) return checkObjectJsonSchema(target, root, visited)
-	}
-	const union = schema.anyOf ?? schema.oneOf
-	if (
-		Array.isArray(union) &&
-		union.length > 0 &&
-		union.every(
-			(branch) =>
-				typeof branch === 'object' &&
-				branch !== null &&
-				checkObjectJsonSchema(branch as JsonSchema, root, visited)
-		)
-	) {
-		return true
-	}
-	if (
-		Array.isArray(schema.allOf) &&
-		schema.allOf.length > 0 &&
-		schema.allOf.every(
-			(branch) =>
-				typeof branch === 'object' &&
-				branch !== null &&
-				checkObjectJsonSchema(branch as JsonSchema, root, visited)
-		)
-	) {
-		return true
-	}
-	return false
-}
-
 /** Tool protocols permit unions/intersections only when every branch accepts an object. */
 export function isObjectJsonSchema(schema: JsonSchema): boolean {
-	return checkObjectJsonSchema(schema, schema, new Set())
+	return extractJsonObjectSchemaEntries(schema) !== undefined
 }

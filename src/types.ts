@@ -4,19 +4,22 @@ import type {
 	InferSchemaInput,
 	InferSchemaOutput,
 	MergedErrorMap,
-	Meta,
+	ORPCErrorConstructorMap,
 	Schema
 } from '@orpc/contract'
 import type {
 	AnyProcedure,
 	Context,
 	DecoratedProcedure,
-	Procedure,
-	Route
+	MergedContext,
+	Procedure
 } from '@orpc/server'
-import type { createORPCErrorConstructorMap } from '@orpc/server'
 import type { StoredFnMeta } from './meta.js'
-import type { NativeErrors, NativeMeta } from './compatibility.js'
+import type {
+	LibraryBrand,
+	NativeErrors,
+	OpenAPIRoute
+} from './compatibility.js'
 import type { BoundCall } from './bound-call.js'
 import type { FnLogger } from './logger.js'
 import type { SpanLike } from './otel.js'
@@ -30,11 +33,12 @@ export type MaybePromise<T> = T | Promise<T>
  */
 /* biome-ignore-start lint/suspicious/noExplicitAny: matches every builder's generic methods */
 export type BuilderLike = {
-	route(route: any): unknown
-	meta(meta: any): unknown
+	// Only schema-free builders have `router`; it keeps `os.output(...)` out.
+	router(router: any): unknown
+	meta(...plugins: any[]): unknown
 	input(schema: any): unknown
 	output(schema: any): unknown
-	handler(handler: any): Procedure<any, any, any, any, any, any>
+	handler(handler: any): Procedure<any, any, any, any, any>
 }
 /* biome-ignore-end lint/suspicious/noExplicitAny: matches every builder's generic methods */
 
@@ -45,8 +49,7 @@ export type ProcedureInput<T> =
 		infer _TCurrent,
 		infer TInputSchema extends AnySchema,
 		infer _TOut,
-		infer _TErrors,
-		infer _TMeta
+		infer _TErrors
 	>
 		? InferSchemaInput<TInputSchema>
 		: unknown
@@ -58,8 +61,7 @@ export type ProcedureOutput<T> =
 		infer _TCurrent,
 		infer _TIn,
 		infer TOutputSchema extends AnySchema,
-		infer _TErrors,
-		infer _TMeta
+		infer _TErrors
 	>
 		? InferSchemaOutput<TOutputSchema>
 		: unknown
@@ -71,8 +73,7 @@ export type ProcedureContext<T> =
 		infer _TCurrent,
 		infer _TIn,
 		infer _TOut,
-		infer _TErrors,
-		infer _TMeta
+		infer _TErrors
 	>
 		? TContext
 		: never
@@ -82,7 +83,7 @@ export type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
 	? Omit<T, K>
 	: never
 
-/** `fn()` options passed to oRPC's `.route()`; `RouteConfig` is derived from it. */
+/** `fn()` options stored as the route's OpenAPI meta; `RouteConfig` is derived from it. */
 export const ROUTE_OPTION_KEYS = [
 	'path',
 	'method',
@@ -94,7 +95,7 @@ export const ROUTE_OPTION_KEYS = [
 	'inputStructure',
 	'outputStructure',
 	'tags'
-] as const satisfies readonly (keyof Route)[]
+] as const satisfies readonly (keyof OpenAPIRoute)[]
 
 /**
  * `fn()` option names owned by the route itself. Guard keys must not
@@ -135,7 +136,7 @@ export type BuildProcedure = (options: {
 		context: Record<string | symbol, unknown>
 		signal?: AbortSignal
 		lastEventId?: string
-		errors: ReturnType<typeof createORPCErrorConstructorMap>
+		errors: ORPCErrorConstructorMap<ErrorMap>
 	}) => unknown
 }) => AnyProcedure
 
@@ -181,41 +182,40 @@ export type InitialContextOf<TBuilder> = ProcedureContext<ProcedureOf<TBuilder>>
 /** Context the handler sees, after the builder's middleware. */
 export type CurrentContextOf<TBuilder> =
 	ProcedureOf<TBuilder> extends Procedure<
-		infer _TInitial,
-		infer TContext,
+		infer TInitial extends Context,
+		infer TInjected extends Context,
 		infer _TIn,
 		infer _TOut,
-		infer _TErrors,
-		infer _TMeta
+		infer _TErrors
 	>
-		? TContext
+		? MergedContext<TInitial, TInjected>
 		: never
 
 export type ErrorMapOf<TBuilder> = NativeErrors<ProcedureOf<TBuilder>>
-export type MetaOf<TBuilder> = NativeMeta<ProcedureOf<TBuilder>>
 
 /** Pre-extracted builder types so `fn()`/`fnLive()`/`createPubSub()` do not re-extract `ProcedureOf<TBuilder>` per route. */
 export type ProcedureSpec = {
 	initial: Context
+	/** What the builder's middleware adds (oRPC's second procedure type argument). */
+	injected: Context
+	/** What the handler sees: `initial` with `injected` merged over it. */
 	current: Context
 	errors: ErrorMap
-	meta: Meta
 }
 
 export type ProcedureSpecOf<TBuilder> =
 	ProcedureOf<TBuilder> extends Procedure<
 		infer TInitial extends Context,
-		infer TCurrent extends Context,
+		infer TInjected extends Context,
 		infer _TIn,
 		infer _TOut,
-		infer TErrors extends ErrorMap,
-		infer TMeta extends Meta
+		infer TErrors extends ErrorMap
 	>
 		? {
 				initial: TInitial
-				current: TCurrent
+				injected: TInjected
+				current: MergedContext<TInitial, TInjected>
 				errors: TErrors
-				meta: TMeta
 			}
 		: never
 
@@ -322,9 +322,7 @@ type HandlerBaseParams<
 	span: TDef['span'] | undefined
 	logger: TDef['logger']
 	lastEventId: string | undefined
-	errors: ReturnType<
-		typeof createORPCErrorConstructorMap<ResolvedErrorMap<TDef, TKey, TErrors>>
-	>
+	errors: ORPCErrorConstructorMap<ResolvedErrorMap<TDef, TKey, TErrors>>
 }
 
 export type HandlerParams<
@@ -338,7 +336,7 @@ export type HandlerParams<
 
 /** Route options shared by every `fn()` overload. */
 export type RouteConfig<TTag extends string = string> = Pick<
-	Route,
+	OpenAPIRoute,
 	Exclude<(typeof ROUTE_OPTION_KEYS)[number], 'tags'>
 > & {
 	/** Required. Becomes the OpenAPI operationId and the span name (e.g. 'user.create'). */
@@ -391,14 +389,12 @@ export type FnProcedure<
 	TErrors extends ErrorMap = Record<never, never>
 > = DecoratedProcedure<
 	TDef['procedures'][TKey]['initial'],
-	TDef['procedures'][TKey]['current'],
+	TDef['procedures'][TKey]['injected'],
 	TInputSchema,
 	TOutputSchema,
-	ResolvedErrorMap<TDef, TKey, TErrors>,
-	TDef['procedures'][TKey]['meta'] & {
-		'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
-	}
->
+	ResolvedErrorMap<TDef, TKey, TErrors>
+> &
+	LibraryBrand<StoredFnMeta<TDef['meta'], TKey>>
 
 type InputOf<T> = [T] extends [AnySchema] ? InferSchemaOutput<T> : unknown
 type ReturnOf<TOut, TReturn> = [TOut] extends [AnySchema]
@@ -435,14 +431,12 @@ export interface Fn<TDef extends FnDefinition> {
 		} & FnRouteOptions<TDef, TKey, InferSchemaOutput<TInput>, TErrors>
 	): DecoratedProcedure<
 		TDef['procedures'][TKey]['initial'],
-		TDef['procedures'][TKey]['current'],
+		TDef['procedures'][TKey]['injected'],
 		TInput,
 		TOut,
-		ResolvedErrorMap<TDef, TKey, TErrors>,
-		TDef['procedures'][TKey]['meta'] & {
-			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
-		}
-	>
+		ResolvedErrorMap<TDef, TKey, TErrors>
+	> &
+		LibraryBrand<StoredFnMeta<TDef['meta'], TKey>>
 
 	// 2. With input, inferred output
 	<
@@ -465,14 +459,12 @@ export interface Fn<TDef extends FnDefinition> {
 		} & FnRouteOptions<TDef, TKey, InferSchemaOutput<TInput>, TErrors>
 	): DecoratedProcedure<
 		TDef['procedures'][TKey]['initial'],
-		TDef['procedures'][TKey]['current'],
+		TDef['procedures'][TKey]['injected'],
 		TInput,
 		Schema<TReturn, TReturn>,
-		ResolvedErrorMap<TDef, TKey, TErrors>,
-		TDef['procedures'][TKey]['meta'] & {
-			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
-		}
-	>
+		ResolvedErrorMap<TDef, TKey, TErrors>
+	> &
+		LibraryBrand<StoredFnMeta<TDef['meta'], TKey>>
 
 	// 3. No input, with output schema
 	<
@@ -489,14 +481,12 @@ export interface Fn<TDef extends FnDefinition> {
 		} & FnRouteOptions<TDef, TKey, unknown, TErrors>
 	): DecoratedProcedure<
 		TDef['procedures'][TKey]['initial'],
-		TDef['procedures'][TKey]['current'],
+		TDef['procedures'][TKey]['injected'],
 		Schema<unknown, unknown>,
 		TOut,
-		ResolvedErrorMap<TDef, TKey, TErrors>,
-		TDef['procedures'][TKey]['meta'] & {
-			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
-		}
-	>
+		ResolvedErrorMap<TDef, TKey, TErrors>
+	> &
+		LibraryBrand<StoredFnMeta<TDef['meta'], TKey>>
 
 	// 4. No input, inferred output
 	<
@@ -513,14 +503,12 @@ export interface Fn<TDef extends FnDefinition> {
 		} & FnRouteOptions<TDef, TKey, unknown, TErrors>
 	): DecoratedProcedure<
 		TDef['procedures'][TKey]['initial'],
-		TDef['procedures'][TKey]['current'],
+		TDef['procedures'][TKey]['injected'],
 		Schema<unknown, unknown>,
 		Schema<TReturn, TReturn>,
-		ResolvedErrorMap<TDef, TKey, TErrors>,
-		TDef['procedures'][TKey]['meta'] & {
-			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
-		}
-	>
+		ResolvedErrorMap<TDef, TKey, TErrors>
+	> &
+		LibraryBrand<StoredFnMeta<TDef['meta'], TKey>>
 
 	// 5. Never matches valid code first; it only words the type errors, which
 	// TypeScript reports against the last overload.
@@ -541,14 +529,12 @@ export interface Fn<TDef extends FnDefinition> {
 		} & FnRouteOptions<TDef, TKey, InputOf<TInput>, TErrors>
 	): DecoratedProcedure<
 		TDef['procedures'][TKey]['initial'],
-		TDef['procedures'][TKey]['current'],
+		TDef['procedures'][TKey]['injected'],
 		[TInput] extends [AnySchema] ? TInput : Schema<unknown, unknown>,
 		[TOut] extends [AnySchema] ? TOut : Schema<TReturn, TReturn>,
-		ResolvedErrorMap<TDef, TKey, TErrors>,
-		TDef['procedures'][TKey]['meta'] & {
-			'orpc-fn': StoredFnMeta<TDef['meta'], TKey>
-		}
-	>
+		ResolvedErrorMap<TDef, TKey, TErrors>
+	> &
+		LibraryBrand<StoredFnMeta<TDef['meta'], TKey>>
 }
 
 /** What `fn.completed` reports, and what `onCompleted` receives. */

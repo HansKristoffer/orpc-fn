@@ -6,6 +6,8 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { createServer, request } from 'node:http'
 import zlib from 'node:zlib'
 import { createORPCClient } from '@orpc/client'
+import { RPCLink } from '@orpc/client/fetch'
+import { BatchLinkPlugin } from '@orpc/client/plugins'
 import { os } from '@orpc/server'
 import { createFn } from 'orpc-fn'
 import { createRpcLink } from 'orpc-fn/client'
@@ -50,7 +52,31 @@ const server = createServer((req, res) =>
 	store.run({ requestId: req.headers['x-request-id'] }, () => handler(req, res))
 )
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
-const url = `http://127.0.0.1:${server.address().port}/api/rpc`
+const origin = `http://127.0.0.1:${server.address().port}`
+const url = `${origin}/api/rpc`
+
+// The request oRPC's client sends for a streaming batch, captured to replay.
+async function captureStreamingBatch(paths) {
+	let captured
+	const client = createORPCClient(
+		new RPCLink({
+			origin,
+			url: '/api/rpc',
+			fetch: async (input, init) => {
+				const request = new Request(input, init)
+				captured = {
+					path: new URL(input).pathname,
+					headers: Object.fromEntries(request.headers),
+					body: Buffer.from(await request.arrayBuffer())
+				}
+				throw new Error('captured')
+			},
+			plugins: [new BatchLinkPlugin({ mode: 'streaming', groups: [{ condition: () => true, context: {} }] })]
+		})
+	)
+	await Promise.allSettled(paths.map((path) => client[path]()))
+	return captured
+}
 
 function raw(path, headers, body) {
 	return new Promise((resolve, reject) => {
@@ -68,7 +94,8 @@ try {
 	let requests = 0
 	const client = createORPCClient(
 		createRpcLink({
-			url,
+			origin,
+			url: '/api/rpc',
 			headers: { 'x-request-id': 'req-1' },
 			fetch: (input, init) => {
 				requests++
@@ -93,13 +120,11 @@ try {
 	assert.match(cached.headers['server-timing'], /^total;dur=/)
 
 	// A streaming batch is flushed per result: the fast one arrives first.
+	const batch = await captureStreamingBatch(['big', 'slow'])
 	const firstResult = await new Promise((resolve, reject) => {
 		const req = request(
-			`${url}/__batch__`,
-			{
-				method: 'POST',
-				headers: { 'accept-encoding': 'br', 'content-type': 'application/json', 'x-orpc-batch': 'streaming' }
-			},
+			`${origin}${batch.path}`,
+			{ method: 'POST', headers: { ...batch.headers, 'accept-encoding': 'br' } },
 			(res) => {
 				assert.equal(res.headers['content-encoding'], 'br')
 				let text = ''
@@ -115,12 +140,7 @@ try {
 			}
 		)
 		req.on('error', reject)
-		req.end(
-			JSON.stringify([
-				{ url: 'http://localhost/api/rpc/big', body: { json: null } },
-				{ url: 'http://localhost/api/rpc/slow', body: { json: null } }
-			])
-		)
+		req.end(batch.body)
 	})
 	assert.ok(!firstResult.includes('"done"'))
 

@@ -15,7 +15,6 @@ type StreamProcedure<TEvent> = Procedure<
 	any,
 	any,
 	Schema<any, AsyncIterable<TEvent>>,
-	any,
 	any
 >
 /* biome-ignore-end lint/suspicious/noExplicitAny: matches any context, input, errors and meta */

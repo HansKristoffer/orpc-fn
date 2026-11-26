@@ -14,7 +14,8 @@ import {
 	type Encoding,
 	MIN_COMPRESS_BYTES,
 	negotiateEncoding,
-	varyWithAcceptEncoding
+	varyWithAcceptEncoding,
+	weakenEtag
 } from './compression.js'
 
 /** Node request headers as Web `Headers` (HTTP/2 pseudo-headers dropped). */
@@ -81,10 +82,12 @@ function callbackOf(args: WriteArgs): Callback | undefined {
 
 /**
  * Runs `send` (oRPC writing its response to `res`) and compresses JSON and
- * batch event streams on the way out, as the Fetch adapter does. oRPC's node
- * handler calls `writeHead(status, headers)` once and then `end(body)` or
- * pipes a stream, so those are wrapped for this response only; oRPC's own
- * `CompressionPlugin` does the same, but skips batch streams.
+ * streaming batches on the way out, as the Fetch adapter does. oRPC's node
+ * handler sets the status and headers on `res`, then calls `end(body)` or
+ * pipes a stream, so `write` and `end` are wrapped for this response only and
+ * decide on the first call, when the headers are known. A `writeHead` before
+ * that is held back until then. oRPC's own `ResponseCompressionHandlerPlugin`
+ * is not used (see docs/decisions.md).
  */
 export async function withNodeCompression<T>(
 	request: { method?: string | undefined; headers: IncomingHttpHeaders },
@@ -97,56 +100,77 @@ export async function withNodeCompression<T>(
 	)
 	if (!encoding) return send()
 
-	const batch = request.headers['x-orpc-batch'] !== undefined
 	const { writeHead, write, end } = res
 	const restore = () => {
 		res.writeHead = writeHead
 		res.write = write
 		res.end = end
 	}
-	const writeHeadRaw = writeHead as WriteHead
+	const writeRaw = write as Write
 	const endRaw = end as End
+	const header = (name: string) => flatten(res.getHeader(name))
+
+	// A compressed body has the compressed length, or none for a stream.
+	const setEncodedHeaders = (length?: number) => {
+		res.setHeader('content-encoding', encoding)
+		if (length === undefined) res.removeHeader('content-length')
+		else res.setHeader('content-length', length)
+		const vary = varyWithAcceptEncoding(header('vary'))
+		if (vary) res.setHeader('vary', vary)
+		const weakEtag = weakenEtag(header('etag'))
+		if (weakEtag) res.setHeader('etag', weakEtag)
+		res.removeHeader('accept-ranges')
+	}
+
+	// Wraps `res` for the response's kind; false leaves it as oRPC wrote it.
+	const start = (): boolean => {
+		restore()
+		const kind = res.headersSent
+			? undefined
+			: compressionKind(header, res.statusCode)
+		if (kind === 'batch-stream') {
+			setEncodedHeaders()
+			streamCompressed(res, encoding, writeRaw, endRaw)
+		} else if (kind === 'json') {
+			collectBody(res, async (raw, callback) => {
+				restore()
+				let body: Uint8Array = raw
+				if (raw.byteLength >= MIN_COMPRESS_BYTES) {
+					body = await compressBytes(encoding, raw)
+					// The client may have gone while the body compressed.
+					if (res.destroyed) return
+					setEncodedHeaders(body.byteLength)
+				}
+				endRaw.call(res, body, ...(callback ? [callback] : []))
+			})
+		}
+		return kind !== undefined
+	}
 
 	res.writeHead = ((statusCode: number, ...rest: unknown[]) => {
-		restore()
 		const given = rest.find((arg) => typeof arg === 'object' && arg !== null)
-		const headers: OutgoingHttpHeaders = { ...(given as OutgoingHttpHeaders) }
-		const header = (name: string) =>
-			flatten(headers[name] ?? res.getHeader(name))
-		const kind = compressionKind(batch, header)
-		if (!kind) return writeHeadRaw.call(res, statusCode, ...rest)
-
-		// A compressed body has the compressed length, or none for a stream.
-		const writeEncodedHead = (length?: number) => {
-			headers['content-encoding'] = encoding
-			if (length === undefined) delete headers['content-length']
-			else headers['content-length'] = length
-			const vary = varyWithAcceptEncoding(header('vary'))
-			if (vary) headers.vary = vary
-			writeHeadRaw.call(res, statusCode, headers)
-		}
-
-		if (kind === 'batch-stream') {
-			writeEncodedHead()
-			streamCompressed(res, encoding, write as Write, endRaw)
-			return res
-		}
-
-		collectBody(res, async (raw, callback) => {
+		// Raw header arrays are passed straight through, uncompressed.
+		if (Array.isArray(given)) {
 			restore()
-			let body: Uint8Array = raw
-			if (raw.byteLength < MIN_COMPRESS_BYTES) {
-				writeHeadRaw.call(res, statusCode, headers)
-			} else {
-				body = await compressBytes(encoding, raw)
-				// The client may have gone while the body compressed.
-				if (res.destroyed) return
-				writeEncodedHead(body.byteLength)
-			}
-			endRaw.call(res, body, ...(callback ? [callback] : []))
-		})
+			return (writeHead as WriteHead).call(res, statusCode, ...rest)
+		}
+		res.statusCode = statusCode
+		const message = rest.find((arg) => typeof arg === 'string')
+		if (message !== undefined) res.statusMessage = message as string
+		for (const [name, value] of Object.entries(
+			(given ?? {}) as OutgoingHttpHeaders
+		))
+			if (value !== undefined) res.setHeader(name, value)
 		return res
 	}) as typeof res.writeHead
+	res.write = ((...args: WriteArgs) => {
+		start()
+		return (res.write as Write).call(res, ...args)
+	}) as typeof res.write
+	res.end = ((...args: WriteArgs) => {
+		start()
+		return (res.end as End).call(res, ...args)
+	}) as typeof res.end
 
 	try {
 		return await send()

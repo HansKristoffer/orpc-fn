@@ -24,15 +24,17 @@ export type ExpoFetch = (
 	init: ExpoFetchInit
 ) => Promise<ExpoResponse>
 
+/** The link's own `fetch` signature (oRPC 2 passes a URL string and init). */
+export type LinkFetch = (url: string, init: RequestInit) => Promise<Response>
+
 /**
  * oRPC's link `fetch` for React Native, built on `expo/fetch`.
  *
- * oRPC carries the input and the abort signal on the `Request`, not in
- * `init`, and the call is rebuilt for `expo/fetch`, so both are forwarded
- * explicitly: the body so the server receives the input, and the signal so a
- * cancelled subscription closes its socket. Without the signal, connections
- * leak and exhaust the device's HTTP pool after a few navigations, and every
- * later request hangs.
+ * The call is rebuilt for `expo/fetch`, so the body and the abort signal are
+ * forwarded explicitly: the body (as bytes, which `expo/fetch` sends) so the
+ * server receives the input, and the signal so a cancelled subscription
+ * closes its socket. Without the signal, connections leak and exhaust the
+ * device's HTTP pool after a few navigations, and every later request hangs.
  *
  * Native sends cookies by header (see `createExpoLink`), so it omits the
  * credentialed cookie jar. On web it uses the platform `fetch` with cookies.
@@ -41,26 +43,27 @@ export function createExpoFetch(options: {
 	fetch: ExpoFetch
 	/** `Platform.OS !== 'web'`. */
 	native: boolean
-	webFetch?: (request: Request, init?: RequestInit) => Promise<Response>
-}) {
-	return async (
-		request: Request,
-		init?: { redirect?: NonNullable<RequestInit['redirect']> }
-	): Promise<Response> => {
+	webFetch?: LinkFetch
+}): LinkFetch {
+	return async (url, init) => {
 		if (!options.native) {
-			return (options.webFetch ?? globalThis.fetch)(request, {
+			return (options.webFetch ?? globalThis.fetch)(url, {
 				...init,
 				credentials: 'include'
 			})
 		}
-		const hasBody = request.method !== 'GET' && request.method !== 'HEAD'
-		const body = hasBody ? await request.arrayBuffer() : undefined
-		const response = await options.fetch(request.url, {
+		// A Request encodes the body (and a form's content type) as fetch would.
+		const request = new Request(url, init)
+		const body =
+			init.body === undefined || init.body === null
+				? undefined
+				: await request.arrayBuffer()
+		const response = await options.fetch(url, {
 			method: request.method,
 			headers: Object.fromEntries(request.headers.entries()),
-			...init,
+			...(init.redirect ? { redirect: init.redirect } : {}),
 			...(body === undefined ? {} : { body }),
-			signal: request.signal,
+			signal: init.signal ?? request.signal,
 			credentials: 'omit'
 		})
 		// Not rebuilt with `new Response(...)`: React Native's Response polyfill
@@ -76,7 +79,7 @@ export type CreateExpoLinkOptions<T extends ClientContext> = Omit<
 	fetch: ExpoFetch
 	native: boolean
 	/** Explicit browser fetch override; native always uses expo/fetch. */
-	webFetch?: (request: Request, init?: RequestInit) => Promise<Response>
+	webFetch?: LinkFetch
 }
 
 /** Generic streaming bridge with upstream async/context-aware headers. */

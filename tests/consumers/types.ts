@@ -537,7 +537,11 @@ createNodeHandler({ router: { cachedLookup, ...router }, rpcPrefix: '/rpc' })
 
 // ── Client ──────────────────────────────────────────────────────────────────
 const client: RouterClient<typeof router> = createORPCClient(
-	createRpcLink({ url: 'http://localhost/rpc', batch: { maxSize: 10 } })
+	createRpcLink({
+		origin: 'http://localhost',
+		url: '/rpc',
+		batch: { maxSize: 10 }
+	})
 )
 client.inOnly({ n: 1 }).then((result) => {
 	const doubled: number = result.doubled
@@ -560,13 +564,15 @@ declare const expoFetch: (
 	}
 ) => Promise<Response>
 createBetterAuthExpoLink<{ keepalive?: boolean }>({
-	url: 'http://localhost/rpc',
+	origin: 'http://localhost',
+	url: '/rpc',
 	fetch: expoFetch,
 	native: true,
 	getCookie: () => null
 })
 createBetterAuthExpoLink({
-	url: 'http://localhost/rpc',
+	origin: 'http://localhost',
+	url: '/rpc',
 	// @ts-expect-error a fetch must resolve to a response oRPC can read
 	fetch: async () => ({ status: 200 }),
 	native: true
@@ -915,7 +921,9 @@ const appClient: RouterClient<{
 	list: { get: typeof list.procedure; watch: typeof list.subscribe }
 	realtime: { changes: typeof changes }
 	typed: { errors: typeof typedErrors }
-}> = createORPCClient(createRpcLink({ url: 'http://localhost/rpc' }))
+}> = createORPCClient(
+	createRpcLink({ origin: 'http://localhost', url: '/rpc' })
+)
 const appUtils = createTanstackQueryUtils(appClient)
 type Order = { id: string; total: number }
 declare module 'orpc-fn/vue' {
@@ -994,7 +1002,7 @@ export function useConsumerHooks() {
 	// vue-query's own options pass through, e.g. `shallow` for large payloads.
 	vue.useLiveQuery(
 		{ id: '1' },
-		(input, o) => o.order.get.queryOptions({ input, shallow: true }),
+		(input, o) => ({ ...o.order.get.queryOptions({ input }), shallow: true }),
 		(o) => o.order.watch.call
 	)
 	// biome-ignore format: keep the overload error on the expected line

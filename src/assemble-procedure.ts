@@ -1,11 +1,11 @@
-import type { AnySchema } from '@orpc/contract'
+import type { AnyMetaPlugin, AnySchema } from '@orpc/contract'
 import type { AnyProcedure } from '@orpc/server'
-import { FN_META_KEY, type StoredFnMeta } from './meta.js'
+import { fnMetaPlugin, openapiMetaPlugin } from './compatibility.js'
+import type { StoredFnMeta } from './meta.js'
 import type { BuildProcedure } from './types.js'
 
 export type BuilderChain = {
-	route(route: Record<string, unknown>): BuilderChain
-	meta(meta: Record<string, unknown>): BuilderChain
+	meta(...plugins: AnyMetaPlugin[]): BuilderChain
 	input(schema: AnySchema): BuilderChain
 	output(schema: AnySchema): BuilderChain
 	errors(errors: import('@orpc/contract').ErrorMap): BuilderChain
@@ -28,14 +28,15 @@ export function createProcedureAssembler(
 			guards: route.guards ?? {},
 			dynamicGuards: route.dynamicGuards ?? []
 		}
-		builder = builder
-			.route({
+		builder = builder.meta(
+			openapiMetaPlugin({
 				operationId: route.name,
 				...Object.fromEntries(
 					Object.entries(route.route).filter(([, value]) => value !== undefined)
 				)
-			})
-			.meta({ [FN_META_KEY]: stored })
+			}),
+			fnMetaPlugin(stored)
+		)
 		if (route.errors) builder = builder.errors(route.errors)
 		if (route.input) builder = builder.input(route.input)
 		if (route.output) builder = builder.output(route.output)

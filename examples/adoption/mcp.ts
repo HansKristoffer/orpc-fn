@@ -9,7 +9,7 @@ export function createExampleMcpServer() {
 		{ capabilities: { tools: {} } }
 	)
 	registerMcpTools(server, router, {
-		filter: ({ path }) => path.join('.') === 'get',
+		filter: (_procedure, path) => path.join('.') === 'get',
 		context: () => ({})
 	})
 	return server

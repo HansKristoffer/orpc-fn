@@ -71,7 +71,7 @@ test('stream-manifest writes deterministic modules, resolves lazy routers and ch
 	try {
 		writeFileSync(
 			join(dir, 'router.ts'),
-			`import { lazy } from '@orpc/server'
+			`import { os } from '@orpc/server'
 import { z } from 'zod'
 import { fn, fnLive } from ${JSON.stringify(fixture)}
 const feed = fnLive({
@@ -85,7 +85,7 @@ const ping = fn({ name: 'ping', procedure: 'public', handler: () => 'pong' })
 export const api = {
 	ping,
 	"it's": { subscribe: feed.subscribe },
-	lazyFeed: lazy(async () => ({ default: { list: feed.procedure, watch: feed.subscribe } })),
+	lazyFeed: os.lazy(async () => ({ default: { list: feed.procedure, watch: feed.subscribe } })),
 	a: { subscribe: feed.subscribe }
 }
 // Open handle the CLI must not wait for.

@@ -1,5 +1,11 @@
 import { expect, expectTypeOf, test } from 'bun:test'
-import { call, eventIterator, ORPCError, os } from '@orpc/server'
+import {
+	call,
+	defineMeta as defineNativeMeta,
+	eventIterator,
+	ORPCError,
+	os
+} from '@orpc/server'
 import { z } from 'zod'
 import {
 	createFn,
@@ -119,11 +125,13 @@ test('completion covers auth, input and output validation; telemetry cannot repl
 })
 
 test('native schemas, declared errors, resolvers and native metadata survive', async () => {
+	const [nativeMeta, getNativeMeta] = defineNativeMeta(
+		'native',
+		(incoming: boolean) => incoming
+	)
 	const factory = createFn({
 		procedures: {
-			public: os
-				.$meta<{ native: boolean }>({ native: true })
-				.errors({ BASE: { data: z.string() } })
+			public: os.meta(nativeMeta(true)).errors({ BASE: { data: z.string() } })
 		},
 		default: 'public',
 		logger: () => quiet,
@@ -140,7 +148,7 @@ test('native schemas, declared errors, resolvers and native metadata survive', a
 			throw errors.DOMAIN({ data: { id: 'yes' } })
 		}
 	})
-	expect(route['~orpc'].meta.native).toBe(true)
+	expect(getNativeMeta(route)).toBe(true)
 	await expect(call(route, { id: 'no' })).rejects.toMatchObject({
 		code: 'FORBIDDEN'
 	})
@@ -165,7 +173,7 @@ test('native schemas, declared errors, resolvers and native metadata survive', a
 	])
 	const iterator = await call(stream, undefined)
 	await expect(iterator.next()).rejects.toMatchObject({
-		code: 'EVENT_ITERATOR_VALIDATION_FAILED'
+		code: 'ASYNC_ITERATOR_OBJECT_VALIDATION_FAILED'
 	})
 })
 
@@ -267,7 +275,7 @@ test('client error code is a real predicate', () => {
 })
 
 test('lazy stream manifests resolve actual prefixed router paths', async () => {
-	const { lazy } = await import('@orpc/server')
+	const { os } = await import('@orpc/server')
 	const { createStreamManifestAsync } = await import('./router.js')
 	const { fn } = createFn({ procedures: { public: os }, default: 'public' })
 	const watch = fn({
@@ -277,7 +285,7 @@ test('lazy stream manifests resolve actual prefixed router paths', async () => {
 			yield 1
 		}
 	})
-	const router = { feature: lazy(async () => ({ default: { watch } })) }
+	const router = { feature: os.lazy(async () => ({ default: { watch } })) }
 	expect(() => createStreamManifest(router)).toThrow('lazy routers')
 	expect(await createStreamManifestAsync(router)).toEqual([
 		['feature', 'watch']

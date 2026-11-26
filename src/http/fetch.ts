@@ -8,7 +8,8 @@ import {
 	createFlushingCompressor,
 	MIN_COMPRESS_BYTES,
 	negotiateEncoding,
-	varyWithAcceptEncoding
+	varyWithAcceptEncoding,
+	weakenEtag
 } from './compression.js'
 import {
 	createMounts,
@@ -23,7 +24,7 @@ type FetchHandler<C> = {
 	handle(
 		request: Request,
 		options: { prefix: Path; context: C }
-	): Promise<{ matched: boolean; response: Response | undefined }>
+	): Promise<{ matched: boolean; response?: Response | undefined }>
 }
 
 /**
@@ -44,11 +45,18 @@ export function createFetchCore<R extends AnyRouter, Arg>(
 ): FetchCore<Arg> {
 	type C = InferRouterInitialContext<R>
 	const mounts = createMounts<R, FetchHandler<C>>(options, {
-		rpc: (router, handlerOptions) => new RPCHandler<C>(router, handlerOptions),
+		rpc: (router, { eventStream, ...handlerOptions }) =>
+			new RPCHandler<C>(router, {
+				...handlerOptions,
+				toFetchResponse: { eventStream }
+			}),
 		openapi: async () => {
 			const { OpenAPIHandler } = await import('@orpc/openapi/fetch')
-			return (router, handlerOptions) =>
-				new OpenAPIHandler<C>(router, handlerOptions)
+			return (router, { eventStream, ...handlerOptions }) =>
+				new OpenAPIHandler<C>(router, {
+					...handlerOptions,
+					toFetchResponse: { eventStream }
+				})
 		}
 	})
 	const compress = options.compress ?? true
@@ -88,7 +96,7 @@ export function createFetchCore<R extends AnyRouter, Arg>(
 }
 
 /**
- * Brotli or gzip for JSON and batch event streams, when the client accepts
+ * Brotli or gzip for JSON and streaming batches, when the client accepts
  * it. A batch stream is flushed after every result. Cancelling the result
  * cancels the original body.
  */
@@ -100,8 +108,8 @@ async function compressResponse(
 	const encoding = negotiateEncoding(request.headers.get('accept-encoding'))
 	if (!encoding) return response
 	const kind = compressionKind(
-		request.headers.has('x-orpc-batch'),
-		(name) => response.headers.get(name) ?? undefined
+		(name) => response.headers.get(name) ?? undefined,
+		response.status
 	)
 	if (!kind) return response
 
@@ -128,6 +136,9 @@ async function compressResponse(
 	headers.set('content-encoding', encoding)
 	const vary = varyWithAcceptEncoding(headers.get('vary') ?? undefined)
 	if (vary) headers.set('vary', vary)
+	const weakEtag = weakenEtag(headers.get('etag') ?? undefined)
+	if (weakEtag) headers.set('etag', weakEtag)
+	headers.delete('accept-ranges')
 	return new Response(body as ConstructorParameters<typeof Response>[0], {
 		...init,
 		headers

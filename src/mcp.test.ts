@@ -3,13 +3,14 @@ import { call } from '@orpc/server'
 import { z } from 'zod'
 import { createRouter, fn } from '../tests/fixture.js'
 import { hasTag, listTools, type ProcedureFilter } from './mcp.js'
+import { readFnMeta } from './meta.js'
 
 const isExternal = hasTag('external')
 const isMcpSupport = hasTag('mcp-support')
 // gey-mono's rule: GET, or a non-GET route tagged as read-only.
-const readOnly: ProcedureFilter = (options) =>
-	options.contract['~orpc'].route.method === 'GET' ||
-	hasTag('mcp-readonly')(options)
+const readOnly: ProcedureFilter = (procedure, path) =>
+	readFnMeta(procedure).method === 'GET' ||
+	hasTag('mcp-readonly')(procedure, path)
 const listExternalTools = (
 	router: Parameters<typeof listTools>[0],
 	filter: ProcedureFilter = isExternal
@@ -147,5 +148,52 @@ describe('listExternalTools', () => {
 		const [tool] = listTools(router, { filter: isExternal })
 		const result = await tool?.config.inputSchema?.['~standard'].validate({})
 		expect(result && 'issues' in result && result.issues?.length).toBeTruthy()
+	})
+
+	test('supports non-Zod Standard JSON Schema v1 inputs via StandardJsonSchemaConverter', async () => {
+		const standardInput = {
+			'~standard': {
+				version: 1 as const,
+				vendor: 'custom',
+				types: {} as { input: { query: string }; output: { query: string } },
+				validate: (value: unknown) =>
+					typeof value === 'object' &&
+					value !== null &&
+					typeof (value as { query?: unknown }).query === 'string'
+						? { value: value as { query: string } }
+						: { issues: [{ message: 'Expected { query: string }' }] },
+				jsonSchema: {
+					input: () => ({
+						type: 'object',
+						properties: { query: { type: 'string' } },
+						required: ['query']
+					}),
+					output: () => ({
+						type: 'object',
+						properties: { query: { type: 'string' } },
+						required: ['query']
+					})
+				}
+			}
+		}
+		const search = fn({
+			name: 'thing.search',
+			procedure: 'public',
+			input: standardInput,
+			handler: ({ input }) => input.query
+		})
+		const [tool] = listTools(createRouter({ search }))
+		const json = tool?.config.inputSchema?.['~standard'].jsonSchema.input()
+		expect(json).toMatchObject({
+			type: 'object',
+			properties: { query: { type: 'string' } },
+			required: ['query']
+		})
+		expect(
+			await tool?.config.inputSchema?.['~standard'].validate({ query: 'abc' })
+		).toEqual({ value: { query: 'abc' } })
+		expect(
+			await tool?.config.inputSchema?.['~standard'].validate({})
+		).toMatchObject({ issues: [{ message: 'Expected { query: string }' }] })
 	})
 })

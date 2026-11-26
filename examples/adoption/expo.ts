@@ -13,7 +13,8 @@ const streamingFetch: ExpoFetch = async (url, init) =>
 export async function runExpoExample() {
 	const cookieClient: RouterClient<typeof router> = createORPCClient(
 		createBetterAuthExpoLink({
-			url: 'http://example/rpc',
+			origin: 'http://example',
+			url: '/rpc',
 			native: true,
 			fetch: streamingFetch,
 			getCookie: async () => 'session=abc',
@@ -23,7 +24,8 @@ export async function runExpoExample() {
 	const bearerClient: RouterClient<typeof router, { token: string }> =
 		createORPCClient(
 			createExpoLink<{ token: string }>({
-				url: 'http://example/rpc',
+				origin: 'http://example',
+				url: '/rpc',
 				native: true,
 				fetch: streamingFetch,
 				headers: async ({ context }) => ({

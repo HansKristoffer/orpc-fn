@@ -1,19 +1,29 @@
 // Shared by orpc-fn/fetch, orpc-fn/node and orpc-fn/hono: the options, the
 // per-request context and the oRPC handler wiring. Each adapter only adds its
 // runtime's handler classes and response compression.
-import type { OpenAPIGeneratorGenerateOptions } from '@orpc/openapi'
+import type {
+	OpenAPIGeneratorGenerateOptions,
+	OpenAPIVersion
+} from '@orpc/openapi'
 import {
 	type AnyRouter,
 	type Context,
+	COMMON_ERROR_STATUS_MAP,
 	type InferRouterInitialContext,
 	onError as orpcOnError
 } from '@orpc/server'
-import { BatchHandlerPlugin, ResponseHeadersPlugin } from '@orpc/server/plugins'
+import {
+	BatchHandlerPlugin,
+	ResponseHeadersHandlerPlugin,
+	SignalSyncHandlerPlugin
+} from '@orpc/server/plugins'
 import type {
+	StandardHandlerHandleResult,
 	StandardHandlerOptions,
-	StandardHandlerPlugin
+	StandardHandlerPlugin,
+	StandardHandlerRoutingInterceptorOptions
 } from '@orpc/server/standard'
-import { isExpectedClientError } from '../expected-client-error.js'
+import { isExpectedWithStatusMap } from '../expected-client-error.js'
 import type { ProcedureFilter } from '../meta.js'
 import { type InvocationTiming, REQUEST_TIMING } from '../timing.js'
 
@@ -61,6 +71,10 @@ export type ContextOption<Arg, R extends AnyRouter> =
 
 export type Path = `/${string}`
 type Plugin<T extends Context> = StandardHandlerPlugin<T>
+type RoutingInterceptorOptions<T extends Context> =
+	StandardHandlerRoutingInterceptorOptions<T> & {
+		next(): Promise<StandardHandlerHandleResult>
+	}
 
 export type OpenApiMountOptions<R extends AnyRouter> = {
 	prefix: Path
@@ -77,8 +91,11 @@ export type OpenApiMountOptions<R extends AnyRouter> = {
 	filter: ProcedureFilter
 	/** Turn JSON strings back into `Date`s etc. for `z.date()` inputs. */
 	smartCoercion?: boolean
-	/** Extra spec fields, e.g. `components.securitySchemes` and `security`. */
-	spec?: Omit<OpenAPIGeneratorGenerateOptions, 'filter'>
+	/**
+	 * Spec generator options. Document fields go in `base`, e.g.
+	 * `{ base: { components: { securitySchemes }, security } }`.
+	 */
+	spec?: Omit<OpenAPIGeneratorGenerateOptions<OpenAPIVersion>, 'filter'>
 	plugins?: Plugin<InferRouterInitialContext<R>>[]
 }
 
@@ -107,8 +124,8 @@ export type HandlerConfig<R extends AnyRouter> = {
 	sseKeepAlive?: boolean | number
 	/**
 	 * Extra RPC handler plugins. CORS is set up once: Hono's `cors()` on a
-	 * Hono app, oRPC's `CORSPlugin` here otherwise. A cross-origin client
-	 * with batching needs `x-orpc-batch` in its allowed headers.
+	 * Hono app, oRPC's `CORSHandlerPlugin` here otherwise. A cross-origin
+	 * client with batching needs `orpc-batch` in its allowed headers.
 	 */
 	plugins?: Plugin<InferRouterInitialContext<R>>[]
 	/**
@@ -118,8 +135,15 @@ export type HandlerConfig<R extends AnyRouter> = {
 	 */
 	onError?: (error: unknown, request: { url: string; method: string }) => void
 	/**
-	 * Default: `isExpectedClientError`, which also accepts any error the
-	 * route's `createFn({ isExpectedError })` classified as expected.
+	 * HTTP status per error code, over oRPC's common map:
+	 * `{ RATE_LIMITED: 429 }`. oRPC 2 errors carry no status, and codes it
+	 * does not know answer 400. A code mapped to 5xx reaches `onError`.
+	 */
+	errorStatusMap?: Record<string, number>
+	/**
+	 * Default: `isExpectedClientError` under `errorStatusMap`, which also
+	 * accepts any error the route's `createFn({ isExpectedError })` classified
+	 * as expected.
 	 */
 	isExpectedError?: (error: unknown) => boolean
 }
@@ -239,6 +263,18 @@ function isEventIterator(body: unknown): boolean {
 	)
 }
 
+function exposeHeader(
+	existing: string | string[] | undefined,
+	name: string
+): string {
+	if (existing === undefined) return name
+	const flat = Array.isArray(existing) ? existing.join(', ') : existing
+	if (!flat.trim()) return name
+	const parts = flat.split(',').map((part) => part.trim().toLowerCase())
+	if (parts.includes('*') || parts.includes(name.toLowerCase())) return flat
+	return `${flat}, ${name}`
+}
+
 /**
  * Adds Server-Timing to the final response, and for SSE disables proxy
  * buffering so keep-alive comments reach the edge (empty `:` lines are
@@ -247,11 +283,14 @@ function isEventIterator(body: unknown): boolean {
  */
 function mountPlugin<T extends Context>(serverTiming: boolean): Plugin<T> {
 	return {
-		// Above CORSPlugin (9_000_000): it wraps every other plugin.
-		order: 10_000_000,
+		name: 'orpc-fn:mount',
+		// Initialized last, so its interceptor wraps every other plugin's
+		// (each prepends its own), CORS and batching included.
+		after: ['~cors', '~batch', '~response-headers', '~tracing'],
 		init(options) {
-			options.rootInterceptors ??= []
-			options.rootInterceptors.unshift(async (interceptor) => {
+			const routing = async (
+				interceptor: RoutingInterceptorOptions<T>
+			): Promise<StandardHandlerHandleResult> => {
 				const result = await interceptor.next()
 				if (!result.matched) return result
 
@@ -267,11 +306,10 @@ function mountPlugin<T extends Context>(serverTiming: boolean): Plugin<T> {
 						performance.now() - request.started,
 						{ ...request.timing, handler_ms: invocation?.procedureMs }
 					)
-					const exposed = headers['access-control-expose-headers']
-					headers['access-control-expose-headers'] =
-						exposed === undefined
-							? 'Server-Timing'
-							: [exposed, 'Server-Timing'].flat().join(', ')
+					headers['access-control-expose-headers'] = exposeHeader(
+						headers['access-control-expose-headers'],
+						'Server-Timing'
+					)
 				}
 				if (isEventIterator(response.body)) {
 					headers['cache-control'] = 'no-cache'
@@ -279,7 +317,11 @@ function mountPlugin<T extends Context>(serverTiming: boolean): Plugin<T> {
 				}
 
 				return { matched: true, response: { ...response, headers } }
-			})
+			}
+			return {
+				...options,
+				routingInterceptors: [routing, ...(options.routingInterceptors ?? [])]
+			}
 		}
 	}
 }
@@ -288,8 +330,9 @@ function mountPlugin<T extends Context>(serverTiming: boolean): Plugin<T> {
 export type HandlerOptions<T extends Context> = {
 	plugins: Plugin<T>[]
 	interceptors: NonNullable<StandardHandlerOptions<T>['interceptors']>
-	eventIteratorKeepAliveEnabled: boolean
-	eventIteratorKeepAliveInterval?: number
+	/** Event stream options; each runtime passes them to its response writer. */
+	eventStream: { keepAlive: boolean | { interval: number } }
+	errorStatusMap?: Record<string, number>
 }
 
 /** A runtime's oRPC handler classes, as factories. */
@@ -336,15 +379,18 @@ export function createMounts<R extends AnyRouter, H>(
 			'orpc-fn: openapi needs a filter; pass () => true to publish every route'
 		)
 
-	const isExpectedError = options.isExpectedError ?? isExpectedClientError
+	const statusMap = options.errorStatusMap
+	const isExpectedError =
+		options.isExpectedError ??
+		((error: unknown) => isExpectedWithStatusMap(error, statusMap))
 	const report = (
 		error: unknown,
-		{ request }: { request: { url: URL; method: string } }
+		{ request }: { request: { url: string; method: string } }
 	) => {
 		try {
 			if (isExpectedError(error)) return
 			options.onError?.(error, {
-				url: request.url.pathname,
+				url: new URL(request.url, 'http://localhost').pathname,
 				method: request.method
 			})
 		} catch {
@@ -355,19 +401,24 @@ export function createMounts<R extends AnyRouter, H>(
 	// A fresh object per handler: oRPC's handlers add to the arrays they get.
 	const handlerOptions = (extra: Plugin<T>[] = []): HandlerOptions<T> => {
 		const plugins: Plugin<T>[] = [...extra, mountPlugin<T>(serverTiming)]
-		if (!extra.some((plugin) => plugin instanceof ResponseHeadersPlugin))
-			plugins.push(new ResponseHeadersPlugin<T>())
+		if (!extra.some((plugin) => plugin.name === '~response-headers'))
+			plugins.push(new ResponseHeadersHandlerPlugin<T>())
+		if (!extra.some((plugin) => plugin.name === '~signal-sync'))
+			plugins.push(new SignalSyncHandlerPlugin<T>())
 		return {
 			plugins,
 			interceptors: options.onError ? [orpcOnError(report)] : [],
-			...(sseKeepAlive === false
-				? { eventIteratorKeepAliveEnabled: false }
-				: {
-						eventIteratorKeepAliveEnabled: true,
-						// Explicit keep-alive under proxy idle timers (~30s); oRPC's default is 5s.
-						eventIteratorKeepAliveInterval:
-							sseKeepAlive === true ? 15_000 : sseKeepAlive
-					})
+			// oRPC replaces its common map with a given one, so it is merged in.
+			...(statusMap
+				? { errorStatusMap: { ...COMMON_ERROR_STATUS_MAP, ...statusMap } }
+				: {}),
+			// Keep-alive under proxy idle timers (~30s); oRPC 2's default is 15s too.
+			eventStream: {
+				keepAlive:
+					sseKeepAlive === false
+						? false
+						: { interval: sseKeepAlive === true ? 15_000 : sseKeepAlive }
+			}
 		}
 	}
 
@@ -416,36 +467,57 @@ async function createOpenApiHandler<R extends AnyRouter, H>(
 	loadHandler: HandlerRuntime<R, H>['openapi']
 ): Promise<H> {
 	const [
-		{ SmartCoercionPlugin },
-		{ OpenAPIReferencePlugin },
+		{ SmartCoercionHandlerPlugin },
+		{ OpenAPIGenerator },
+		{ OpenAPIReferenceHandlerPlugin },
 		{ ZodToJsonSchemaConverter },
 		createHandler
 	] = await Promise.all([
 		import('@orpc/json-schema'),
+		import('@orpc/openapi'),
 		import('@orpc/openapi/plugins'),
-		import('@orpc/zod/zod4'),
+		import('@orpc/zod'),
 		loadHandler()
 	])
 	const converters = [new ZodToJsonSchemaConverter()]
 	if (openapi.smartCoercion) {
-		options.plugins.push(
-			new SmartCoercionPlugin({ schemaConverters: converters })
-		)
+		options.plugins.push(new SmartCoercionHandlerPlugin({ converters }))
 	}
 	if (openapi.docs !== false) {
+		const generator = new OpenAPIGenerator({ converters })
+		const { base, errorStatusMap, ...generate } = openapi.spec ?? {}
+		const resolvedErrorStatusMap = errorStatusMap ?? options.errorStatusMap
+		let spec: ReturnType<typeof generator.generate> | undefined
 		options.plugins.push(
-			new OpenAPIReferencePlugin({
-				docsProvider: 'scalar',
+			new OpenAPIReferenceHandlerPlugin({
+				provider: 'scalar',
 				...(openapi.docsPath ? { docsPath: openapi.docsPath } : {}),
-				schemaConverters: converters,
-				specGenerateOptions: {
-					info: openapi.info ?? { title: 'API', version: '0.0.0' },
-					servers: [{ url: openapi.prefix }],
-					filter: openapi.filter,
-					...openapi.spec
+				// Generated once, on the first request for the docs or the spec.
+				spec: () => {
+					spec ??= generator
+						.generate(router, {
+							...generate,
+							...(resolvedErrorStatusMap
+								? { errorStatusMap: resolvedErrorStatusMap }
+								: {}),
+							filter: openapi.filter,
+							base: {
+								info: openapi.info ?? { title: 'API', version: '0.0.0' },
+								servers: [{ url: openapi.prefix }],
+								...base
+							}
+						})
+						.catch((error) => {
+							spec = undefined
+							throw error
+						})
+					return spec
 				}
 			})
 		)
 	}
-	return createHandler(router, { ...options, filter: openapi.filter })
+	return createHandler(router, {
+		...options,
+		filter: (procedure, path) => openapi.filter(procedure, path)
+	})
 }

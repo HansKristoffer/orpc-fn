@@ -12,7 +12,9 @@ import type { AddressInfo } from 'node:net'
 import zlib from 'node:zlib'
 import { createORPCClient } from '@orpc/client'
 import { ORPCError, os, type RouterClient } from '@orpc/server'
+import { CORSHandlerPlugin } from '@orpc/server/plugins'
 import { z } from 'zod'
+import { captureStreamingBatch } from '../tests/batch.js'
 import { quiet } from '../tests/fixture.js'
 import { createRpcLink } from './client.js'
 import { createFetchHandler, type FetchHandlerOptions, timed } from './fetch.js'
@@ -77,6 +79,37 @@ const router = createRouter({
 		handler: async () => {
 			await slowGate
 			return { done: true }
+		}
+	}),
+	limited: fn({
+		name: 'limited',
+		method: 'GET',
+		path: '/limited',
+		tags: ['external'],
+		errors: { RATE_LIMITED: {} },
+		handler: () => {
+			throw new ORPCError('RATE_LIMITED')
+		}
+	}),
+	bigTagged: fn({
+		name: 'bigTagged',
+		handler: ({ context }) => {
+			context.resHeaders?.set('etag', '"v1"')
+			context.resHeaders?.set('accept-ranges', 'bytes')
+			return { rows }
+		}
+	}),
+	partial: fn({
+		name: 'partial',
+		handler: ({ context }) => {
+			context.resHeaders?.set('content-range', 'bytes 0-99/200')
+			return { rows }
+		}
+	}),
+	upstream: fn({
+		name: 'upstream',
+		handler: () => {
+			throw new ORPCError('UPSTREAM_DOWN')
 		}
 	}),
 	crash: fn({
@@ -237,7 +270,7 @@ function raw(
 /** A streaming response, decompressed as its chunks arrive. */
 function openStream(
 	url: string,
-	init: { headers: Record<string, string>; body: string }
+	init: { headers: Record<string, string>; body: string | Uint8Array }
 ): Promise<{
 	headers: IncomingHttpHeaders
 	readUntil(text: string): Promise<string>
@@ -309,10 +342,11 @@ for (const adapter of adapters) {
 			let requests = 0
 			const client: RouterClient<Router> = createORPCClient(
 				createRpcLink({
-					url: `${url}/rpc`,
-					fetch: (request, init) => {
+					origin: url,
+					url: '/rpc',
+					fetch: (input, init) => {
 						requests++
-						return fetch(request, init)
+						return fetch(input, init)
 					}
 				})
 			)
@@ -460,16 +494,10 @@ for (const adapter of adapters) {
 		for (const encoding of ['br', 'gzip'] as const) {
 			test(`a ${encoding} batch stream delivers a result before a slower one`, async () => {
 				const url = await serve()
-				const stream = await openStream(`${url}/rpc/__batch__`, {
-					headers: {
-						'accept-encoding': encoding,
-						'content-type': 'application/json',
-						'x-orpc-batch': 'streaming'
-					},
-					body: JSON.stringify([
-						{ url: 'http://localhost/rpc/big', body: { json: null } },
-						{ url: 'http://localhost/rpc/slow', body: { json: null } }
-					])
+				const batch = await captureStreamingBatch(['big', 'slow'])
+				const stream = await openStream(`${url}${batch.path}`, {
+					headers: { ...batch.headers, 'accept-encoding': encoding },
+					body: batch.body
 				})
 				expect(stream.headers['content-encoding']).toBe(encoding)
 				expect(stream.headers['content-length']).toBeUndefined()
@@ -493,7 +521,7 @@ for (const adapter of adapters) {
 			expect(response.headers['content-encoding']).toBeUndefined()
 			expect(response.headers['cache-control']).toBe('no-cache')
 			expect(response.headers['x-accel-buffering']).toBe('no')
-			expect(response.body.toString()).toContain('event: message')
+			expect(response.body.toString()).toContain('data: {"json":1}')
 		})
 
 		test('onError sees unexpected errors only', async () => {
@@ -513,11 +541,32 @@ for (const adapter of adapters) {
 			])
 		})
 
+		test('errorStatusMap sets statuses and decides what reaches onError', async () => {
+			const onError = mock(() => {})
+			const url = await serve({
+				onError,
+				errorStatusMap: { RATE_LIMITED: 429, UPSTREAM_DOWN: 502 }
+			})
+			const limited = await raw(`${url}/rpc/limited`, { body: rpcBody() })
+			expect(limited.status).toBe(429)
+			const upstream = await raw(`${url}/rpc/upstream`, { body: rpcBody() })
+			expect(upstream.status).toBe(502)
+			// The common map still applies to codes the app did not map.
+			const missing = await raw(`${url}/rpc/missing`, { body: rpcBody() })
+			expect(missing.status).toBe(404)
+			expect(onError).toHaveBeenCalledTimes(1)
+			expect(onError.mock.calls[0]).toMatchObject([
+				expect.objectContaining({ code: 'UPSTREAM_DOWN' }),
+				{ url: '/rpc/upstream', method: 'POST' }
+			])
+		})
+
 		test('AsyncLocalStorage around the handler reaches procedures, batched or not', async () => {
 			const url = await serve({}, true)
 			const client: RouterClient<Router> = createORPCClient(
 				createRpcLink({
-					url: `${url}/rpc`,
+					origin: url,
+					url: '/rpc',
 					headers: { 'x-request-id': 'req-42' }
 				})
 			)
@@ -530,7 +579,7 @@ for (const adapter of adapters) {
 		test('files round-trip: upload a File, download a Blob', async () => {
 			const url = await serve()
 			const client: RouterClient<Router> = createORPCClient(
-				createRpcLink({ url: `${url}/rpc`, batch: false })
+				createRpcLink({ origin: url, url: '/rpc', batch: false })
 			)
 			const file = new File(['a,b\n1,2'], 'data.csv', { type: 'text/csv' })
 			expect(await client.upload({ file })).toEqual({
@@ -546,6 +595,7 @@ for (const adapter of adapters) {
 
 		test('the OpenAPI mount serves REST routes, the spec and docs', async () => {
 			const url = await serve({
+				errorStatusMap: { RATE_LIMITED: 429 },
 				openapi: {
 					prefix: '/api',
 					filter: hasTag('external'),
@@ -553,11 +603,38 @@ for (const adapter of adapters) {
 				}
 			})
 			const spec = await raw(`${url}/api/spec.json`, { method: 'GET' })
-			const paths = Object.keys(decode(spec).paths)
-			expect(paths).toEqual(['/echo', '/cached'])
+			const doc = decode(spec)
+			expect(Object.keys(doc.paths)).toEqual(['/echo', '/cached', '/limited'])
+			// errorStatusMap flows into the generated spec so it agrees with the server.
+			expect(doc.paths['/limited'].get.responses['429']).toBeDefined()
 			const docs = await raw(`${url}/api`, { method: 'GET' })
 			expect(docs.headers['content-type']).toContain('text/html')
 			expect((await raw(`${url}/api/big`, { method: 'GET' })).status).toBe(404)
+		})
+
+		test('compression weakens strong ETags, skips content-range and deduplicates exposed headers', async () => {
+			const url = await serve({
+				plugins: [
+					new CORSHandlerPlugin({ exposeHeaders: ['Server-Timing', 'X-Other'] })
+				]
+			})
+			const tagged = await raw(`${url}/rpc/bigTagged`, {
+				headers: { 'accept-encoding': 'gzip', origin: 'https://app.test' },
+				body: rpcBody()
+			})
+			expect(tagged.headers['content-encoding']).toBe('gzip')
+			expect(tagged.headers.etag).toBe('W/"v1"')
+			expect(tagged.headers['accept-ranges']).toBeUndefined()
+			expect(tagged.headers['access-control-expose-headers']).toBe(
+				'Server-Timing, X-Other'
+			)
+
+			const partial = await raw(`${url}/rpc/partial`, {
+				headers: { 'accept-encoding': 'gzip' },
+				body: rpcBody()
+			})
+			expect(partial.headers['content-encoding']).toBeUndefined()
+			expect(partial.headers['content-range']).toBe('bytes 0-99/200')
 		})
 
 		test('requests outside the prefixes or matching no procedure get a 404', async () => {
@@ -571,6 +648,37 @@ for (const adapter of adapters) {
 }
 
 describe('adapter-specific behaviour', () => {
+	test('SignalSyncHandlerPlugin aborts procedure signal when a streaming response is cancelled', async () => {
+		let signalAborted!: () => void
+		const aborted = new Promise<void>((resolve) => {
+			signalAborted = resolve
+		})
+		const stream = fn({
+			name: 'stream.cancel',
+			stream: true,
+			handler: async function* ({ signal }) {
+				signal?.addEventListener('abort', () => signalAborted(), { once: true })
+				yield 1
+				await aborted
+			}
+		})
+		const handler = createFetchHandler({
+			router: createRouter({ stream }),
+			rpcPrefix: '/rpc'
+		})
+		const response = await handler(
+			new Request('http://localhost/rpc/stream', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: rpcBody()
+			})
+		)
+		const reader = response.body!.getReader()
+		await reader.read()
+		await reader.cancel()
+		await aborted
+	})
+
 	test('createFetchHandler hands the Request to the context factory and validates options', async () => {
 		const seen: string[] = []
 		const handler = createFetchHandler({

@@ -3,7 +3,7 @@ import {
 	type AnyRouter,
 	call,
 	type InferRouterInitialContext,
-	traverseContractProcedures
+	walkProcedureContractsSync
 } from '@orpc/server'
 import {
 	CliError,
@@ -12,6 +12,7 @@ import {
 	defineCommand
 } from 'hanzio/cli'
 import { z } from 'zod/v4'
+import { procedureDefinition, soleSchema } from './compatibility.js'
 import { isExpectedClientError } from './expected-client-error.js'
 import { formatIssue, issuesOf } from './issues.js'
 import { type FnMeta, readFnMeta } from './meta.js'
@@ -54,42 +55,39 @@ export function procedureCommands<C = unknown, R extends AnyRouter = AnyRouter>(
 ): CommandGroup<C> {
 	const filter = options.filter ?? optedIn
 	const commands: Record<string, Command<C> | CommandGroup<C>> = {}
-	const unresolved = traverseContractProcedures(
-		{ router, path: [] },
-		({ contract, path }) => {
-			const procedure = contract as AnyProcedure
-			const meta = readFnMeta(procedure)
-			if (!filter(meta)) return
-			const segments = path.map(kebab)
-			let target = commands
-			for (let i = 0; i < segments.length - 1; i++) {
-				const segment = segments[i]!
-				const existing = target[segment]
-				if (existing === undefined) {
-					const group: Record<string, Command<C> | CommandGroup<C>> = {}
-					target[segment] = group
-					target = group
-				} else if (
-					typeof existing === 'object' &&
-					existing !== null &&
-					!('run' in existing)
-				) {
-					target = existing as Record<string, Command<C> | CommandGroup<C>>
-				} else {
-					throw new TypeError(
-						`orpc-fn: CLI command name collision at "${segments.slice(0, i + 1).join(' ')}"`
-					)
-				}
-			}
-			const leaf = segments[segments.length - 1]!
-			if (leaf in target) {
+	const unresolved = walkProcedureContractsSync(router, (contract, path) => {
+		const procedure = contract as AnyProcedure
+		const meta = readFnMeta(procedure)
+		if (!filter(meta)) return
+		const segments = path.map(kebab)
+		let target = commands
+		for (let i = 0; i < segments.length - 1; i++) {
+			const segment = segments[i]!
+			const existing = target[segment]
+			if (existing === undefined) {
+				const group: Record<string, Command<C> | CommandGroup<C>> = {}
+				target[segment] = group
+				target = group
+			} else if (
+				typeof existing === 'object' &&
+				existing !== null &&
+				!('run' in existing)
+			) {
+				target = existing as Record<string, Command<C> | CommandGroup<C>>
+			} else {
 				throw new TypeError(
-					`orpc-fn: CLI command name collision at "${segments.join(' ')}"`
+					`orpc-fn: CLI command name collision at "${segments.slice(0, i + 1).join(' ')}"`
 				)
 			}
-			target[leaf] = toCommand(procedure, meta, options)
 		}
-	)
+		const leaf = segments[segments.length - 1]!
+		if (leaf in target) {
+			throw new TypeError(
+				`orpc-fn: CLI command name collision at "${segments.join(' ')}"`
+			)
+		}
+		target[leaf] = toCommand(procedure, meta, options)
+	})
 	if (unresolved.length) {
 		throw new TypeError(
 			'orpc-fn: resolve lazy routers with unlazyRouter before building CLI commands'
@@ -107,7 +105,10 @@ function toCommand<C, R extends AnyRouter>(
 	if (meta.stream) {
 		throw new TypeError(`orpc-fn: ${name} streams and cannot be a CLI command`)
 	}
-	const input = meta.inputSchema
+	const input = soleSchema(
+		procedureDefinition(procedure).inputSchemas,
+		`CLI command ${name}`
+	)
 	if (input !== undefined && !(input instanceof z.ZodObject)) {
 		throw new TypeError(
 			`orpc-fn: ${name} must take a z.object() input to be a CLI command`
