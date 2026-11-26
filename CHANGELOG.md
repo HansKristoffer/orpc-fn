@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.12.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.11.0...v0.12.0) (2026-11-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* fnLive runs the subscribe route's guards before every live update, so a stream whose guard now refuses ends with the guard's error. Pass live.rerunGuards: false to keep 0.9.2-0.11.0's open-only check.
+* MountOrpcOptions['openapi'] is now a surface or an array of them; use the exported OpenApiMountOptions<R> type.
+* listTools and prepareMcpTools leave out streams their filter accepts (pass streams: 'throw' for the old error) and drop a string pattern beside a standard format such as uuid or email (pass keepFormatPatterns: true to keep it).
+* useQuery and useLiveQuery no longer take a TQueryKey type parameter; type a helper's query options with ApiQueryOptions.
+
+### Features
+
+* errorStatusOf, walkProcedures and withFnMeta from the root entry ([c103122](https://github.com/HansKristoffer/orpc-fn/commit/c1031222c2ab31d473194fcc331cfb416a3ad73e))
+* filter combinators allOf, anyOf, not and hasTags, and CLIENT_REQUEST_HEADERS from the HTTP adapters ([c103122](https://github.com/HansKristoffer/orpc-fn/commit/c1031222c2ab31d473194fcc331cfb416a3ad73e))
+* MCP tool listings skip streaming procedures and drop patterns that repeat a standard format ([c103122](https://github.com/HansKristoffer/orpc-fn/commit/c1031222c2ab31d473194fcc331cfb416a3ad73e))
+* rerun the route's guards before every live update ([c103122](https://github.com/HansKristoffer/orpc-fn/commit/c1031222c2ab31d473194fcc331cfb416a3ad73e))
+* responseStatusOf and operationPath in orpc-fn/client, and createRpcLink accepts any string url path ([c103122](https://github.com/HansKristoffer/orpc-fn/commit/c1031222c2ab31d473194fcc331cfb416a3ad73e))
+* several OpenAPI surfaces and docs pages, named components, generateOpenApiDocument in orpc-fn/openapi, and errorResponseBodyEncoder ([c103122](https://github.com/HansKristoffer/orpc-fn/commit/c1031222c2ab31d473194fcc331cfb416a3ad73e))
+
+
+### Bug Fixes
+
+* Vue useQuery and useLiveQuery typecheck with recursive outputs such as z.json() ([c103122](https://github.com/HansKristoffer/orpc-fn/commit/c1031222c2ab31d473194fcc331cfb416a3ad73e))
+
 ## [0.11.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.10.0...v0.11.0) (2026-11-26)
 
 
