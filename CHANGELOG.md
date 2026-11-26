@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.13.0...v0.14.0) (2026-11-26)
+
+
+### Features
+
+* maxBodySize per procedure, and batch timing that reports wall-clock ([#45](https://github.com/HansKristoffer/orpc-fn/issues/45)) ([7655ca9](https://github.com/HansKristoffer/orpc-fn/commit/7655ca91bc3c0d727f5116ebcc6ae2490b607330))
+
 ## [0.13.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.12.0...v0.13.0) (2026-11-26)
 
 
