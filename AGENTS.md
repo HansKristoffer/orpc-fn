@@ -28,7 +28,7 @@ Before finishing, walk every surface below and state which applied:
 - **Subpaths:** Check every export in `package.json#exports` and the `orpc-fn` bin; adapter-shaped changes require an explicit decision per adapter (even "not supported").
 - **Transports:** Memory, Bun Redis, and ioredis implement one `PubSubTransport` contract; update all three together.
 - **Types and runtime:** Mirror type-level rules with runtime checks (for JS callers and spread options) and vice versa.
-- **Consumers:** Keep `tests/consumers` (NodeNext + Bundler, TS 5.7 and current) and `examples/adoption` compiling.
+- **Consumers:** Keep `tests/consumers` (NodeNext + Bundler, TS 5.7 and current; `next-pages/` on TS 5.4.5 with `skipLibCheck`, via `test:consumers:next-pages`) and `examples/adoption` compiling.
 - **Reverse states:** Pair every entry with an exit (subscribe/unsubscribe, start/`shutdown()`, drain).
 - **Docs:** Update the matching `README.md` section if public usage changed.
 

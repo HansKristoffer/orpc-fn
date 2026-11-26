@@ -28,6 +28,8 @@ type Ctx = {
 	timing: RequestTiming
 	resHeaders?: Headers
 	user?: { id: string }
+	/** What an app's context factory builds once per HTTP request. */
+	built?: number
 }
 const publicProcedure = os.$context<Ctx>()
 const protectedProcedure = publicProcedure.use(({ context, next }) => {
@@ -40,7 +42,13 @@ const { fn, createRouter } = createFn({
 	logger: () => quiet
 })
 
-const store = new AsyncLocalStorage<{ requestId: string }>()
+/** One per HTTP request: `scope` numbers the `run`, `calls` counts its procedures. */
+const store = new AsyncLocalStorage<{
+	requestId: string
+	scope: number
+	calls: number
+}>()
+let scopes = 0
 let releaseSlow = () => {}
 let slowGate = Promise.resolve()
 const rows = Array.from({ length: 2000 }, (_, id) => ({
@@ -131,6 +139,19 @@ const router = createRouter({
 			return store.getStore()?.requestId ?? null
 		}
 	}),
+	scope: fn({
+		name: 'scope',
+		handler: async ({ context }) => {
+			await new Promise((resolve) => setTimeout(resolve, 1))
+			const scope = store.getStore()
+			if (scope) scope.calls++
+			return {
+				built: context.built ?? null,
+				scope: scope?.scope ?? null,
+				calls: scope?.calls ?? null
+			}
+		}
+	}),
 	upload: fn({
 		name: 'upload',
 		input: z.object({ file: z.instanceof(File) }),
@@ -184,7 +205,11 @@ const adapters: Array<{
 				fetch: (request) =>
 					withStore
 						? store.run(
-								{ requestId: request.headers.get('x-request-id') ?? '' },
+								{
+									requestId: request.headers.get('x-request-id') ?? '',
+									scope: ++scopes,
+									calls: 0
+								},
 								() => handler(request)
 							)
 						: handler(request)
@@ -209,7 +234,11 @@ const adapters: Array<{
 				const run = () => handler(req, res)
 				void (withStore
 					? store.run(
-							{ requestId: String(req.headers['x-request-id'] ?? '') },
+							{
+								requestId: String(req.headers['x-request-id'] ?? ''),
+								scope: ++scopes,
+								calls: 0
+							},
 							run
 						)
 					: run())
@@ -574,6 +603,53 @@ for (const adapter of adapters) {
 			expect(
 				await Promise.all([client.requestId(), client.requestId()])
 			).toEqual(['req-42', 'req-42'])
+		})
+
+		// An app memoises per-request work (one token verification per batch)
+		// on what the factory creates, and reads request state from the scope.
+		test('a batch builds the context once, inside the one AsyncLocalStorage scope around the handler', async () => {
+			let built = 0
+			const builtIn: Array<number | null> = []
+			const url = await serve(
+				{
+					context: (_request, base) => {
+						builtIn.push(store.getStore()?.scope ?? null)
+						return { ...base, built: ++built }
+					}
+				},
+				true
+			)
+			let requests = 0
+			const client: RouterClient<Router> = createORPCClient(
+				createRpcLink({
+					origin: url,
+					url: '/rpc',
+					fetch: (input, init) => {
+						requests++
+						return fetch(input, init)
+					}
+				})
+			)
+
+			const batch = await Promise.all([
+				client.scope(),
+				client.scope(),
+				client.scope()
+			])
+			expect(requests).toBe(1)
+			expect(built).toBe(1)
+			const scope = builtIn[0] ?? null
+			expect(scope).toBeNumber()
+			expect(batch.map((result) => result.built)).toEqual([1, 1, 1])
+			expect(batch.map((result) => result.scope)).toEqual([scope, scope, scope])
+			// Every call counted into the same store object, not a copy per call.
+			expect(batch.map((result) => result.calls).sort()).toEqual([1, 2, 3])
+
+			// The next HTTP request gets a context and a scope of its own.
+			const alone = await client.scope()
+			expect(requests).toBe(2)
+			expect(alone).toEqual({ built: 2, scope: builtIn[1] ?? null, calls: 1 })
+			expect(builtIn[1]).not.toBe(scope)
 		})
 
 		test('files round-trip: upload a File, download a Blob', async () => {

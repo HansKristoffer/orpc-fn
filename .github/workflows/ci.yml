@@ -59,6 +59,8 @@ jobs:
       - run: bun run attw
       - run: bun run publint
       - run: bun run test:consumers
+      # A Next.js Pages Router app on TypeScript 5.4.5 and Zod 3.
+      - run: bun run test:consumers:next-pages
       - run: bun run verify:package
 
   consumers:
@@ -71,7 +73,8 @@ jobs:
         peers: [minimum, latest]
     env:
       PEER_PROFILE: ${{ matrix.peers }}
-      # The floor (README: TypeScript 5.7+); otherwise the repo's own TypeScript.
+      # The floor without skipLibCheck (README: TypeScript 5.7+); otherwise the
+      # repo's own TypeScript. 5.4.5 with skipLibCheck is test:consumers:next-pages.
       TYPESCRIPT_VERSION: ${{ matrix.peers == 'minimum' && '5.7.3' || '' }}
     steps:
       - uses: actions/checkout@v4

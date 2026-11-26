@@ -8,7 +8,7 @@ Your app keeps everything app-specific: auth and session, context shape, databas
 bun add orpc-fn @orpc/server @orpc/contract @orpc/client zod
 ```
 
-ESM only, Node 20+ or Bun, oRPC 2 (`^2.0.0-beta.53`; `@orpc/client` is already a dependency of `@orpc/server`), Zod 4 or 3.25 ([which subpaths need Zod 4 schemas](#zod-325)). TypeScript 5.7+. Optional peers per subpath are listed below. orpc-fn 0.10 was the last release for oRPC 1.
+ESM only, Node 20+ or Bun, oRPC 2 (`^2.0.0-beta.53`; `@orpc/client` is already a dependency of `@orpc/server`), Zod 4 or 3.25 ([which subpaths need Zod 4 schemas](#zod-325)). TypeScript 5.7+, or 5.4+ with `skipLibCheck: true` (the Next.js default): oRPC's declarations need 5.7, orpc-fn's own compile on 5.4, and CI type-checks a Next.js Pages Router app on 5.4.5 against the packed package. Optional peers per subpath are listed below. orpc-fn 0.10 was the last release for oRPC 1.
 
 ### Upgrading from oRPC 1 (orpc-fn 0.10 or older)
 
@@ -586,7 +586,7 @@ useInvalidationStream({}, (o) => o.realtime.subscribeChanges.call, {
 
 ## `orpc-fn/react`
 
-Peers: `react`, `@tanstack/react-query` ^5.66 (`@orpc/tanstack-query` 2, if you use its `queryOptions`, asks for `@tanstack/query-core` 5.105 itself). Works on React Native: pausing follows TanStack's `focusManager`, so wire it to `AppState` once, as TanStack recommends:
+Peers: `react`, `@tanstack/react-query` ^5.66. `@orpc/tanstack-query` 2, if you use its `queryOptions`, needs `@tanstack/query-core` 5.105 and does not run on an old one: on 5.90 and earlier (5.66 included) importing it throws `SyntaxError: ... '@tanstack/query-core' does not provide an export named 'environmentManager'`. The types pass there, so only running it shows this. Works on React Native: pausing follows TanStack's `focusManager`, so wire it to `AppState` once, as TanStack recommends:
 
 ```ts
 focusManager.setEventListener((setFocused) => {
