@@ -190,6 +190,22 @@ describe('createRpcLink', () => {
 		expect(responseStatusOf(new ORPCError('NOT_FOUND'))).toBeUndefined()
 	})
 
+	test('without origin the link fetches the bare path, which a browser resolves against the page', async () => {
+		const seen: string[] = []
+		const sameOrigin: RouterClient<typeof router> = createORPCClient(
+			createRpcLink({
+				url,
+				batch: false,
+				fetch: (path, init) => {
+					seen.push(path)
+					return serve(`${origin}${path}`, init)
+				}
+			})
+		)
+		expect((await sameOrigin.echo({ text: 'a' })).text).toBe('a')
+		expect(seen).toEqual(['/rpc/echo'])
+	})
+
 	test('a full URL as url names the oRPC 2 origin/url split', () => {
 		expect(() => createRpcLink({ url: 'https://api.test/rpc?v=2' })).toThrow(
 			"pass origin: 'https://api.test' and url: '/rpc?v=2'"
