@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.13.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.12.0...v0.13.0) (2026-11-26)
+
+
+### Features
+
+* batch mode and queries-only batching on the link, maxBodySize on the HTTP adapters, wire helpers for tests ([#43](https://github.com/HansKristoffer/orpc-fn/issues/43)) ([364c636](https://github.com/HansKristoffer/orpc-fn/commit/364c636bb95c47002c496db96e701a1ddff0f282))
+
+
+### Bug Fixes
+
+* check a TypeScript 5.4 Next.js consumer and one context per batch; correct README requirements ([#42](https://github.com/HansKristoffer/orpc-fn/issues/42)) ([91e6ac3](https://github.com/HansKristoffer/orpc-fn/commit/91e6ac3a83a61143793489e5459cb233d4e44269))
+
 ## [0.12.0](https://github.com/HansKristoffer/orpc-fn/compare/v0.11.0...v0.12.0) (2026-11-26)
 
 
